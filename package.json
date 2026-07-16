@@ -1,0 +1,17 @@
+{
+  "name": "analog-rytm-agent-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone agent bridge for semantic Analog Rytm control.",
+  "scripts": {
+    "test": "node --experimental-transform-types --test test/*.test.ts",
+    "rust:test": "cd daemon && cargo test",
+    "check": "npm test && npm run rust:test",
+    "demo": "node --experimental-transform-types src/bin/mock-demo.ts"
+  },
+  "engines": {
+    "node": ">=22.14"
+  }
+}
+

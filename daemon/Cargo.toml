@@ -1,0 +1,8 @@
+[package]
+name = "analog-rytm-agent-daemon"
+version = "0.1.0"
+edition = "2021"
+description = "Rust hardware daemon boundary for the Analog Rytm agent bridge."
+
+[dependencies]
+
