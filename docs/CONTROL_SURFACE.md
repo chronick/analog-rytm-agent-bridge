@@ -23,11 +23,13 @@ Full project regeneration is intentionally absent. Summaries describe the active
 
 `set_global_parameter` covers routing flags and USB levels, metronome, MIDI sync, MIDI port behavior, channel assignments, pad/pressure/encoder/mute destinations, sequencer settings, tempo, UI selection, mutes, fixed velocity, and recorder settings.
 
+Scene and Performance definitions are part of the Kit state lane. `set_*_lock`, `replace_*`, `copy_*`, and `clear_*` address public macro IDs 1 through 12. Voice locks use tracks `BD` through `CB`; FX locks use track `FX`. Inspection returns compact semantic parameter names, pages, raw parameter IDs, values or signed depths, per-macro lock counts, unknown-lock counts, and active Scene state. Each macro family has 48 lock slots per Kit; replacement rejects duplicate track/parameter targets before writing.
+
 All writes are delta based. They validate the decoded copy, compare codec-canonical desired state to current state, skip identical declarations, snapshot raw objects, write only changed object families, re-query, and automatically restore the raw baseline on mismatch.
 
 ## Realtime Lane
 
-The hardware daemon exposes track notes, start/stop/continue, program change, generated or observed MIDI clock, and semantic `track_level` through CC 95 or NRPN 1:100. Note-off timing runs in the daemon poll loop. Graceful shutdown sends Stop and All Notes Off on all channels.
+The hardware daemon exposes track notes, start/stop/continue, program change, generated or observed MIDI clock, and semantic `track_level` through CC 95 or NRPN 1:100. It also activates/deactivates Scenes through CC 92 or NRPN 1:104 and sets Performance 1-12 amounts through their documented CC or NRPN 0:0-11 mappings on the configured Performance channel. Scene activation is read back through the Kit; Performance amounts are transient send-cache state because the device does not expose their current values through the Kit dump. Note-off timing runs in the daemon poll loop. Graceful shutdown sends Stop and All Notes Off on all channels.
 
 Persistent operation sets can be queued for next step, beat, measure, pattern, or a specific pattern step. Hardware callers must include the current transport epoch. The durable scheduler emits queued, applied, rejected, and reconciled events; reconnect either rejects or rolls stale work forward according to the declared late policy.
 
@@ -45,6 +47,6 @@ Filesystem writes require stopped transport and are intended for preparation, no
 
 ## Capability Gaps
 
-- Scene definitions, Performance macro definitions, Songs, and their codecs remain disabled pending maintained-fork support.
+- Songs remain disabled pending typed maintained-fork codec and hardware validation.
 - Overbridge is not a control dependency. Class-compliant stereo capture is implemented; Overbridge multitrack capture is a separate milestone.
 - The fork targets firmware 1.70. Successful connected-device round trips are recorded as compatibility evidence, not universal certification for later firmware.

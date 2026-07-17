@@ -31,6 +31,8 @@ npm run check
 npm run demo
 npm run hardware:control
 npm run hardware:control -- --execute
+npm run hardware:macros
+npm run hardware:macros -- --execute
 npm run hardware:audio
 npm run hardware:audio -- --execute
 npm run hardware:samples
@@ -115,10 +117,14 @@ Implemented:
 - inspect +Drive, all 127 RAM slots, and track sample assignments through the pinned Elektroid fork;
 - validate, upload, download, and content-identify WAV samples without duplicate transfers;
 - resolve managed samples into RAM, assign them declaratively to Sounds, verify readback, roll back the Kit, and clear RAM safely.
+- inspect all 12 Scene and Performance definitions with semantic voice/FX lock targets;
+- declaratively set, replace, copy, and clear Scene and Performance locks through revisioned Kit writes;
+- activate or deactivate Scenes and set Performance amounts through transient CC/NRPN controls without changing persistent revision;
+- certify macro operation-set replay, device readback, and exact raw Kit rollback on Analog Rytm OS 1.72.
 
 Not implemented yet:
 
 - Overbridge multitrack capture or DAW automation;
-- scenes, performance macros, and songs.
+- songs.
 
 Those features remain behind capability flags. The current `rytm-rs` adapter targets firmware 1.70; successful decoding on the connected device is recorded as `decoded-unverified` until its exact OS version is independently confirmed.

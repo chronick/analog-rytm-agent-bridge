@@ -15,6 +15,19 @@ export type RytmTrackId =
   | "OH"
   | "CY"
   | "CB";
+export type RytmMacroTrackId = RytmTrackId | "FX";
+
+export interface RytmSceneLockInput {
+  track: RytmMacroTrackId;
+  parameter: string;
+  value: number;
+}
+
+export interface RytmPerformanceLockInput {
+  track: RytmMacroTrackId;
+  parameter: string;
+  depth: number;
+}
 
 export type RytmBoundaryKind = "next_step" | "next_beat" | "next_measure" | "next_pattern";
 export type RytmLatePolicy = "roll-forward" | "reject";
@@ -159,6 +172,48 @@ export type RytmPersistentOperation =
       track: RytmTrackId;
       slot: number;
       sampleId: string;
+    }
+  | {
+      type: "set_scene_lock";
+      scene: number;
+      track: RytmMacroTrackId;
+      parameter: string;
+      value: number;
+    }
+  | {
+      type: "replace_scene";
+      scene: number;
+      locks: RytmSceneLockInput[];
+    }
+  | {
+      type: "clear_scene";
+      scene: number;
+    }
+  | {
+      type: "copy_scene";
+      sourceScene: number;
+      targetScene: number;
+    }
+  | {
+      type: "set_performance_lock";
+      performance: number;
+      track: RytmMacroTrackId;
+      parameter: string;
+      depth: number;
+    }
+  | {
+      type: "replace_performance";
+      performance: number;
+      locks: RytmPerformanceLockInput[];
+    }
+  | {
+      type: "clear_performance";
+      performance: number;
+    }
+  | {
+      type: "copy_performance";
+      sourcePerformance: number;
+      targetPerformance: number;
     };
 
 export interface RytmOperationSetInput {
@@ -244,6 +299,7 @@ export interface RytmBridgeState {
   revision: RytmRevision;
   device: RytmDeviceSummary;
   transport: RytmTransportState;
+  liveMacros: RytmLiveMacroState;
   activePattern: RytmPatternSummary;
   operationSets: QueuedRytmOperationSet[];
   snapshots: RytmStateSnapshot[];
@@ -254,6 +310,24 @@ export interface RytmLiveParameterInput {
   parameter: string;
   value: number;
   lane?: "cc" | "nrpn";
+}
+
+export interface RytmSetActiveSceneInput {
+  scene: number | null;
+  lane?: "cc" | "nrpn";
+}
+
+export interface RytmSetPerformanceMacroInput {
+  performance: number;
+  amount: number;
+  lane?: "cc" | "nrpn";
+}
+
+export interface RytmLiveMacroState {
+  activeScene: number | null;
+  activeSceneSource: "mock" | "observed" | "sent";
+  performanceAmounts: Record<string, number>;
+  performanceAmountsSource: "mock" | "sent" | "unknown";
 }
 
 export interface RytmTriggerTrackInput {
@@ -489,6 +563,8 @@ export type RytmEvent =
     }
   | { type: "operation_set.rejected"; operationSetId: RytmOperationSetId; reason: string }
   | { type: "live.parameter_sent"; input: RytmLiveParameterInput }
+  | { type: "live.scene_sent"; input: RytmSetActiveSceneInput }
+  | { type: "live.performance_sent"; input: RytmSetPerformanceMacroInput }
   | { type: "track.triggered"; input: RytmTriggerTrackInput }
   | { type: "sample.uploaded"; sample: RytmUploadedSample }
   | { type: "sample.ram_resolved"; sample: RytmResolvedSampleRam }

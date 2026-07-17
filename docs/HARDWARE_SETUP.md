@@ -88,6 +88,22 @@ The harness performs an emergency rollback in `finally` if any assertion fails. 
 
 The verification modules are import-safe: importing them does not create a temporary store, start a daemon, or touch the device. They execute only through their CLI entrypoints.
 
+## Scene And Performance Certification
+
+The dry run reads the current Kit, validates all Scene and Performance operations against the decoded firmware object, and projects semantic lock definitions without writing:
+
+```bash
+npm run hardware:macros
+```
+
+The execute form snapshots the raw Kit, exercises set/replace/copy/clear operations for both macro families, verifies exact device readback and operation-set replay, activates Scene 2 through CC with readback, tests Performance 2 through CC and NRPN, restores transient values, then rolls back and compares all 24 definitions to the baseline:
+
+```bash
+npm run hardware:macros -- --execute
+```
+
+Scene and Performance definitions are persistent revisioned Kit state. Active Scene and Performance amounts are live MIDI state and do not change revision. Performance values are send-cache evidence rather than device readback. The harness restores the prior active Scene and sends Performance amount zero before raw rollback; emergency restoration also runs from `finally`.
+
 ## Stereo Audio Certification
 
 Confirm the Rytm is in USB CONFIG `AUDIO/MIDI` and AUDIO ROUTING `USB OUT` is `MAIN OUT`. The dry run lists CoreAudio inputs and validates a stereo 48 kHz f32 configuration without writing device state or recording a file.
@@ -173,7 +189,7 @@ cargo run -- create-demo-patterns --execute ../hardware/runs/my-demo
 - Sound work-buffer readback did not provide a reliable proof for live filter CC validation. The harness verifies track level through the Kit work buffer instead.
 - Notes have no device-state acknowledgement. Confirm their audio separately when building closed-loop tests.
 - Class-compliant capture is one stereo pair at 48 kHz. Overbridge multitrack capture is a later, independent lane.
-- Scenes, performance macros, songs, and project-wide writes remain disabled or outside the current harness.
+- Songs and project-wide writes remain disabled or outside the current harness. Scene and Performance definitions and live controls are certified separately by `hardware:macros`.
 
 ## Power Cycle And Refresh
 

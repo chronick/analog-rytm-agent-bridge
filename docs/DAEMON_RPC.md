@@ -78,6 +78,8 @@ Also implemented by both adapters:
 
 - `operations.queue`
 - `realtime.set_parameter`
+- `realtime.set_scene`
+- `realtime.set_performance`
 - `realtime.trigger_track`
 - `realtime.set_transport`
 - `realtime.change_pattern`
@@ -86,7 +88,9 @@ The mock adapter also has `test.advance_mock_transport` and `test.delay` methods
 
 `audio.start_recording` starts a nonblocking capture. An identical explicit `recordingId` and start declaration replays the original acknowledgement; conflicting start parameters reject. `audio.stop_recording` finalizes the WAV and sidecar and replays a completed result for the same ID. `audio.capture_pattern` performs a bounded blocking capture. The daemon supplies Pattern, Kit, revision, tempo, routing, timestamps, and snapshot context from authoritative state rather than accepting those fields from the caller.
 
-Hardware `operations.apply_now` and `operations.queue` support persistent Pattern, Sound, machine, Kit, FX, Global, routing, MIDI, sequencer, Settings, and identity-checked sample-assignment deltas. Realtime RPC supports track notes, transport, program change, and validated `track_level` through CC 95 or NRPN 1:100.
+Hardware `operations.apply_now` and `operations.queue` support persistent Pattern, Sound, machine, Kit, FX, Global, routing, MIDI, sequencer, Settings, Scene/Performance definitions, and identity-checked sample-assignment deltas. Realtime RPC supports track notes, transport, program change, validated `track_level` through CC 95 or NRPN 1:100, active Scene selection, and Performance amounts.
+
+`realtime.set_scene` accepts `scene: 1..12` or `null`, plus optional lane `cc` or `nrpn`; it verifies active Scene readback and does not change persistent revision. `realtime.set_performance` accepts `performance: 1..12`, `amount: 0..127`, and an optional lane. Performance values are transient and idempotent against the daemon's sent-value cache; they are cleared from that cache on disconnect/reconnect.
 
 Sample RPC uses the pinned Elektroid fork as a separate process. `samples.inspect` returns compact +Drive, RAM, and optional track inventory. `samples.upload` verifies local input and canonical device readback. `samples.resolve_ram` and `samples.clear_ram` are identity guarded and idempotent. The managed registry is stored beside hardware daemon state; see [SAMPLE_MANAGEMENT.md](SAMPLE_MANAGEMENT.md).
 

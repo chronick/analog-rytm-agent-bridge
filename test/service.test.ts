@@ -123,6 +123,73 @@ test("sends realtime operations over the mock transport without changing persist
   assert.equal(service.getState().transport.pattern, "B02");
 });
 
+test("defines, copies, clears, snapshots, and rolls back macro definitions", async () => {
+  const { service } = await createService();
+  await service.snapshotState({ snapshotId: "before-macros" });
+  const applied = await service.applyOperationsNow({
+    operationSetId: "define-macros",
+    expectedRevision: 0,
+    operations: [
+      {
+        type: "replace_scene",
+        scene: 1,
+        locks: [
+          { track: "BD", parameter: "sample_tune", value: 65 },
+          { track: "FX", parameter: "delay_feedback", value: 80 },
+        ],
+      },
+      { type: "copy_scene", sourceScene: 1, targetScene: 2 },
+      { type: "clear_scene", scene: 1 },
+      {
+        type: "replace_performance",
+        performance: 1,
+        locks: [{ track: "SD", parameter: "amp_pan", depth: -32 }],
+      },
+      { type: "copy_performance", sourcePerformance: 1, targetPerformance: 2 },
+      { type: "clear_performance", performance: 1 },
+    ],
+  });
+  assert.equal(applied.status, "applied");
+  assert.equal(applied.resultingRevision, 1);
+
+  const kit = service.inspectKit() as {
+    macros: {
+      scenes: Array<{ id: number; lockCount: number; locks: unknown[] }>;
+      performances: Array<{ id: number; lockCount: number; locks: unknown[] }>;
+    };
+  };
+  assert.equal(kit.macros.scenes[0]?.lockCount, 0);
+  assert.equal(kit.macros.scenes[1]?.lockCount, 2);
+  assert.deepEqual(kit.macros.scenes[1]?.locks, [
+    { track: "BD", parameter: "sample_tune", value: 65 },
+    { track: "FX", parameter: "delay_feedback", value: 80 },
+  ]);
+  assert.equal(kit.macros.performances[0]?.lockCount, 0);
+  assert.equal(kit.macros.performances[1]?.lockCount, 1);
+
+  const rolledBack = await service.rollbackSnapshot({ snapshotId: "before-macros", expectedRevision: 1 });
+  assert.equal(rolledBack.revision, 2);
+  const restored = service.inspectKit() as { macros: { scenes: Array<{ lockCount: number }>; performances: Array<{ lockCount: number }> } };
+  assert.equal(restored.macros.scenes[1]?.lockCount, 0);
+  assert.equal(restored.macros.performances[1]?.lockCount, 0);
+});
+
+test("tracks transient Scene and Performance controls without changing persistent revision", async () => {
+  const { service, transport } = await createService();
+  await service.setActiveScene({ scene: 2, lane: "nrpn" });
+  await service.setPerformanceMacro({ performance: 3, amount: 96, lane: "cc" });
+
+  const state = service.getState();
+  assert.equal(state.revision, 0);
+  assert.equal(state.liveMacros.activeScene, 2);
+  assert.equal(state.liveMacros.performanceAmounts["3"], 96);
+  assert.deepEqual(transport.messages.map((message) => message.type), ["active_scene", "performance_macro"]);
+
+  await service.setActiveScene({ scene: null });
+  assert.equal(service.getState().liveMacros.activeScene, null);
+  assert.equal(service.getState().revision, 0);
+});
+
 test("event journal resumes cursors after restart", async () => {
   const first = await createService();
   await first.service.snapshotState({ snapshotId: "snap-1" });
@@ -131,4 +198,3 @@ test("event journal resumes cursors after restart", async () => {
   await second.service.snapshotState({ snapshotId: "snap-2" });
   assert.deepEqual(second.service.getEvents().map((entry) => entry.cursor), [1, 2]);
 });
-

@@ -27,7 +27,7 @@ const REPLAY_CACHE_LIMIT: usize = 1024;
 const TRACK_NAMES: [&str; 12] = [
     "BD", "SD", "RS", "CP", "BT", "LT", "MT", "HT", "CH", "OH", "CY", "CB",
 ];
-pub const DECLARED_METHODS: [&str; 27] = [
+pub const DECLARED_METHODS: [&str; 29] = [
     "daemon.health",
     "daemon.describe",
     "device.inspect_state",
@@ -40,6 +40,8 @@ pub const DECLARED_METHODS: [&str; 27] = [
     "operations.queue",
     "operations.apply_now",
     "realtime.set_parameter",
+    "realtime.set_scene",
+    "realtime.set_performance",
     "realtime.trigger_track",
     "realtime.set_transport",
     "realtime.change_pattern",
@@ -57,9 +59,9 @@ pub const DECLARED_METHODS: [&str; 27] = [
     "audio.capture_pattern",
 ];
 
-pub const MOCK_IMPLEMENTED_METHODS: [&str; 27] = DECLARED_METHODS;
+pub const MOCK_IMPLEMENTED_METHODS: [&str; 29] = DECLARED_METHODS;
 
-pub const HARDWARE_IMPLEMENTED_METHODS: [&str; 27] = DECLARED_METHODS;
+pub const HARDWARE_IMPLEMENTED_METHODS: [&str; 29] = DECLARED_METHODS;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -370,6 +372,22 @@ impl RpcServer {
                     .map_err(RpcDispatchError::validation),
                 Backend::Hardware(state) => state
                     .set_live_parameter(&request.params)
+                    .map_err(RpcDispatchError::hardware),
+            },
+            "realtime.set_scene" => match &mut self.backend {
+                Backend::Mock(state) => state
+                    .set_active_scene(&request.params)
+                    .map_err(RpcDispatchError::validation),
+                Backend::Hardware(state) => state
+                    .set_active_scene(&request.params)
+                    .map_err(RpcDispatchError::hardware),
+            },
+            "realtime.set_performance" => match &mut self.backend {
+                Backend::Mock(state) => state
+                    .set_performance_macro(&request.params)
+                    .map_err(RpcDispatchError::validation),
+                Backend::Hardware(state) => state
+                    .set_performance_macro(&request.params)
                     .map_err(RpcDispatchError::hardware),
             },
             "realtime.trigger_track" => match &mut self.backend {
@@ -921,14 +939,15 @@ fn hardware_state(
                 "machineEdit": true,
                 "sampleSlotAssignment": true,
                 "sampleTransfer": true,
-                "sceneMacros": false,
-                "performanceMacros": false,
+                "sceneMacros": true,
+                "performanceMacros": true,
                 "songs": false,
                 "classCompliantAudio": true,
                 "overbridgeAudio": false,
             },
         },
         "transport": transport,
+        "liveMacros": summary["liveMacros"].clone(),
         "activePattern": pattern,
         "operationSets": operation_sets,
         "snapshots": snapshots,

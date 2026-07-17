@@ -7,7 +7,7 @@ import { RytmAgentService } from "../src/service/RytmAgentService.ts";
 test("exposes the initial Rytm MCP tool surface", () => {
   const adapter = new RytmMcpAdapter(new RytmAgentService());
   const tools = adapter.listTools();
-  assert.equal(tools.length, 25);
+  assert.equal(tools.length, 27);
   assert.ok(tools.some((tool) => tool.name === "rytm_daemon_health"));
   assert.ok(tools.some((tool) => tool.name === "rytm_inspect_track_sound"));
   assert.ok(tools.some((tool) => tool.name === "rytm_queue_operations"));
@@ -17,6 +17,8 @@ test("exposes the initial Rytm MCP tool surface", () => {
   assert.ok(tools.some((tool) => tool.name === "rytm_upload_sample"));
   assert.ok(tools.some((tool) => tool.name === "rytm_resolve_sample_ram"));
   assert.ok(tools.some((tool) => tool.name === "rytm_clear_sample_ram"));
+  assert.ok(tools.some((tool) => tool.name === "rytm_set_active_scene"));
+  assert.ok(tools.some((tool) => tool.name === "rytm_set_performance_macro"));
 });
 
 test("routes health and compact inspection through an optional daemon boundary", async () => {

@@ -655,6 +655,94 @@ fn apply_persistent_operation(
                 .set_slice_number(usize::from(*slot))
                 .map_err(error_string)
         }
+        PersistentOperation::SetSceneLock {
+            scene,
+            track,
+            parameter,
+            value,
+        } => {
+            let lock = scene_lock(track, parameter, *value)?;
+            project
+                .work_buffer_mut()
+                .kit_mut()
+                .scene_definitions_mut()
+                .set_lock(macro_index(*scene, "scene")?, lock)
+                .map_err(error_string)
+        }
+        PersistentOperation::ReplaceScene { scene, locks } => {
+            let locks = locks
+                .iter()
+                .map(|lock| scene_lock(&lock.track, &lock.parameter, lock.value))
+                .collect::<HardwareResult<Vec<_>>>()?;
+            project
+                .work_buffer_mut()
+                .kit_mut()
+                .scene_definitions_mut()
+                .replace(macro_index(*scene, "scene")?, &locks)
+                .map_err(error_string)
+        }
+        PersistentOperation::ClearScene { scene } => project
+            .work_buffer_mut()
+            .kit_mut()
+            .scene_definitions_mut()
+            .clear(macro_index(*scene, "scene")?)
+            .map_err(error_string),
+        PersistentOperation::CopyScene {
+            source_scene,
+            target_scene,
+        } => project
+            .work_buffer_mut()
+            .kit_mut()
+            .scene_definitions_mut()
+            .copy(
+                macro_index(*source_scene, "sourceScene")?,
+                macro_index(*target_scene, "targetScene")?,
+            )
+            .map_err(error_string),
+        PersistentOperation::SetPerformanceLock {
+            performance,
+            track,
+            parameter,
+            depth,
+        } => {
+            let lock = performance_lock(track, parameter, *depth)?;
+            project
+                .work_buffer_mut()
+                .kit_mut()
+                .performance_definitions_mut()
+                .set_lock(macro_index(*performance, "performance")?, lock)
+                .map_err(error_string)
+        }
+        PersistentOperation::ReplacePerformance { performance, locks } => {
+            let locks = locks
+                .iter()
+                .map(|lock| performance_lock(&lock.track, &lock.parameter, lock.depth))
+                .collect::<HardwareResult<Vec<_>>>()?;
+            project
+                .work_buffer_mut()
+                .kit_mut()
+                .performance_definitions_mut()
+                .replace(macro_index(*performance, "performance")?, &locks)
+                .map_err(error_string)
+        }
+        PersistentOperation::ClearPerformance { performance } => project
+            .work_buffer_mut()
+            .kit_mut()
+            .performance_definitions_mut()
+            .clear(macro_index(*performance, "performance")?)
+            .map_err(error_string),
+        PersistentOperation::CopyPerformance {
+            source_performance,
+            target_performance,
+        } => project
+            .work_buffer_mut()
+            .kit_mut()
+            .performance_definitions_mut()
+            .copy(
+                macro_index(*source_performance, "sourcePerformance")?,
+                macro_index(*target_performance, "targetPerformance")?,
+            )
+            .map_err(error_string),
     }
 }
 
@@ -681,6 +769,132 @@ fn exact_nonnegative_usize(value: f64, label: &str) -> HardwareResult<usize> {
         return Err(format!("{label} must be a non-negative integer"));
     }
     Ok(value as usize)
+}
+
+fn macro_index(value: u8, label: &str) -> HardwareResult<usize> {
+    if !(1..=12).contains(&value) {
+        return Err(format!("{label} must be between 1 and 12"));
+    }
+    Ok(usize::from(value - 1))
+}
+
+fn macro_track(value: &str) -> HardwareResult<MacroTrack> {
+    if value == "FX" {
+        return Ok(MacroTrack::Fx);
+    }
+    MacroTrack::try_voice(parse_track_index(value)?).map_err(error_string)
+}
+
+fn macro_parameter(track: MacroTrack, name: &str) -> HardwareResult<MacroParameter> {
+    let raw_id = match track {
+        MacroTrack::Voice(_) => voice_macro_parameter_id(name),
+        MacroTrack::Fx => fx_macro_parameter_id(name),
+    }
+    .ok_or_else(|| format!("unsupported macro parameter {name:?} for {track:?}"))?;
+    MacroParameter::try_from_raw(track, raw_id).map_err(error_string)
+}
+
+fn scene_lock(track: &str, parameter: &str, value: u8) -> HardwareResult<SceneLock> {
+    let track = macro_track(track)?;
+    SceneLock::try_new(
+        track,
+        macro_parameter(track, parameter)?,
+        usize::from(value),
+    )
+    .map_err(error_string)
+}
+
+fn performance_lock(track: &str, parameter: &str, depth: i8) -> HardwareResult<PerformanceLock> {
+    let track = macro_track(track)?;
+    PerformanceLock::try_new(track, macro_parameter(track, parameter)?, depth).map_err(error_string)
+}
+
+fn voice_macro_parameter_id(name: &str) -> Option<u8> {
+    match name {
+        "machine_parameter_1" => Some(0),
+        "machine_parameter_2" => Some(1),
+        "machine_parameter_3" => Some(2),
+        "machine_parameter_4" => Some(3),
+        "machine_parameter_5" => Some(4),
+        "machine_parameter_6" => Some(5),
+        "machine_parameter_7" => Some(6),
+        "machine_parameter_8" => Some(7),
+        "sample_tune" => Some(8),
+        "sample_fine_tune" => Some(9),
+        "sample_number" => Some(10),
+        "sample_bit_reduction" => Some(11),
+        "sample_start" => Some(12),
+        "sample_end" => Some(13),
+        "sample_loop" => Some(14),
+        "sample_level" => Some(15),
+        "filter_attack" => Some(16),
+        "filter_sustain" => Some(17),
+        "filter_decay" => Some(18),
+        "filter_release" => Some(19),
+        "filter_frequency" | "filter_cutoff" => Some(20),
+        "filter_resonance" => Some(21),
+        "filter_type" => Some(22),
+        "filter_envelope" => Some(23),
+        "amp_attack" => Some(24),
+        "amp_hold" => Some(25),
+        "amp_decay" => Some(26),
+        "amp_overdrive" => Some(27),
+        "amp_delay_send" => Some(28),
+        "amp_reverb_send" => Some(29),
+        "amp_pan" => Some(30),
+        "amp_volume" => Some(31),
+        "lfo_speed" => Some(33),
+        "lfo_multiplier" => Some(34),
+        "lfo_fade" => Some(35),
+        "lfo_destination" => Some(36),
+        "lfo_waveform" => Some(37),
+        "lfo_phase" => Some(38),
+        "lfo_mode" => Some(39),
+        "lfo_depth" => Some(40),
+        _ => None,
+    }
+}
+
+fn fx_macro_parameter_id(name: &str) -> Option<u8> {
+    match name {
+        "delay_time" => Some(0),
+        "delay_ping_pong" => Some(1),
+        "delay_stereo_width" => Some(2),
+        "delay_feedback" => Some(3),
+        "delay_hpf" => Some(4),
+        "delay_lpf" => Some(5),
+        "delay_reverb_send" => Some(6),
+        "delay_volume" => Some(7),
+        "distortion_delay_overdrive" => Some(8),
+        "distortion_delay_post" => Some(9),
+        "reverb_pre_delay" => Some(10),
+        "reverb_decay" => Some(11),
+        "reverb_shelving_frequency" => Some(12),
+        "reverb_shelving_gain" => Some(13),
+        "reverb_hpf" => Some(14),
+        "reverb_lpf" => Some(15),
+        "reverb_volume" => Some(16),
+        "distortion_reverb_post" => Some(17),
+        "distortion_amount" => Some(18),
+        "distortion_symmetry" => Some(19),
+        "compressor_threshold" => Some(21),
+        "compressor_attack" => Some(22),
+        "compressor_release" => Some(23),
+        "compressor_ratio" => Some(24),
+        "compressor_sidechain_eq" => Some(25),
+        "compressor_makeup_gain" => Some(26),
+        "compressor_mix" => Some(27),
+        "compressor_volume" => Some(28),
+        "fx_lfo_speed" => Some(29),
+        "fx_lfo_multiplier" => Some(30),
+        "fx_lfo_fade" => Some(31),
+        "fx_lfo_destination" => Some(32),
+        "fx_lfo_waveform" => Some(33),
+        "fx_lfo_phase" => Some(34),
+        "fx_lfo_mode" => Some(35),
+        "fx_lfo_depth" => Some(36),
+        _ => None,
+    }
 }
 
 fn apply_kit_parameter(
@@ -1761,6 +1975,8 @@ pub fn state_summary(project: &RytmProject) -> Value {
             "inputTransport": format!("{:?}", midi.port_config().input_transport()),
             "outputTransport": format!("{:?}", midi.port_config().output_transport()),
             "autoChannel": format_midi_channel(channels.auto_channel()),
+            "performanceChannel": format_midi_channel(channels.performance_channel()),
+            "trackFxChannel": format_midi_channel(channels.track_fx_channel()),
             "programChangeInChannel": format_midi_channel(channels.program_change_in_channel()),
             "trackChannels": track_channels
         }
@@ -1851,7 +2067,78 @@ fn kit_summary(kit: &Kit) -> Value {
                 control_input_slot(kit.control_in_2_mod_target_4(), kit.control_in_2_mod_amt_4()),
             ],
         },
+        "macros": macro_summary(kit),
     })
+}
+
+fn macro_summary(kit: &Kit) -> Value {
+    let scenes = kit
+        .scene_definitions()
+        .definitions()
+        .into_iter()
+        .map(|definition| {
+            let locks = definition
+                .locks()
+                .iter()
+                .map(|lock| {
+                    json!({
+                        "track": macro_track_name(lock.track()),
+                        "page": format!("{:?}", lock.parameter().page()).to_ascii_lowercase(),
+                        "parameter": lock.parameter().name(),
+                        "rawParameterId": lock.parameter().raw_id(),
+                        "value": lock.value(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "id": definition.id() + 1,
+                "lockCount": definition.lock_count(),
+                "unknownLockCount": definition.unknown_locks().len(),
+                "locks": locks,
+            })
+        })
+        .collect::<Vec<_>>();
+    let performances = kit
+        .performance_definitions()
+        .definitions()
+        .into_iter()
+        .map(|definition| {
+            let locks = definition
+                .locks()
+                .iter()
+                .map(|lock| {
+                    json!({
+                        "track": macro_track_name(lock.track()),
+                        "page": format!("{:?}", lock.parameter().page()).to_ascii_lowercase(),
+                        "parameter": lock.parameter().name(),
+                        "rawParameterId": lock.parameter().raw_id(),
+                        "depth": lock.depth(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "id": definition.id() + 1,
+                "lockCount": definition.lock_count(),
+                "unknownLockCount": definition.unknown_locks().len(),
+                "locks": locks,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "activeScene": kit.current_scene_id().map(|id| id + 1),
+        "activeSceneRaw": kit.current_scene_id_raw(),
+        "scenes": scenes,
+        "performances": performances,
+        "sceneLockCount": kit.scene_definitions().lock_count(),
+        "performanceLockCount": kit.performance_definitions().lock_count(),
+    })
+}
+
+fn macro_track_name(track: MacroTrack) -> &'static str {
+    match track {
+        MacroTrack::Voice(index) => TRACK_NAMES[usize::from(index)],
+        MacroTrack::Fx => "FX",
+    }
 }
 
 fn sound_summary(sound: &Sound, track_index: usize) -> Value {
@@ -2607,5 +2894,69 @@ mod tests {
         assert!(apply_persistent_operation(&mut project, &operation)
             .unwrap_err()
             .contains("assign_sample_slot"));
+    }
+
+    #[test]
+    fn typed_macro_operations_cover_voice_and_fx_targets_idempotently() {
+        let operations: Vec<PersistentOperation> = serde_json::from_value(json!([
+            {
+                "type": "replace_scene",
+                "scene": 1,
+                "locks": [
+                    { "track": "BD", "parameter": "sample_tune", "value": 65 },
+                    { "track": "FX", "parameter": "delay_feedback", "value": 80 }
+                ]
+            },
+            { "type": "copy_scene", "sourceScene": 1, "targetScene": 2 },
+            { "type": "clear_scene", "scene": 1 },
+            {
+                "type": "replace_performance",
+                "performance": 1,
+                "locks": [
+                    { "track": "SD", "parameter": "amp_pan", "depth": -32 },
+                    { "track": "FX", "parameter": "reverb_decay", "depth": 24 }
+                ]
+            },
+            { "type": "copy_performance", "sourcePerformance": 1, "targetPerformance": 2 },
+            { "type": "clear_performance", "performance": 1 }
+        ]))
+        .unwrap();
+        let mut capture = StateCapture {
+            project: RytmProject::try_default().unwrap(),
+            pattern_raw: Vec::new(),
+            kit_raw: Vec::new(),
+            global_raw: Vec::new(),
+            settings_raw: Vec::new(),
+        };
+
+        let changed = apply_persistent_operations(&mut capture, &operations).unwrap();
+        assert!(changed.kit);
+        let macros = &state_summary(&capture.project)["kit"]["macros"];
+        assert_eq!(macros["scenes"][0]["lockCount"], 0);
+        assert_eq!(macros["scenes"][1]["lockCount"], 2);
+        assert_eq!(macros["scenes"][1]["locks"][0]["track"], "BD");
+        assert_eq!(macros["scenes"][1]["locks"][0]["parameter"], "sample_tune");
+        assert_eq!(macros["scenes"][1]["locks"][0]["value"], 65);
+        assert_eq!(macros["scenes"][1]["locks"][1]["track"], "FX");
+        assert_eq!(macros["performances"][0]["lockCount"], 0);
+        assert_eq!(macros["performances"][1]["lockCount"], 2);
+        assert_eq!(macros["performances"][1]["locks"][0]["track"], "SD");
+        assert_eq!(macros["performances"][1]["locks"][0]["depth"], -32);
+        assert_eq!(macros["performances"][1]["locks"][1]["track"], "FX");
+
+        let second = apply_persistent_operations(&mut capture, &operations).unwrap();
+        assert!(!second.any());
+
+        let invalid: PersistentOperation = serde_json::from_value(json!({
+            "type": "set_scene_lock",
+            "scene": 1,
+            "track": "FX",
+            "parameter": "sample_tune",
+            "value": 65
+        }))
+        .unwrap();
+        assert!(apply_persistent_operation(&mut capture.project, &invalid)
+            .unwrap_err()
+            .contains("unsupported macro parameter"));
     }
 }

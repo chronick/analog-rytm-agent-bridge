@@ -39,6 +39,8 @@ test("TypeScript client completes a real round trip through the Rust mock daemon
     assert.ok(health.methods.implemented.includes("sound.inspect"));
     assert.ok(health.methods.implemented.includes("audio.capture_pattern"));
     assert.ok(health.methods.implemented.includes("samples.resolve_ram"));
+    assert.ok(health.methods.implemented.includes("realtime.set_scene"));
+    assert.ok(health.methods.implemented.includes("realtime.set_performance"));
 
     const state = await client.inspectDeviceState() as {
       device: { activePattern: string };
@@ -114,6 +116,15 @@ test("TypeScript client completes a real round trip through the Rust mock daemon
     await facade.callTool("rytm_trigger_track", { track: "BD", velocity: 100 });
     await facade.callTool("rytm_set_transport", { command: "start", tempo: 132 });
     await facade.callTool("rytm_change_pattern", { pattern: "B02", immediate: true });
+    await facade.callTool("rytm_set_active_scene", { scene: 2, lane: "nrpn" });
+    await facade.callTool("rytm_set_performance_macro", { performance: 3, amount: 96, lane: "cc" });
+    const liveMacroState = await client.inspectDeviceState() as {
+      revision: number;
+      liveMacros: { activeScene: number | null; performanceAmounts: Record<string, number> };
+    };
+    assert.equal(liveMacroState.revision, 3);
+    assert.equal(liveMacroState.liveMacros.activeScene, 2);
+    assert.equal(liveMacroState.liveMacros.performanceAmounts["3"], 96);
 
     const audioInputs = await facade.callTool("rytm_list_audio_inputs", {}) as {
       inputs: Array<{ name: string; defaultConfig: { channels: number } }>;
@@ -245,6 +256,8 @@ test("TypeScript client completes a real round trip through the Rust mock daemon
     assert.ok(eventTypes.includes("operation_set.applied"));
     assert.ok(eventTypes.includes("snapshot.rolled_back"));
     assert.ok(eventTypes.includes("live.parameter_sent"));
+    assert.ok(eventTypes.includes("live.scene_sent"));
+    assert.ok(eventTypes.includes("live.performance_sent"));
     assert.ok(rpcEvents.some((event) => event.type === "operation_set.applied"));
     unsubscribe();
 

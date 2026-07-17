@@ -8,7 +8,7 @@ description = "Rust hardware daemon boundary for the Analog Rytm agent bridge."
 cpal = "0.18.1"
 hound = "3.5.1"
 midir = "0.11.0"
-rytm-rs = { git = "https://github.com/chronick/rytm-rs.git", rev = "63c14d513e7e319a94cff515267387d9a180e4d1" }
+rytm-rs = { git = "https://github.com/chronick/rytm-rs.git", rev = "4d4f4976d7ccc076ac67a3e54c57012bebf7e886" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10.9"

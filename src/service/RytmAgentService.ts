@@ -9,15 +9,20 @@ import type {
   RytmDeviceSummary,
   RytmEvent,
   RytmLiveParameterInput,
+  RytmLiveMacroState,
   RytmOperationSetDryRun,
   RytmOperationSetInput,
   RytmPatternDeltaInput,
   RytmPatternSlot,
   RytmPatternSummary,
   RytmPatternTrigSummary,
+  RytmPerformanceLockInput,
   RytmPersistentOperation,
   RytmRollbackInput,
+  RytmSetActiveSceneInput,
+  RytmSetPerformanceMacroInput,
   RytmSetTransportInput,
+  RytmSceneLockInput,
   RytmSnapshotInput,
   RytmStateSnapshot,
   RytmTrackId,
@@ -31,6 +36,8 @@ import {
   validateLiveParameterInput,
   validateOperationSetInput,
   validateSetTransportInput,
+  validateSetActiveSceneInput,
+  validateSetPerformanceMacroInput,
   validateSnapshotInput,
   validateTriggerTrackInput,
 } from "../domain/validation.ts";
@@ -65,6 +72,8 @@ interface SnapshotRecord {
   patterns: Map<RytmPatternSlot, InternalPattern>;
 }
 
+type MockMacroLock = RytmSceneLockInput | RytmPerformanceLockInput;
+
 export interface RytmAgentServiceOptions {
   sessionDirectory?: string;
   transport?: MockRytmTransport;
@@ -84,6 +93,12 @@ export class RytmAgentService {
   private readonly snapshots = new Map<string, SnapshotRecord>();
   private readonly patterns = new Map<RytmPatternSlot, InternalPattern>();
   private readonly device: RytmDeviceSummary;
+  private liveMacros: RytmLiveMacroState = {
+    activeScene: null,
+    activeSceneSource: "mock",
+    performanceAmounts: {},
+    performanceAmountsSource: "mock",
+  };
   private transportState: RytmBridgeState["transport"] = {
     epoch: "mock-epoch-1",
     playing: false,
@@ -123,6 +138,7 @@ export class RytmAgentService {
       revision: this.revision,
       device: { ...this.device, connected: this.device.connected && this.transport.connected, activePattern: this.activePattern },
       transport: this.transportState,
+      liveMacros: this.liveMacros,
       activePattern: this.inspectPattern(this.activePattern),
       operationSets: recentValues(this.operationSets, exposedHistoryLimit),
       snapshots: recentValues(this.snapshots, exposedHistoryLimit).map((snapshot) => snapshot.summary),
@@ -148,6 +164,7 @@ export class RytmAgentService {
       sounds: rytmTrackIds.map((track) => this.inspectSound(track)),
       fx: { delay: {}, reverb: {}, distortion: {}, compressor: {}, lfo: {} },
       controlInputs: { input1: [], input2: [] },
+      macros: summarizeMockMacros(this.ensurePattern(this.activePattern), this.liveMacros.activeScene),
     };
   }
 
@@ -307,6 +324,33 @@ export class RytmAgentService {
     validateLiveParameterInput(input, this.device.capabilities);
     await this.transport.sendLiveParameter(input);
     await this.appendEvent({ type: "live.parameter_sent", input });
+    return structuredClone(input);
+  }
+
+  async setActiveScene(input: RytmSetActiveSceneInput): Promise<RytmSetActiveSceneInput> {
+    validateSetActiveSceneInput(input, this.device.capabilities);
+    await this.transport.setActiveScene(input);
+    this.liveMacros = {
+      ...this.liveMacros,
+      activeScene: input.scene,
+      activeSceneSource: "mock",
+    };
+    await this.appendEvent({ type: "live.scene_sent", input });
+    return structuredClone(input);
+  }
+
+  async setPerformanceMacro(input: RytmSetPerformanceMacroInput): Promise<RytmSetPerformanceMacroInput> {
+    validateSetPerformanceMacroInput(input, this.device.capabilities);
+    await this.transport.setPerformanceMacro(input);
+    this.liveMacros = {
+      ...this.liveMacros,
+      performanceAmounts: {
+        ...this.liveMacros.performanceAmounts,
+        [String(input.performance)]: input.amount,
+      },
+      performanceAmountsSource: "mock",
+    };
+    await this.appendEvent({ type: "live.performance_sent", input });
     return structuredClone(input);
   }
 
@@ -558,6 +602,64 @@ function applyOperationsToPatterns(
       case "assign_sample_slot":
         ensurePattern(patterns, operation.pattern ?? activePattern).sampleSlots.set(operation.track, { slot: operation.slot, sampleId: operation.sampleId });
         break;
+      case "set_scene_lock": {
+        const pattern = ensurePattern(patterns, activePattern);
+        const locks = mockMacroLocks(pattern, "scene", operation.scene);
+        const target = locks.findIndex((lock) => lock.track === operation.track && lock.parameter === operation.parameter);
+        const lock = { track: operation.track, parameter: operation.parameter, value: operation.value };
+        if (target >= 0) locks[target] = lock;
+        else locks.push(lock);
+        setMockMacroLocks(pattern, "scene", operation.scene, locks);
+        break;
+      }
+      case "replace_scene":
+        setMockMacroLocks(
+          ensurePattern(patterns, activePattern),
+          "scene",
+          operation.scene,
+          operation.locks.map((lock) => ({ ...lock })),
+        );
+        break;
+      case "clear_scene":
+        setMockMacroLocks(ensurePattern(patterns, activePattern), "scene", operation.scene, []);
+        break;
+      case "copy_scene":
+        setMockMacroLocks(
+          ensurePattern(patterns, activePattern),
+          "scene",
+          operation.targetScene,
+          mockMacroLocks(ensurePattern(patterns, activePattern), "scene", operation.sourceScene),
+        );
+        break;
+      case "set_performance_lock": {
+        const pattern = ensurePattern(patterns, activePattern);
+        const locks = mockMacroLocks(pattern, "performance", operation.performance);
+        const target = locks.findIndex((lock) => lock.track === operation.track && lock.parameter === operation.parameter);
+        const lock = { track: operation.track, parameter: operation.parameter, depth: operation.depth };
+        if (target >= 0) locks[target] = lock;
+        else locks.push(lock);
+        setMockMacroLocks(pattern, "performance", operation.performance, locks);
+        break;
+      }
+      case "replace_performance":
+        setMockMacroLocks(
+          ensurePattern(patterns, activePattern),
+          "performance",
+          operation.performance,
+          operation.locks.map((lock) => ({ ...lock })),
+        );
+        break;
+      case "clear_performance":
+        setMockMacroLocks(ensurePattern(patterns, activePattern), "performance", operation.performance, []);
+        break;
+      case "copy_performance":
+        setMockMacroLocks(
+          ensurePattern(patterns, activePattern),
+          "performance",
+          operation.targetPerformance,
+          mockMacroLocks(ensurePattern(patterns, activePattern), "performance", operation.sourcePerformance),
+        );
+        break;
     }
   }
 }
@@ -610,6 +712,41 @@ function clonePattern(pattern: InternalPattern, slot: RytmPatternSlot): Internal
   };
 }
 
+function mockMacroKey(family: "scene" | "performance", id: number): string {
+  return "macros." + family + "." + id;
+}
+
+function mockMacroLocks(pattern: InternalPattern, family: "scene" | "performance", id: number): MockMacroLock[] {
+  const value = pattern.kitParameters.get(mockMacroKey(family, id));
+  return Array.isArray(value) ? structuredClone(value) as MockMacroLock[] : [];
+}
+
+function setMockMacroLocks(
+  pattern: InternalPattern,
+  family: "scene" | "performance",
+  id: number,
+  locks: MockMacroLock[],
+): void {
+  pattern.kitParameters.set(mockMacroKey(family, id), structuredClone(locks));
+}
+
+function summarizeMockMacros(pattern: InternalPattern, activeScene: number | null): Record<string, unknown> {
+  return {
+    activeScene,
+    activeSceneRaw: activeScene === null ? 255 : activeScene - 1,
+    scenes: Array.from({ length: 12 }, (_, index) => {
+      const id = index + 1;
+      const locks = mockMacroLocks(pattern, "scene", id);
+      return { id, lockCount: locks.length, locks };
+    }),
+    performances: Array.from({ length: 12 }, (_, index) => {
+      const id = index + 1;
+      const locks = mockMacroLocks(pattern, "performance", id);
+      return { id, lockCount: locks.length, locks };
+    }),
+  };
+}
+
 function defaultCapabilities(): RytmCapabilities {
   return {
     realtimeMidi: true,
@@ -619,8 +756,8 @@ function defaultCapabilities(): RytmCapabilities {
     machineEdit: true,
     sampleSlotAssignment: false,
     sampleTransfer: false,
-    sceneMacros: false,
-    performanceMacros: false,
+    sceneMacros: true,
+    performanceMacros: true,
     songs: false,
     classCompliantAudio: true,
     overbridgeAudio: false,

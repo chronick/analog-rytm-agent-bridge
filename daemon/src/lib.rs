@@ -73,8 +73,8 @@ pub fn mock_description() -> DaemonDescription {
             machine_edit: true,
             sample_slot_assignment: true,
             sample_transfer: true,
-            scene_macros: false,
-            performance_macros: false,
+            scene_macros: true,
+            performance_macros: true,
             songs: false,
             class_compliant_audio: true,
             overbridge_audio: false,
@@ -103,8 +103,8 @@ pub fn hardware_description() -> DaemonDescription {
             machine_edit: true,
             sample_slot_assignment: true,
             sample_transfer: true,
-            scene_macros: false,
-            performance_macros: false,
+            scene_macros: true,
+            performance_macros: true,
             songs: false,
             class_compliant_audio: true,
             overbridge_audio: false,
@@ -192,7 +192,7 @@ mod tests {
         assert!(description.capabilities.realtime_midi);
         assert!(description.capabilities.pattern_edit);
         assert!(description.capabilities.sample_transfer);
-        assert!(!description.capabilities.performance_macros);
+        assert!(description.capabilities.performance_macros);
         assert_eq!(description.firmware.compatibility, Compatibility::Mock);
     }
 
@@ -202,5 +202,17 @@ mod tests {
         assert!(json.contains("\"schema\":\"analog-rytm-daemon.v1\""));
         assert!(json.contains("\"sampleTransfer\":true"));
         assert!(json.contains("\"adapter\":\"mock\""));
+    }
+
+    #[test]
+    fn hardware_description_advertises_certified_macro_workflows() {
+        let description = hardware_description();
+        assert!(description.capabilities.scene_macros);
+        assert!(description.capabilities.performance_macros);
+        assert!(!description.capabilities.songs);
+        assert_eq!(
+            description.firmware.compatibility,
+            Compatibility::Unverified
+        );
     }
 }

@@ -3,8 +3,13 @@ import type {
   RytmCapabilities,
   RytmChangePatternInput,
   RytmLiveParameterInput,
+  RytmMacroTrackId,
   RytmOperationSetInput,
+  RytmPerformanceLockInput,
   RytmPersistentOperation,
+  RytmSceneLockInput,
+  RytmSetActiveSceneInput,
+  RytmSetPerformanceMacroInput,
   RytmSetTransportInput,
   RytmSnapshotInput,
   RytmTrackId,
@@ -152,6 +157,56 @@ export function validatePersistentOperation(operation: RytmPersistentOperation, 
       assertIntegerRange(operation.slot, "slot", 0, 127);
       assertSafeId(operation.sampleId, "sampleId");
       return;
+
+    case "set_scene_lock":
+      requireCapability(capabilities.sceneMacros, "sceneMacros");
+      validateMacroId(operation.scene, "scene");
+      validateSceneLock(operation);
+      return;
+
+    case "replace_scene":
+      requireCapability(capabilities.sceneMacros, "sceneMacros");
+      validateMacroId(operation.scene, "scene");
+      validateMacroLocks(operation.locks, validateSceneLock);
+      return;
+
+    case "clear_scene":
+      requireCapability(capabilities.sceneMacros, "sceneMacros");
+      validateMacroId(operation.scene, "scene");
+      return;
+
+    case "copy_scene":
+      requireCapability(capabilities.sceneMacros, "sceneMacros");
+      validateMacroId(operation.sourceScene, "sourceScene");
+      validateMacroId(operation.targetScene, "targetScene");
+      if (operation.sourceScene === operation.targetScene) throw new Error("copy_scene source and target must differ");
+      return;
+
+    case "set_performance_lock":
+      requireCapability(capabilities.performanceMacros, "performanceMacros");
+      validateMacroId(operation.performance, "performance");
+      validatePerformanceLock(operation);
+      return;
+
+    case "replace_performance":
+      requireCapability(capabilities.performanceMacros, "performanceMacros");
+      validateMacroId(operation.performance, "performance");
+      validateMacroLocks(operation.locks, validatePerformanceLock);
+      return;
+
+    case "clear_performance":
+      requireCapability(capabilities.performanceMacros, "performanceMacros");
+      validateMacroId(operation.performance, "performance");
+      return;
+
+    case "copy_performance":
+      requireCapability(capabilities.performanceMacros, "performanceMacros");
+      validateMacroId(operation.sourcePerformance, "sourcePerformance");
+      validateMacroId(operation.targetPerformance, "targetPerformance");
+      if (operation.sourcePerformance === operation.targetPerformance) {
+        throw new Error("copy_performance source and target must differ");
+      }
+      return;
   }
 }
 
@@ -191,6 +246,24 @@ export function validateLiveParameterInput(input: RytmLiveParameterInput, capabi
   if (input.lane !== undefined && input.lane !== "cc" && input.lane !== "nrpn") throw new Error("lane must be cc or nrpn");
 }
 
+export function validateSetActiveSceneInput(input: RytmSetActiveSceneInput, capabilities: RytmCapabilities): void {
+  requireCapability(capabilities.realtimeMidi, "realtimeMidi");
+  requireCapability(capabilities.sceneMacros, "sceneMacros");
+  if (input.scene !== null) validateMacroId(input.scene, "scene");
+  validateRealtimeLane(input.lane);
+}
+
+export function validateSetPerformanceMacroInput(
+  input: RytmSetPerformanceMacroInput,
+  capabilities: RytmCapabilities,
+): void {
+  requireCapability(capabilities.realtimeMidi, "realtimeMidi");
+  requireCapability(capabilities.performanceMacros, "performanceMacros");
+  validateMacroId(input.performance, "performance");
+  assertIntegerRange(input.amount, "amount", 0, 127);
+  validateRealtimeLane(input.lane);
+}
+
 export function validateTriggerTrackInput(input: RytmTriggerTrackInput, capabilities: RytmCapabilities): void {
   requireCapability(capabilities.realtimeMidi, "realtimeMidi");
   assertTrackId(input.track);
@@ -217,6 +290,45 @@ export function validateSnapshotInput(input: RytmSnapshotInput): void {
 function validateTrackStep(track: string, step: number): void {
   assertTrackId(track);
   assertIntegerRange(step, "step", 0, 63);
+}
+
+function validateMacroId(value: number, label: string): void {
+  assertIntegerRange(value, label, 1, 12);
+}
+
+function validateMacroTrack(track: RytmMacroTrackId): void {
+  if (track !== "FX") assertTrackId(track, "macro track");
+}
+
+function validateSceneLock(lock: RytmSceneLockInput): void {
+  validateMacroTrack(lock.track);
+  assertSafeId(lock.parameter, "parameter");
+  assertIntegerRange(lock.value, "value", 0, 127);
+}
+
+function validatePerformanceLock(lock: RytmPerformanceLockInput): void {
+  validateMacroTrack(lock.track);
+  assertSafeId(lock.parameter, "parameter");
+  assertIntegerRange(lock.depth, "depth", -128, 127);
+}
+
+function validateMacroLocks<T extends RytmSceneLockInput | RytmPerformanceLockInput>(
+  locks: T[],
+  validate: (lock: T) => void,
+): void {
+  if (!Array.isArray(locks)) throw new Error("locks must be an array");
+  if (locks.length > 48) throw new Error("a Kit has at most 48 locks per macro family");
+  const targets = new Set<string>();
+  for (const lock of locks) {
+    validate(lock);
+    const target = lock.track + "." + lock.parameter;
+    if (targets.has(target)) throw new Error("macro locks contain duplicate target: " + target);
+    targets.add(target);
+  }
+}
+
+function validateRealtimeLane(lane: "cc" | "nrpn" | undefined): void {
+  if (lane !== undefined && lane !== "cc" && lane !== "nrpn") throw new Error("lane must be cc or nrpn");
 }
 
 function requireCapability(enabled: boolean, name: keyof RytmCapabilities): void {

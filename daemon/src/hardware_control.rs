@@ -18,6 +18,7 @@ use crate::{
 };
 use serde_json::{json, Value};
 use std::{
+    collections::BTreeMap,
     path::Path,
     time::{Duration, Instant},
 };
@@ -44,6 +45,7 @@ pub struct HardwareBridgeState {
     pending_note_offs: Vec<PendingNoteOff>,
     disconnected_reported: bool,
     force_next_verification_failure: bool,
+    performance_amounts: BTreeMap<String, u8>,
     samples: SampleService,
 }
 
@@ -64,6 +66,7 @@ impl HardwareBridgeState {
             pending_note_offs: Vec::new(),
             disconnected_reported: false,
             force_next_verification_failure,
+            performance_amounts: BTreeMap::new(),
             samples: SampleService::hardware(state_path, port_match)?,
         };
         state.try_reconnect()?;
@@ -109,7 +112,7 @@ impl HardwareBridgeState {
     pub fn inspect_summary(&mut self) -> Result<Value, String> {
         let summary = self.with_session(inspect_work_buffer_state)?;
         self.observe_summary(&summary, "inspect")?;
-        Ok(summary)
+        Ok(self.with_live_macro_state(summary))
     }
 
     pub fn inspect_pattern(&mut self, pattern_index: usize) -> Result<Value, String> {
@@ -117,7 +120,18 @@ impl HardwareBridgeState {
     }
 
     pub fn inspect_kit(&mut self) -> Result<Value, String> {
-        self.inspect_summary().map(|summary| summary["kit"].clone())
+        self.inspect_summary().map(|summary| {
+            let mut kit = summary["kit"].clone();
+            kit["macros"]["livePerformanceAmounts"] =
+                serde_json::to_value(&self.performance_amounts).unwrap_or_else(|_| json!({}));
+            kit["macros"]["livePerformanceAmountsSource"] =
+                json!(if self.performance_amounts.is_empty() {
+                    "unknown"
+                } else {
+                    "sent"
+                });
+            kit
+        })
     }
 
     pub fn inspect_sound(&mut self, track_index: usize) -> Result<Value, String> {
@@ -346,6 +360,125 @@ impl HardwareBridgeState {
         });
         self.scheduler
             .append_event(json!({ "type": "live.parameter_sent", "input": result }));
+        self.scheduler.persist()?;
+        Ok(result)
+    }
+
+    pub fn set_active_scene(&mut self, params: &Value) -> Result<Value, String> {
+        let object = require_object(params)?;
+        let scene = match object.get("scene") {
+            Some(Value::Null) => None,
+            Some(value) => {
+                let scene = value.as_u64().ok_or_else(|| {
+                    "scene must be null or an integer between 1 and 12".to_string()
+                })?;
+                if !(1..=12).contains(&scene) {
+                    return Err("scene must be null or an integer between 1 and 12".to_string());
+                }
+                Some(scene as u8)
+            }
+            None => return Err("params.scene is required".to_string()),
+        };
+        let lane = optional_string(object, "lane")?.unwrap_or("cc");
+        if lane != "cc" && lane != "nrpn" {
+            return Err("lane must be cc or nrpn".to_string());
+        }
+        let baseline = self.with_session(inspect_work_buffer_state)?;
+        let previous = summary_active_scene(&baseline)?;
+        let channel = summary_performance_channel(&baseline)?;
+        if previous == scene {
+            return Ok(json!({
+                "scene": scene,
+                "lane": lane,
+                "channel": channel + 1,
+                "status": "already-active",
+                "verified": true,
+            }));
+        }
+
+        let write_result = (|| -> Result<Value, String> {
+            self.with_session(|session| send_active_scene(session, channel, scene, lane))?;
+            let observed = self.with_session(inspect_work_buffer_state)?;
+            if summary_active_scene(&observed)? != scene {
+                return Err("active Scene readback did not match the requested value".to_string());
+            }
+            Ok(observed)
+        })();
+        let observed = match write_result {
+            Ok(observed) => observed,
+            Err(write_error) => {
+                self.with_session(|session| {
+                    send_active_scene(session, channel, previous, lane)
+                })
+                .map_err(|rollback_error| {
+                    format!(
+                        "active Scene write failed: {write_error}; transient rollback also failed: {rollback_error}"
+                    )
+                })?;
+                let restored = self.with_session(inspect_work_buffer_state)?;
+                if summary_active_scene(&restored)? != previous {
+                    return Err(format!(
+                        "active Scene write failed: {write_error}; transient rollback verification failed"
+                    ));
+                }
+                return Err(format!(
+                    "active Scene write failed and previous Scene was restored: {write_error}"
+                ));
+            }
+        };
+        self.scheduler.state.last_observed_state = Some(observed);
+        let result = json!({
+            "scene": scene,
+            "lane": lane,
+            "channel": channel + 1,
+            "status": if scene.is_some() { "activated-and-verified" } else { "deactivated-and-verified" },
+            "verified": true,
+        });
+        self.scheduler
+            .append_event(json!({ "type": "live.scene_sent", "input": result }));
+        self.scheduler.persist()?;
+        Ok(result)
+    }
+
+    pub fn set_performance_macro(&mut self, params: &Value) -> Result<Value, String> {
+        let object = require_object(params)?;
+        let performance = required_u64(object.get("performance"), "performance")?;
+        if !(1..=12).contains(&performance) {
+            return Err("performance must be between 1 and 12".to_string());
+        }
+        let amount = required_u64(object.get("amount"), "amount")?;
+        if amount > 127 {
+            return Err("amount must be between 0 and 127".to_string());
+        }
+        let lane = optional_string(object, "lane")?.unwrap_or("cc");
+        if lane != "cc" && lane != "nrpn" {
+            return Err("lane must be cc or nrpn".to_string());
+        }
+        let key = performance.to_string();
+        if self.performance_amounts.get(&key) == Some(&(amount as u8)) {
+            return Ok(json!({
+                "performance": performance,
+                "amount": amount,
+                "lane": lane,
+                "status": "already-sent",
+                "source": "sent-cache",
+            }));
+        }
+        let channel = self.performance_channel()?;
+        self.with_session(|session| {
+            send_performance_amount(session, channel, performance as u8, amount as u8, lane)
+        })?;
+        self.performance_amounts.insert(key, amount as u8);
+        let result = json!({
+            "performance": performance,
+            "amount": amount,
+            "lane": lane,
+            "channel": channel + 1,
+            "status": "sent",
+            "source": "sent-cache",
+        });
+        self.scheduler
+            .append_event(json!({ "type": "live.performance_sent", "input": result }));
         self.scheduler.persist()?;
         Ok(result)
     }
@@ -673,6 +806,7 @@ impl HardwareBridgeState {
             }
         }
         self.session = None;
+        self.performance_amounts.clear();
         self.scheduler.state.transport.playing = false;
         self.next_generated_clock = None;
         self.scheduler.append_event(json!({
@@ -710,6 +844,7 @@ impl HardwareBridgeState {
         let input_name = session.input_name.clone();
         let output_name = session.output_name.clone();
         self.session = Some(session);
+        self.performance_amounts.clear();
         self.disconnected_reported = false;
 
         let previous = self.scheduler.state.last_observed_state.clone();
@@ -773,6 +908,7 @@ impl HardwareBridgeState {
 
     fn mark_disconnected(&mut self, reason: &str) {
         self.session = None;
+        self.performance_amounts.clear();
         self.scheduler.state.transport.playing = false;
         self.next_generated_clock = None;
         self.next_reconnect_at = Instant::now() + RECONNECT_INTERVAL;
@@ -1169,6 +1305,86 @@ impl HardwareBridgeState {
         }
         concrete_summary_channel(configured, "program change input")
     }
+
+    fn performance_channel(&self) -> Result<u8, String> {
+        let summary = self
+            .scheduler
+            .state
+            .last_observed_state
+            .as_ref()
+            .ok_or_else(|| "MIDI configuration has not been observed".to_string())?;
+        concrete_summary_channel(
+            &summary["midi"]["performanceChannel"],
+            "Performance channel",
+        )
+    }
+
+    fn with_live_macro_state(&self, mut summary: Value) -> Value {
+        summary["liveMacros"] = json!({
+            "activeScene": summary["kit"]["macros"]["activeScene"].clone(),
+            "activeSceneSource": "observed",
+            "performanceAmounts": self.performance_amounts,
+            "performanceAmountsSource": if self.performance_amounts.is_empty() {
+                "unknown"
+            } else {
+                "sent"
+            },
+        });
+        summary
+    }
+}
+
+fn send_active_scene(
+    session: &mut RytmMidiSession,
+    channel: u8,
+    scene: Option<u8>,
+    lane: &str,
+) -> Result<(), String> {
+    let value = scene.unwrap_or(0);
+    match lane {
+        "cc" => send_cc(session, channel, 92, value),
+        "nrpn" => send_nrpn(session, channel, 1, 104, value),
+        _ => Err("lane must be cc or nrpn".to_string()),
+    }?;
+    std::thread::sleep(Duration::from_millis(75));
+    Ok(())
+}
+
+fn send_performance_amount(
+    session: &mut RytmMidiSession,
+    channel: u8,
+    performance: u8,
+    amount: u8,
+    lane: &str,
+) -> Result<(), String> {
+    const PERFORMANCE_CC: [u8; 12] = [35, 36, 37, 39, 40, 41, 42, 43, 44, 45, 46, 47];
+    let index = usize::from(performance - 1);
+    match lane {
+        "cc" => send_cc(session, channel, PERFORMANCE_CC[index], amount),
+        "nrpn" => send_nrpn(session, channel, 0, performance - 1, amount),
+        _ => Err("lane must be cc or nrpn".to_string()),
+    }
+}
+
+fn summary_active_scene(summary: &Value) -> Result<Option<u8>, String> {
+    match &summary["kit"]["macros"]["activeScene"] {
+        Value::Null => Ok(None),
+        value => {
+            let scene = value
+                .as_u64()
+                .ok_or_else(|| "active Scene summary is invalid".to_string())?;
+            u8::try_from(scene)
+                .map(Some)
+                .map_err(|_| "active Scene summary is out of range".to_string())
+        }
+    }
+}
+
+fn summary_performance_channel(summary: &Value) -> Result<u8, String> {
+    concrete_summary_channel(
+        &summary["midi"]["performanceChannel"],
+        "Performance channel",
+    )
 }
 
 fn require_stopped_transport_for_sample_write(playing: bool) -> Result<(), String> {
@@ -1200,6 +1416,8 @@ fn compact_object_state(summary: &Value) -> Value {
 }
 
 fn changed_between(current: &Value, target: &Value) -> ChangedObjects {
+    let current = persistent_summary_view(current);
+    let target = persistent_summary_view(target);
     ChangedObjects {
         pattern: current["pattern"] != target["pattern"],
         kit: current["kit"] != target["kit"],
@@ -1209,11 +1427,31 @@ fn changed_between(current: &Value, target: &Value) -> ChangedObjects {
 }
 
 fn reconciliation_view(summary: &Value, transport_playing: bool) -> Value {
-    let mut view = summary.clone();
+    let mut view = persistent_summary_view(summary);
     if transport_playing {
         view["settings"]["tempo"] = json!("external-clock-active");
         view["pattern"]["tempo"] = json!("external-clock-active");
     }
+    view
+}
+
+fn persistent_summary_view(summary: &Value) -> Value {
+    let mut view = summary.clone();
+    if view["kit"]["macros"].is_object() {
+        view["kit"]["macros"]["activeScene"] = json!("transient");
+        view["kit"]["macros"]["activeSceneRaw"] = json!("transient");
+        view["kit"]["macros"]
+            .as_object_mut()
+            .expect("macros was checked as an object")
+            .remove("livePerformanceAmounts");
+        view["kit"]["macros"]
+            .as_object_mut()
+            .expect("macros was checked as an object")
+            .remove("livePerformanceAmountsSource");
+    }
+    view.as_object_mut()
+        .expect("state summary is an object")
+        .remove("liveMacros");
     view
 }
 
@@ -1288,6 +1526,10 @@ fn optional_u64(value: Option<&Value>, label: &str) -> Result<Option<u64>, Strin
                 .ok_or_else(|| format!("{label} must be a non-negative integer"))
         })
         .transpose()
+}
+
+fn required_u64(value: Option<&Value>, label: &str) -> Result<u64, String> {
+    optional_u64(value, label)?.ok_or_else(|| format!("{label} is required"))
 }
 
 fn optional_f64(value: Option<&Value>, label: &str) -> Result<Option<f64>, String> {

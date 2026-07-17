@@ -32,6 +32,8 @@ import type {
   RytmResolveSampleRamInput,
   RytmResolvedSampleRam,
   RytmSetTransportInput,
+  RytmSetActiveSceneInput,
+  RytmSetPerformanceMacroInput,
   RytmSnapshotInput,
   RytmStartRecordingInput,
   RytmStateSnapshot,
@@ -196,6 +198,14 @@ export class RustDaemonClient implements RytmDaemonApi {
 
   async setLiveParameter(input: RytmLiveParameterInput): Promise<RytmLiveParameterInput> {
     return this.request("realtime.set_parameter", input as unknown as Record<string, unknown>);
+  }
+
+  async setActiveScene(input: RytmSetActiveSceneInput): Promise<RytmSetActiveSceneInput> {
+    return this.request("realtime.set_scene", input as unknown as Record<string, unknown>);
+  }
+
+  async setPerformanceMacro(input: RytmSetPerformanceMacroInput): Promise<RytmSetPerformanceMacroInput> {
+    return this.request("realtime.set_performance", input as unknown as Record<string, unknown>);
   }
 
   async triggerTrack(input: RytmTriggerTrackInput): Promise<RytmTriggerTrackInput> {

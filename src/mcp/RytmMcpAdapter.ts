@@ -10,6 +10,8 @@ import type {
   RytmSampleInventoryInput,
   RytmResolveSampleRamInput,
   RytmSetTransportInput,
+  RytmSetActiveSceneInput,
+  RytmSetPerformanceMacroInput,
   RytmSnapshotInput,
   RytmStartRecordingInput,
   RytmStopRecordingInput,
@@ -119,6 +121,38 @@ export class RytmMcpAdapter {
             lane: { enum: ["cc", "nrpn"] },
           },
           required: ["parameter", "value"],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: "rytm_set_active_scene",
+        description: "Activate Scene 1-12 or send null to deactivate it over MIDI without rewriting the Kit.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            scene: {
+              anyOf: [
+                { type: "integer", minimum: 1, maximum: 12 },
+                { type: "null" },
+              ],
+            },
+            lane: { enum: ["cc", "nrpn"] },
+          },
+          required: ["scene"],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: "rytm_set_performance_macro",
+        description: "Set the transient amount of Performance macro 1-12 over MIDI without rewriting the Kit.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            performance: { type: "integer", minimum: 1, maximum: 12 },
+            amount: { type: "integer", minimum: 0, maximum: 127 },
+            lane: { enum: ["cc", "nrpn"] },
+          },
+          required: ["performance", "amount"],
           additionalProperties: false,
         },
       },
@@ -319,6 +353,14 @@ export class RytmMcpAdapter {
         return this.daemon
           ? this.daemon.setLiveParameter(args as RytmLiveParameterInput)
           : this.service.setLiveParameter(args as RytmLiveParameterInput);
+      case "rytm_set_active_scene":
+        return this.daemon
+          ? this.daemon.setActiveScene(args as RytmSetActiveSceneInput)
+          : this.service.setActiveScene(args as RytmSetActiveSceneInput);
+      case "rytm_set_performance_macro":
+        return this.daemon
+          ? this.daemon.setPerformanceMacro(args as RytmSetPerformanceMacroInput)
+          : this.service.setPerformanceMacro(args as RytmSetPerformanceMacroInput);
       case "rytm_trigger_track":
         return this.daemon
           ? this.daemon.triggerTrack(args as RytmTriggerTrackInput)

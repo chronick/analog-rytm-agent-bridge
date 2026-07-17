@@ -19,6 +19,8 @@ import type {
   RytmSampleInventory,
   RytmSampleInventoryInput,
   RytmSetTransportInput,
+  RytmSetActiveSceneInput,
+  RytmSetPerformanceMacroInput,
   RytmSnapshotInput,
   RytmStartRecordingInput,
   RytmStateSnapshot,
@@ -100,6 +102,8 @@ export interface RytmDaemonApi {
     input: Omit<RytmOperationSetInput, "applyAt" | "latePolicy"> & Partial<Pick<RytmOperationSetInput, "applyAt" | "latePolicy">>,
   ): Promise<QueuedRytmOperationSet | RytmOperationSetDryRun>;
   setLiveParameter(input: RytmLiveParameterInput): Promise<RytmLiveParameterInput>;
+  setActiveScene(input: RytmSetActiveSceneInput): Promise<RytmSetActiveSceneInput>;
+  setPerformanceMacro(input: RytmSetPerformanceMacroInput): Promise<RytmSetPerformanceMacroInput>;
   triggerTrack(input: RytmTriggerTrackInput): Promise<RytmTriggerTrackInput>;
   setTransport(input: RytmSetTransportInput): Promise<RytmTransportState>;
   changePattern(input: RytmChangePatternInput): Promise<RytmTransportState>;

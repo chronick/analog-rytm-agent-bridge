@@ -11,6 +11,22 @@ const TRACK_NAMES: [&str; 12] = [
 ];
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SceneLockInput {
+    pub track: String,
+    pub parameter: String,
+    pub value: u8,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PerformanceLockInput {
+    pub track: String,
+    pub parameter: String,
+    pub depth: i8,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PersistentOperation {
     SetTrig {
@@ -97,6 +113,44 @@ pub enum PersistentOperation {
         slot: u8,
         #[serde(rename = "sampleId")]
         sample_id: String,
+    },
+    SetSceneLock {
+        scene: u8,
+        track: String,
+        parameter: String,
+        value: u8,
+    },
+    ReplaceScene {
+        scene: u8,
+        locks: Vec<SceneLockInput>,
+    },
+    ClearScene {
+        scene: u8,
+    },
+    CopyScene {
+        #[serde(rename = "sourceScene")]
+        source_scene: u8,
+        #[serde(rename = "targetScene")]
+        target_scene: u8,
+    },
+    SetPerformanceLock {
+        performance: u8,
+        track: String,
+        parameter: String,
+        depth: i8,
+    },
+    ReplacePerformance {
+        performance: u8,
+        locks: Vec<PerformanceLockInput>,
+    },
+    ClearPerformance {
+        performance: u8,
+    },
+    CopyPerformance {
+        #[serde(rename = "sourcePerformance")]
+        source_performance: u8,
+        #[serde(rename = "targetPerformance")]
+        target_performance: u8,
     },
 }
 
@@ -320,6 +374,8 @@ pub struct MockBridgeState {
     operation_sets: Vec<OperationSetRecord>,
     snapshots: Vec<SnapshotRecord>,
     events: Vec<EventEntry>,
+    active_scene: Option<u8>,
+    performance_amounts: BTreeMap<String, u8>,
     samples: SampleService,
 }
 
@@ -347,6 +403,8 @@ impl Default for MockBridgeState {
             operation_sets: Vec::new(),
             snapshots: Vec::new(),
             events: Vec::new(),
+            active_scene: None,
+            performance_amounts: BTreeMap::new(),
             samples: SampleService::mock(),
         }
     }
@@ -368,6 +426,12 @@ impl MockBridgeState {
                 "capabilities": capabilities(),
             },
             "transport": self.transport,
+            "liveMacros": {
+                "activeScene": self.active_scene,
+                "activeSceneSource": "mock",
+                "performanceAmounts": self.performance_amounts,
+                "performanceAmountsSource": "mock",
+            },
             "activePattern": self.inspect_pattern(&self.active_pattern).expect("active pattern is valid"),
             "operationSets": self.operation_sets,
             "snapshots": self.snapshots.iter().map(|record| &record.summary).collect::<Vec<_>>(),
@@ -399,6 +463,10 @@ impl MockBridgeState {
                 "delay": {}, "reverb": {}, "distortion": {}, "compressor": {}, "lfo": {},
             },
             "controlInputs": { "input1": [], "input2": [] },
+            "macros": mock_macro_summary(
+                self.patterns.get(&self.active_pattern).expect("active pattern exists"),
+                self.active_scene,
+            ),
         })
     }
 
@@ -646,6 +714,57 @@ impl MockBridgeState {
         }
         self.append_event(json!({ "type": "live.parameter_sent", "input": params }));
         Ok(params.clone())
+    }
+
+    pub fn set_active_scene(&mut self, params: &Value) -> Result<Value, String> {
+        let object = require_object(params)?;
+        let scene = match object.get("scene") {
+            Some(Value::Null) => None,
+            Some(value) => {
+                let scene = value_u64(value, "scene")?;
+                validate_u64_range(scene, "scene", 1, 12)?;
+                Some(scene as u8)
+            }
+            None => return Err("params.scene is required".to_string()),
+        };
+        validate_optional_lane(object)?;
+        self.active_scene = scene;
+        let result = json!({
+            "scene": scene,
+            "lane": object.get("lane").cloned().unwrap_or_else(|| json!("cc")),
+            "status": "sent",
+        });
+        self.append_event(json!({ "type": "live.scene_sent", "input": result }));
+        Ok(result)
+    }
+
+    pub fn set_performance_macro(&mut self, params: &Value) -> Result<Value, String> {
+        let object = require_object(params)?;
+        let performance = value_u64(
+            object
+                .get("performance")
+                .ok_or_else(|| "params.performance is required".to_string())?,
+            "performance",
+        )?;
+        validate_u64_range(performance, "performance", 1, 12)?;
+        let amount = value_u64(
+            object
+                .get("amount")
+                .ok_or_else(|| "params.amount is required".to_string())?,
+            "amount",
+        )?;
+        validate_u64_range(amount, "amount", 0, 127)?;
+        validate_optional_lane(object)?;
+        self.performance_amounts
+            .insert(performance.to_string(), amount as u8);
+        let result = json!({
+            "performance": performance,
+            "amount": amount,
+            "lane": object.get("lane").cloned().unwrap_or_else(|| json!("cc")),
+            "status": "sent",
+        });
+        self.append_event(json!({ "type": "live.performance_sent", "input": result }));
+        Ok(result)
     }
 
     pub fn trigger_track(&mut self, params: &Value) -> Result<Value, String> {
@@ -1149,6 +1268,57 @@ fn validate_operation(operation: &PersistentOperation) -> Result<(), String> {
             validate_u64_range(u64::from(*slot), "slot", 1, 127)?;
             validate_safe_id(sample_id, "sampleId")?;
         }
+        PersistentOperation::SetSceneLock {
+            scene,
+            track,
+            parameter,
+            value,
+        } => {
+            validate_macro_id(*scene, "scene")?;
+            validate_macro_target(track, parameter)?;
+            validate_u64_range(u64::from(*value), "value", 0, 127)?;
+        }
+        PersistentOperation::ReplaceScene { scene, locks } => {
+            validate_macro_id(*scene, "scene")?;
+            validate_scene_locks(locks)?;
+        }
+        PersistentOperation::ClearScene { scene } => validate_macro_id(*scene, "scene")?,
+        PersistentOperation::CopyScene {
+            source_scene,
+            target_scene,
+        } => {
+            validate_macro_id(*source_scene, "sourceScene")?;
+            validate_macro_id(*target_scene, "targetScene")?;
+            if source_scene == target_scene {
+                return Err("copy_scene source and target must differ".to_string());
+            }
+        }
+        PersistentOperation::SetPerformanceLock {
+            performance,
+            track,
+            parameter,
+            ..
+        } => {
+            validate_macro_id(*performance, "performance")?;
+            validate_macro_target(track, parameter)?;
+        }
+        PersistentOperation::ReplacePerformance { performance, locks } => {
+            validate_macro_id(*performance, "performance")?;
+            validate_performance_locks(locks)?;
+        }
+        PersistentOperation::ClearPerformance { performance } => {
+            validate_macro_id(*performance, "performance")?;
+        }
+        PersistentOperation::CopyPerformance {
+            source_performance,
+            target_performance,
+        } => {
+            validate_macro_id(*source_performance, "sourcePerformance")?;
+            validate_macro_id(*target_performance, "targetPerformance")?;
+            if source_performance == target_performance {
+                return Err("copy_performance source and target must differ".to_string());
+            }
+        }
     }
     Ok(())
 }
@@ -1326,6 +1496,76 @@ fn apply_operations(
                         },
                     );
             }
+            PersistentOperation::SetSceneLock {
+                scene,
+                track,
+                parameter,
+                value,
+            } => upsert_mock_macro_lock(
+                ensure_pattern(patterns, active_pattern),
+                "scene",
+                *scene,
+                json!({ "track": track, "parameter": parameter, "value": value }),
+            ),
+            PersistentOperation::ReplaceScene { scene, locks } => set_mock_macro_locks(
+                ensure_pattern(patterns, active_pattern),
+                "scene",
+                *scene,
+                locks
+                    .iter()
+                    .map(|lock| serde_json::to_value(lock).map_err(error_string))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            PersistentOperation::ClearScene { scene } => set_mock_macro_locks(
+                ensure_pattern(patterns, active_pattern),
+                "scene",
+                *scene,
+                Vec::new(),
+            ),
+            PersistentOperation::CopyScene {
+                source_scene,
+                target_scene,
+            } => {
+                let pattern = ensure_pattern(patterns, active_pattern);
+                let locks = mock_macro_locks(pattern, "scene", *source_scene);
+                set_mock_macro_locks(pattern, "scene", *target_scene, locks);
+            }
+            PersistentOperation::SetPerformanceLock {
+                performance,
+                track,
+                parameter,
+                depth,
+            } => upsert_mock_macro_lock(
+                ensure_pattern(patterns, active_pattern),
+                "performance",
+                *performance,
+                json!({ "track": track, "parameter": parameter, "depth": depth }),
+            ),
+            PersistentOperation::ReplacePerformance { performance, locks } => {
+                set_mock_macro_locks(
+                    ensure_pattern(patterns, active_pattern),
+                    "performance",
+                    *performance,
+                    locks
+                        .iter()
+                        .map(|lock| serde_json::to_value(lock).map_err(error_string))
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+            }
+            PersistentOperation::ClearPerformance { performance } => set_mock_macro_locks(
+                ensure_pattern(patterns, active_pattern),
+                "performance",
+                *performance,
+                Vec::new(),
+            ),
+            PersistentOperation::CopyPerformance {
+                source_performance,
+                target_performance,
+            } => {
+                let pattern = ensure_pattern(patterns, active_pattern);
+                let locks = mock_macro_locks(pattern, "performance", *source_performance);
+                set_mock_macro_locks(pattern, "performance", *target_performance, locks);
+            }
         }
     }
     Ok(())
@@ -1385,6 +1625,57 @@ fn ensure_pattern<'a>(patterns: &'a mut BTreeMap<String, Pattern>, slot: &str) -
         .or_insert_with(|| empty_pattern(slot))
 }
 
+fn mock_macro_key(family: &str, id: u8) -> String {
+    format!("macros.{family}.{id}")
+}
+
+fn mock_macro_locks(pattern: &Pattern, family: &str, id: u8) -> Vec<Value> {
+    pattern
+        .kit_parameters
+        .get(&mock_macro_key(family, id))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn set_mock_macro_locks(pattern: &mut Pattern, family: &str, id: u8, locks: Vec<Value>) {
+    pattern
+        .kit_parameters
+        .insert(mock_macro_key(family, id), Value::Array(locks));
+}
+
+fn upsert_mock_macro_lock(pattern: &mut Pattern, family: &str, id: u8, lock: Value) {
+    let track = lock["track"].clone();
+    let parameter = lock["parameter"].clone();
+    let mut locks = mock_macro_locks(pattern, family, id);
+    if let Some(existing) = locks
+        .iter_mut()
+        .find(|existing| existing["track"] == track && existing["parameter"] == parameter)
+    {
+        *existing = lock;
+    } else {
+        locks.push(lock);
+    }
+    set_mock_macro_locks(pattern, family, id, locks);
+}
+
+fn mock_macro_summary(pattern: &Pattern, active_scene: Option<u8>) -> Value {
+    let definitions = |family: &str| {
+        (1..=12)
+            .map(|id| {
+                let locks = mock_macro_locks(pattern, family, id);
+                json!({ "id": id, "lockCount": locks.len(), "locks": locks })
+            })
+            .collect::<Vec<_>>()
+    };
+    json!({
+        "activeScene": active_scene,
+        "activeSceneRaw": active_scene.map_or(255, |scene| scene - 1),
+        "scenes": definitions("scene"),
+        "performances": definitions("performance"),
+    })
+}
+
 fn capabilities() -> Value {
     json!({
         "realtimeMidi": true,
@@ -1394,8 +1685,8 @@ fn capabilities() -> Value {
         "machineEdit": true,
         "sampleSlotAssignment": true,
         "sampleTransfer": true,
-        "sceneMacros": false,
-        "performanceMacros": false,
+        "sceneMacros": true,
+        "performanceMacros": true,
         "songs": false,
     })
 }
@@ -1416,6 +1707,56 @@ fn validate_track_step(track: &str, step: u8) -> Result<(), String> {
 fn validate_track(track: &str) -> Result<(), String> {
     if !TRACK_NAMES.contains(&track) {
         return Err("track must be a Rytm track id".to_string());
+    }
+    Ok(())
+}
+
+fn validate_macro_id(value: u8, label: &str) -> Result<(), String> {
+    validate_u64_range(u64::from(value), label, 1, 12).map(|_| ())
+}
+
+fn validate_macro_target(track: &str, parameter: &str) -> Result<(), String> {
+    if track != "FX" {
+        validate_track(track)?;
+    }
+    validate_safe_id(parameter, "parameter")
+}
+
+fn validate_scene_locks(locks: &[SceneLockInput]) -> Result<(), String> {
+    if locks.len() > 48 {
+        return Err("a Kit has at most 48 Scene locks".to_string());
+    }
+    let mut targets = Vec::with_capacity(locks.len());
+    for lock in locks {
+        validate_macro_target(&lock.track, &lock.parameter)?;
+        validate_u64_range(u64::from(lock.value), "value", 0, 127)?;
+        let target = (&lock.track, &lock.parameter);
+        if targets.contains(&target) {
+            return Err(format!(
+                "Scene locks contain duplicate target: {}.{}",
+                lock.track, lock.parameter
+            ));
+        }
+        targets.push(target);
+    }
+    Ok(())
+}
+
+fn validate_performance_locks(locks: &[PerformanceLockInput]) -> Result<(), String> {
+    if locks.len() > 48 {
+        return Err("a Kit has at most 48 Performance locks".to_string());
+    }
+    let mut targets = Vec::with_capacity(locks.len());
+    for lock in locks {
+        validate_macro_target(&lock.track, &lock.parameter)?;
+        let target = (&lock.track, &lock.parameter);
+        if targets.contains(&target) {
+            return Err(format!(
+                "Performance locks contain duplicate target: {}.{}",
+                lock.track, lock.parameter
+            ));
+        }
+        targets.push(target);
     }
     Ok(())
 }
@@ -1485,6 +1826,16 @@ fn validate_finite_range(
         ));
     }
     Ok(value)
+}
+
+fn validate_optional_lane(object: &Map<String, Value>) -> Result<(), String> {
+    if let Some(lane) = object.get("lane") {
+        let lane = value_string(lane, "lane")?;
+        if lane != "cc" && lane != "nrpn" {
+            return Err("lane must be cc or nrpn".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn require_object(value: &Value) -> Result<&Map<String, Value>, String> {
@@ -1664,5 +2015,66 @@ mod tests {
             .queue(&conflicting)
             .unwrap_err()
             .contains("different payload"));
+    }
+
+    #[test]
+    fn macro_definitions_are_persistent_but_activation_is_transient() {
+        let mut state = MockBridgeState::default();
+        state
+            .create_snapshot(&json!({ "snapshotId": "before-macros" }))
+            .unwrap();
+        let applied = state
+            .apply_now(&json!({
+                "operationSetId": "define-macros",
+                "expectedRevision": 0,
+                "operations": [
+                    {
+                        "type": "replace_scene",
+                        "scene": 1,
+                        "locks": [
+                            { "track": "BD", "parameter": "sample_tune", "value": 65 },
+                            { "track": "FX", "parameter": "delay_feedback", "value": 80 }
+                        ]
+                    },
+                    { "type": "copy_scene", "sourceScene": 1, "targetScene": 2 },
+                    { "type": "clear_scene", "scene": 1 },
+                    {
+                        "type": "replace_performance",
+                        "performance": 1,
+                        "locks": [
+                            { "track": "SD", "parameter": "amp_pan", "depth": -32 }
+                        ]
+                    },
+                    { "type": "copy_performance", "sourcePerformance": 1, "targetPerformance": 2 },
+                    { "type": "clear_performance", "performance": 1 }
+                ]
+            }))
+            .unwrap();
+        assert_eq!(applied["resultingRevision"], 1);
+        let kit = state.inspect_kit();
+        assert_eq!(kit["macros"]["scenes"][0]["lockCount"], 0);
+        assert_eq!(kit["macros"]["scenes"][1]["lockCount"], 2);
+        assert_eq!(kit["macros"]["performances"][0]["lockCount"], 0);
+        assert_eq!(kit["macros"]["performances"][1]["lockCount"], 1);
+
+        state
+            .set_active_scene(&json!({ "scene": 2, "lane": "nrpn" }))
+            .unwrap();
+        state
+            .set_performance_macro(&json!({ "performance": 3, "amount": 96, "lane": "cc" }))
+            .unwrap();
+        let live = state.inspect_state();
+        assert_eq!(live["revision"], 1);
+        assert_eq!(live["liveMacros"]["activeScene"], 2);
+        assert_eq!(live["liveMacros"]["performanceAmounts"]["3"], 96);
+
+        let rolled_back = state
+            .rollback_snapshot(&json!({ "snapshotId": "before-macros", "expectedRevision": 1 }))
+            .unwrap();
+        assert_eq!(rolled_back["revision"], 2);
+        let restored = state.inspect_kit();
+        assert_eq!(restored["macros"]["scenes"][1]["lockCount"], 0);
+        assert_eq!(restored["macros"]["performances"][1]["lockCount"], 0);
+        assert_eq!(state.inspect_state()["liveMacros"]["activeScene"], 2);
     }
 }
