@@ -1,6 +1,6 @@
 # Control Surface
 
-This matrix describes the hardware adapter. The mock adapter additionally supports deterministic queue scheduling and realtime simulation.
+This matrix describes the hardware adapter. The mock adapter additionally supports deterministic scheduler advancement without a MIDI device.
 
 ## Inspect
 
@@ -27,13 +27,13 @@ All writes are delta based. They validate the decoded copy, compare codec-canoni
 
 ## Realtime Lane
 
-The standalone Rust harness has verified notes, transport, clock, program change, CC, and NRPN. The hardware daemon does not yet expose these through agent RPC; the corresponding methods remain disabled until the hardware scheduler milestone owns timing and reconnect behavior.
+The hardware daemon exposes track notes, start/stop/continue, program change, generated or observed MIDI clock, and semantic `track_level` through CC 95 or NRPN 1:100. Note-off timing runs in the daemon poll loop. Graceful shutdown sends Stop and All Notes Off on all channels.
+
+Persistent operation sets can be queued for next step, beat, measure, pattern, or a specific pattern step. Hardware callers must include the current transport epoch. The durable scheduler emits queued, applied, rejected, and reconciled events; reconnect either rejects or rolls stale work forward according to the declared late policy.
 
 ## Capability Gaps
 
-- Pattern operations are represented and work in the mock control plane, but hardware Pattern deltas wait for boundary scheduling and reconciliation.
 - `sample.number` and `assign_sample_slot` are disabled until sample identity and inventory are reconciled; sample transfer is not implemented.
 - Scene definitions, Performance macro definitions, Songs, and their codecs remain disabled pending maintained-fork support.
-- Hardware queues and snapshots are in daemon memory and are not durable across daemon restart.
 - Overbridge is not a control dependency. Audio and multitrack capture are separate milestones.
 - The fork targets firmware 1.70. Successful connected-device round trips are recorded as compatibility evidence, not universal certification for later firmware.

@@ -72,6 +72,16 @@ npm run hardware:control -- --execute
 
 The harness performs an emergency rollback in `finally` if any assertion fails. Keep the disposable project open and do not interrupt the process during SysEx writes.
 
+## Scheduler And Reconnect Certification
+
+The scheduler harness uses an isolated durable state directory, generated 24 PPQN clock, and explicit transport epochs. It verifies next-step application, a queued edit surviving daemon shutdown/restart, stale-epoch reject and roll-forward policies, duplicate ID behavior, realtime RPC, no-op reconciliation, and multi-object raw rollback after an injected verification failure.
+
+```bash
+npm run hardware:scheduler -- --execute
+```
+
+The test triggers BD once at low velocity and temporarily changes its level. All persistent fields finish at their captured semantic baseline. The fault injection flag is internal to this certification command and should not be used when operating the bridge normally.
+
 ## Realtime Validation
 
 This is audible and changes track level briefly. It uses low-velocity notes, sends transport and 24 PPQN clock, verifies CC and NRPN through Kit SysEx readback, and restores the captured Kit and Settings objects before returning.
