@@ -13,7 +13,10 @@ import {
 } from "./types.ts";
 import type {
   QueuedRytmOperationSet,
+  RytmAudioInputInventory,
+  RytmAudioRecording,
   RytmBridgeState,
+  RytmCapturePatternAudioInput,
   RytmChangePatternInput,
   RytmLiveParameterInput,
   RytmOperationSetDryRun,
@@ -24,7 +27,9 @@ import type {
   RytmRollbackInput,
   RytmSetTransportInput,
   RytmSnapshotInput,
+  RytmStartRecordingInput,
   RytmStateSnapshot,
+  RytmStopRecordingInput,
   RytmTransportState,
   RytmTriggerTrackInput,
   RytmValidationResult,
@@ -211,6 +216,22 @@ export class RustDaemonClient implements RytmDaemonApi {
 
   async reconcileState(): Promise<unknown> {
     return this.request("state.reconcile");
+  }
+
+  async listAudioInputs(): Promise<RytmAudioInputInventory> {
+    return this.request("audio.list_inputs");
+  }
+
+  async startRecording(input: RytmStartRecordingInput = {}): Promise<RytmAudioRecording> {
+    return this.request("audio.start_recording", input as unknown as Record<string, unknown>);
+  }
+
+  async stopRecording(input: RytmStopRecordingInput): Promise<RytmAudioRecording> {
+    return this.request("audio.stop_recording", input as unknown as Record<string, unknown>);
+  }
+
+  async capturePatternAudio(input: RytmCapturePatternAudioInput): Promise<RytmAudioRecording> {
+    return this.request("audio.capture_pattern", input as unknown as Record<string, unknown>);
   }
 
   async advanceMockTransport(steps = 1): Promise<RytmTransportState> {

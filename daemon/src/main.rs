@@ -1,4 +1,5 @@
 use analog_rytm_agent_daemon::{
+    audio::{AudioMode, AudioService},
     describe_as_json,
     hardware::{
         capture_state, configure_midi, create_demo_patterns, list_midi_ports, parse_pattern_slot,
@@ -32,6 +33,9 @@ fn run() -> Result<(), String> {
             let state_directory = option_value(&args, "--state-dir")
                 .map(PathBuf::from)
                 .unwrap_or_else(default_state_directory);
+            let audio_directory = option_value(&args, "--audio-dir")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| state_directory.join("recordings"));
             let clock_source = option_value(&args, "--clock-source").unwrap_or("observed");
             let force_verification_failure = args
                 .iter()
@@ -40,11 +44,22 @@ fn run() -> Result<(), String> {
                 BackendMode::parse(adapter)?,
                 port_match,
                 &state_directory.join("hardware-state.json"),
+                &audio_directory,
                 ClockSource::parse(clock_source)?,
                 force_verification_failure,
             )
         }
         Some("midi-list") => print_json(list_midi_ports()?),
+        Some("audio-list") => {
+            let port_match = option_value(&args, "--port-match").unwrap_or(DEFAULT_PORT_MATCH);
+            let directory = option_value(&args, "--audio-dir")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| default_state_directory().join("recordings"));
+            let service = AudioService::new(AudioMode::Hardware, directory, port_match.to_string());
+            print_json(
+                serde_json::to_value(service.list_inputs()?).map_err(|error| error.to_string())?,
+            )
+        }
         Some("identity") => {
             let mut session = RytmMidiSession::open(DEFAULT_PORT_MATCH)?;
             print_json(query_identity(&mut session)?)
@@ -155,5 +170,5 @@ fn print_json(value: Value) -> Result<(), String> {
 }
 
 fn usage() -> &'static str {
-    "commands: --describe, serve [--adapter mock|hardware] [--port-match <name>], midi-list, identity, capture-state <dir>, inspect-pattern <slot>, configure-midi --execute <dir>, restore-midi --execute <dir>, validate-realtime --execute <dir>, create-demo-patterns --execute <dir>, restore-patterns --execute <dir>, play-demo-patterns --execute <baseline-dir>"
+    "commands: --describe, serve [--adapter mock|hardware] [--port-match <name>] [--state-dir <path>] [--audio-dir <path>], midi-list, audio-list [--port-match <name>] [--audio-dir <path>], identity, capture-state <dir>, inspect-pattern <slot>, configure-midi --execute <dir>, restore-midi --execute <dir>, validate-realtime --execute <dir>, create-demo-patterns --execute <dir>, restore-patterns --execute <dir>, play-demo-patterns --execute <baseline-dir>"
 }

@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod hardware;
 pub mod hardware_control;
 pub mod hardware_scheduler;
@@ -40,6 +41,8 @@ pub struct CapabilityFlags {
     pub scene_macros: bool,
     pub performance_macros: bool,
     pub songs: bool,
+    pub class_compliant_audio: bool,
+    pub overbridge_audio: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -72,6 +75,8 @@ pub fn mock_description() -> DaemonDescription {
             scene_macros: false,
             performance_macros: false,
             songs: false,
+            class_compliant_audio: true,
+            overbridge_audio: false,
         },
     }
 }
@@ -100,6 +105,8 @@ pub fn hardware_description() -> DaemonDescription {
             scene_macros: false,
             performance_macros: false,
             songs: false,
+            class_compliant_audio: true,
+            overbridge_audio: false,
         },
     }
 }
@@ -121,7 +128,9 @@ pub fn describe_as_json(description: &DaemonDescription) -> String {
             "\"sampleTransfer\":{},",
             "\"sceneMacros\":{},",
             "\"performanceMacros\":{},",
-            "\"songs\":{}",
+            "\"songs\":{},",
+            "\"classCompliantAudio\":{},",
+            "\"overbridgeAudio\":{}",
             "}}",
             "}}"
         ),
@@ -146,6 +155,8 @@ pub fn describe_as_json(description: &DaemonDescription) -> String {
         description.capabilities.scene_macros,
         description.capabilities.performance_macros,
         description.capabilities.songs,
+        description.capabilities.class_compliant_audio,
+        description.capabilities.overbridge_audio,
     )
 }
 

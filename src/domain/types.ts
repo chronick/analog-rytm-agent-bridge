@@ -34,6 +34,8 @@ export interface RytmCapabilities {
   sceneMacros: boolean;
   performanceMacros: boolean;
   songs: boolean;
+  classCompliantAudio: boolean;
+  overbridgeAudio: boolean;
 }
 
 export interface RytmFirmwareCompatibility {
@@ -283,6 +285,92 @@ export interface RytmRollbackInput {
 export interface RytmPatternDeltaInput {
   pattern?: RytmPatternSlot;
   operations: RytmPersistentOperation[];
+}
+
+export interface RytmAudioStreamCapability {
+  channels: number;
+  minSampleRate: number;
+  maxSampleRate: number;
+  sampleFormat: string;
+  recorderSupported: boolean;
+}
+
+export interface RytmAudioInputInfo {
+  id: string;
+  name: string;
+  isRytm: boolean;
+  defaultConfig?: RytmAudioStreamCapability | null;
+  configurations: RytmAudioStreamCapability[];
+  error?: string;
+}
+
+export interface RytmAudioInputInventory {
+  inputs: RytmAudioInputInfo[];
+  stalePartialFiles: string[];
+  outputDirectory: string;
+}
+
+export interface RytmStartRecordingInput {
+  recordingId?: string;
+  deviceName?: string;
+  snapshotId?: RytmSnapshotId;
+  expectedDurationMs?: number;
+}
+
+export interface RytmStopRecordingInput {
+  recordingId: string;
+}
+
+export interface RytmCapturePatternAudioInput extends RytmStartRecordingInput {
+  durationMs: number;
+}
+
+export interface RytmAudioRecording {
+  schema: "analog-rytm-recording.v1";
+  recordingId: string;
+  status: "recording" | "completed" | "failed";
+  device: {
+    model: string;
+    inputId: string;
+    inputName: string;
+    sourceChannels: number;
+    capturedChannels: number;
+    sampleRate: number;
+    sourceSampleFormat: string;
+  };
+  pattern: RytmPatternSlot;
+  kit: { index?: number; name?: string };
+  revision: RytmRevision;
+  tempo: number;
+  routing: unknown;
+  snapshotId?: RytmSnapshotId | null;
+  startedAt?: string;
+  partialPath?: string;
+  expectedDurationMs?: number | null;
+  timestamps?: { startedAt: string; stoppedAt: string };
+  audio?: {
+    path: string;
+    metadataPath: string;
+    container: "wav";
+    sampleFormat: "f32le";
+    channels: number;
+    sampleRate: number;
+    frames: number;
+    durationMs: number;
+    bytes: number;
+  };
+  analysis?: {
+    peak: number;
+    rms: number;
+    silence: boolean;
+    clipping: boolean;
+    clippedSamples: number;
+    expectedDurationMs?: number | null;
+    durationWithinTolerance?: boolean | null;
+    disconnected: boolean;
+    droppedBlocks: number;
+  };
+  warnings?: string[];
 }
 
 export type RytmEvent =

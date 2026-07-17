@@ -1,4 +1,5 @@
 import type {
+  RytmCapturePatternAudioInput,
   RytmChangePatternInput,
   RytmLiveParameterInput,
   RytmOperationSetInput,
@@ -7,6 +8,8 @@ import type {
   RytmRollbackInput,
   RytmSetTransportInput,
   RytmSnapshotInput,
+  RytmStartRecordingInput,
+  RytmStopRecordingInput,
   RytmTriggerTrackInput,
 } from "../domain/types.ts";
 import type { RytmAgentService } from "../service/RytmAgentService.ts";
@@ -181,6 +184,31 @@ export class RytmMcpAdapter {
         },
       },
       {
+        name: "rytm_list_audio_inputs",
+        description: "List CoreAudio inputs, Rytm matches, stream capabilities, and stale partial recording files.",
+        inputSchema: emptyInput,
+      },
+      {
+        name: "rytm_start_recording",
+        description: "Start an atomic stereo WAV recording with current Rytm state metadata.",
+        inputSchema: recordingSchema(false),
+      },
+      {
+        name: "rytm_stop_recording",
+        description: "Stop and atomically finalize an active WAV recording and metadata sidecar.",
+        inputSchema: {
+          type: "object",
+          properties: { recordingId: { type: "string" } },
+          required: ["recordingId"],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: "rytm_capture_pattern_audio",
+        description: "Capture a bounded stereo WAV for the current pattern with revision and routing metadata.",
+        inputSchema: recordingSchema(true),
+      },
+      {
         name: "rytm_get_events",
         description: "Read the Rytm bridge event journal after an optional cursor.",
         inputSchema: {
@@ -254,6 +282,18 @@ export class RytmMcpAdapter {
         return this.daemon
           ? this.daemon.rollbackSnapshot(args as RytmRollbackInput)
           : this.service.rollbackSnapshot(args as RytmRollbackInput);
+      case "rytm_list_audio_inputs":
+        if (!this.daemon) throw new Error("Rust Rytm daemon is required for audio capture");
+        return this.daemon.listAudioInputs();
+      case "rytm_start_recording":
+        if (!this.daemon) throw new Error("Rust Rytm daemon is required for audio capture");
+        return this.daemon.startRecording(args as RytmStartRecordingInput);
+      case "rytm_stop_recording":
+        if (!this.daemon) throw new Error("Rust Rytm daemon is required for audio capture");
+        return this.daemon.stopRecording(args as RytmStopRecordingInput);
+      case "rytm_capture_pattern_audio":
+        if (!this.daemon) throw new Error("Rust Rytm daemon is required for audio capture");
+        return this.daemon.capturePatternAudio(args as RytmCapturePatternAudioInput);
       case "rytm_get_events": {
         const input = args as { afterCursor?: number; limit?: number };
         return this.daemon
@@ -264,6 +304,21 @@ export class RytmMcpAdapter {
         throw new Error(`unknown Rytm MCP tool: ${name}`);
     }
   }
+}
+
+function recordingSchema(bounded: boolean): McpToolDescriptor["inputSchema"] {
+  return {
+    type: "object",
+    properties: {
+      recordingId: { type: "string", minLength: 1, maxLength: 128 },
+      deviceName: { type: "string", minLength: 1 },
+      snapshotId: { type: "string", minLength: 1 },
+      ...(!bounded ? { expectedDurationMs: { type: "integer", minimum: 100, maximum: 600_000 } } : {}),
+      ...(bounded ? { durationMs: { type: "integer", minimum: 100, maximum: 600_000 } } : {}),
+    },
+    required: bounded ? ["durationMs"] : undefined,
+    additionalProperties: false,
+  };
 }
 
 function operationSetSchema(required: string[]): McpToolDescriptor["inputSchema"] {

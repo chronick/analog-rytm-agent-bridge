@@ -75,10 +75,17 @@ export interface RytmDaemonApi {
   rollbackSnapshot(input: RytmRollbackInput): Promise<RytmBridgeState>;
   getEvents(afterCursor?: number, limit?: number): Promise<Array<{ cursor: number; receivedAt: string; event: unknown }>>;
   reconcileState(): Promise<unknown>;
+  listAudioInputs(): Promise<RytmAudioInputInventory>;
+  startRecording(input?: RytmStartRecordingInput): Promise<RytmAudioRecording>;
+  stopRecording(input: RytmStopRecordingInput): Promise<RytmAudioRecording>;
+  capturePatternAudio(input: RytmCapturePatternAudioInput): Promise<RytmAudioRecording>;
 }
 import type {
   QueuedRytmOperationSet,
+  RytmAudioInputInventory,
+  RytmAudioRecording,
   RytmBridgeState,
+  RytmCapturePatternAudioInput,
   RytmChangePatternInput,
   RytmLiveParameterInput,
   RytmOperationSetDryRun,
@@ -89,7 +96,9 @@ import type {
   RytmRollbackInput,
   RytmSetTransportInput,
   RytmSnapshotInput,
+  RytmStartRecordingInput,
   RytmStateSnapshot,
+  RytmStopRecordingInput,
   RytmTransportState,
   RytmTriggerTrackInput,
   RytmValidationResult,

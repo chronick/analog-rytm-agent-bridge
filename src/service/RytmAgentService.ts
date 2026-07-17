@@ -622,6 +622,8 @@ function defaultCapabilities(): RytmCapabilities {
     sceneMacros: false,
     performanceMacros: false,
     songs: false,
+    classCompliantAudio: true,
+    overbridgeAudio: false,
   };
 }
 

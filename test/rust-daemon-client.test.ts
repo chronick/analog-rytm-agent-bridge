@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { RytmMcpAdapter } from "../src/mcp/RytmMcpAdapter.ts";
@@ -8,6 +11,7 @@ import { RytmAgentService } from "../src/service/RytmAgentService.ts";
 
 test("TypeScript client completes a real round trip through the Rust mock daemon", async () => {
   const repository = fileURLToPath(new URL("../", import.meta.url));
+  const audioDirectory = await mkdtemp(join(tmpdir(), "analog-rytm-rpc-audio-"));
   const client = new RustDaemonClient({
     command: "cargo",
     args: [
@@ -19,6 +23,8 @@ test("TypeScript client completes a real round trip through the Rust mock daemon
       "serve",
       "--adapter",
       "mock",
+      "--audio-dir",
+      audioDirectory,
     ],
     cwd: repository,
     requestTimeoutMs: 60_000,
@@ -31,6 +37,7 @@ test("TypeScript client completes a real round trip through the Rust mock daemon
     assert.ok(health.methods.declared.includes("operations.queue"));
     assert.ok(health.methods.implemented.includes("snapshot.rollback"));
     assert.ok(health.methods.implemented.includes("sound.inspect"));
+    assert.ok(health.methods.implemented.includes("audio.capture_pattern"));
 
     const state = await client.inspectDeviceState() as {
       device: { activePattern: string };
@@ -107,6 +114,53 @@ test("TypeScript client completes a real round trip through the Rust mock daemon
     await facade.callTool("rytm_set_transport", { command: "start", tempo: 132 });
     await facade.callTool("rytm_change_pattern", { pattern: "B02", immediate: true });
 
+    const audioInputs = await facade.callTool("rytm_list_audio_inputs", {}) as {
+      inputs: Array<{ name: string; defaultConfig: { channels: number } }>;
+      stalePartialFiles: string[];
+    };
+    assert.equal(audioInputs.inputs[0]?.name, "Mock Analog Rytm Stereo");
+    assert.equal(audioInputs.inputs[0]?.defaultConfig.channels, 2);
+    assert.deepEqual(audioInputs.stalePartialFiles, []);
+
+    const recording = await facade.callTool("rytm_start_recording", {
+      recordingId: "integration-manual",
+      snapshotId: "before-pattern",
+    }) as { status: string; partialPath: string };
+    assert.equal(recording.status, "recording");
+    assert.ok((await stat(recording.partialPath)).isFile());
+    const finalized = await facade.callTool("rytm_stop_recording", {
+      recordingId: "integration-manual",
+    }) as {
+      status: string;
+      pattern: string;
+      revision: number;
+      tempo: number;
+      audio: { path: string; metadataPath: string; frames: number };
+    };
+    assert.equal(finalized.status, "completed");
+    assert.equal(finalized.pattern, "B02");
+    assert.equal(finalized.revision, 3);
+    assert.equal(finalized.tempo, 132);
+    assert.equal(finalized.audio.frames, 4_800);
+
+    const bounded = await facade.callTool("rytm_capture_pattern_audio", {
+      recordingId: "integration-bounded",
+      durationMs: 125,
+    }) as {
+      status: string;
+      audio: { path: string; metadataPath: string; frames: number };
+      analysis: { durationWithinTolerance: boolean; silence: boolean };
+    };
+    assert.equal(bounded.status, "completed");
+    assert.equal(bounded.audio.frames, 6_000);
+    assert.equal(bounded.analysis.durationWithinTolerance, true);
+    assert.equal(bounded.analysis.silence, false);
+    const wavHeader = await readFile(bounded.audio.path);
+    assert.equal(wavHeader.subarray(0, 4).toString("ascii"), "RIFF");
+    assert.equal(wavHeader.subarray(8, 12).toString("ascii"), "WAVE");
+    const sidecar = JSON.parse(await readFile(bounded.audio.metadataPath, "utf8")) as { schema: string };
+    assert.equal(sidecar.schema, "analog-rytm-recording.v1");
+
     const journal = await client.getEvents();
     const eventTypes = journal.map((entry) => (entry.event as { type: string }).type);
     assert.ok(eventTypes.includes("operation_set.applied"));
@@ -141,5 +195,6 @@ test("TypeScript client completes a real round trip through the Rust mock daemon
     assert.equal(restarted.status, "ready");
   } finally {
     await client.close();
+    await rm(audioDirectory, { recursive: true, force: true });
   }
 });

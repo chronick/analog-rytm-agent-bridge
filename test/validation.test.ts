@@ -14,6 +14,8 @@ const capabilities: RytmCapabilities = {
   sceneMacros: false,
   performanceMacros: false,
   songs: false,
+  classCompliantAudio: true,
+  overbridgeAudio: false,
 };
 
 test("validates core persistent operations", () => {

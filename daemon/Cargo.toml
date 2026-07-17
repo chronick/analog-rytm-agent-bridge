@@ -5,7 +5,9 @@ edition = "2021"
 description = "Rust hardware daemon boundary for the Analog Rytm agent bridge."
 
 [dependencies]
-midir = "0.10.3"
-rytm-rs = { git = "https://github.com/chronick/rytm-rs.git", rev = "96f3e9c6004d55c07c546b404e05653a036e4e61" }
+cpal = "0.18.1"
+hound = "3.5.1"
+midir = "0.11.0"
+rytm-rs = { git = "https://github.com/chronick/rytm-rs.git", rev = "63c14d513e7e319a94cff515267387d9a180e4d1" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

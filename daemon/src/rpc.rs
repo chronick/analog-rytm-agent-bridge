@@ -1,4 +1,8 @@
 use crate::{
+    audio::{
+        AudioMode, AudioService, CapturePatternAudioRequest, RecordingContext,
+        StartRecordingRequest, StopRecordingRequest,
+    },
     describe_as_json,
     hardware::{parse_pattern_slot, DEFAULT_PORT_MATCH},
     hardware_control::HardwareBridgeState,
@@ -23,7 +27,7 @@ const REPLAY_CACHE_LIMIT: usize = 1024;
 const TRACK_NAMES: [&str; 12] = [
     "BD", "SD", "RS", "CP", "BT", "LT", "MT", "HT", "CH", "OH", "CY", "CB",
 ];
-pub const DECLARED_METHODS: [&str; 19] = [
+pub const DECLARED_METHODS: [&str; 23] = [
     "daemon.health",
     "daemon.describe",
     "device.inspect_state",
@@ -43,11 +47,15 @@ pub const DECLARED_METHODS: [&str; 19] = [
     "snapshot.rollback",
     "events.read",
     "state.reconcile",
+    "audio.list_inputs",
+    "audio.start_recording",
+    "audio.stop_recording",
+    "audio.capture_pattern",
 ];
 
-pub const MOCK_IMPLEMENTED_METHODS: [&str; 19] = DECLARED_METHODS;
+pub const MOCK_IMPLEMENTED_METHODS: [&str; 23] = DECLARED_METHODS;
 
-pub const HARDWARE_IMPLEMENTED_METHODS: [&str; 19] = DECLARED_METHODS;
+pub const HARDWARE_IMPLEMENTED_METHODS: [&str; 23] = DECLARED_METHODS;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -106,6 +114,7 @@ struct CachedResponse {
 
 pub struct RpcServer {
     backend: Backend,
+    audio: AudioService,
     replay_cache: HashMap<String, CachedResponse>,
     replay_order: VecDeque<String>,
     emitted_event_cursor: u64,
@@ -116,6 +125,7 @@ impl RpcServer {
         mode: BackendMode,
         port_match: &str,
         state_path: &Path,
+        audio_directory: &Path,
         clock_source: ClockSource,
         force_next_verification_failure: bool,
     ) -> Result<Self, String> {
@@ -130,6 +140,14 @@ impl RpcServer {
         };
         Ok(Self {
             backend,
+            audio: AudioService::new(
+                match mode {
+                    BackendMode::Mock => AudioMode::Mock,
+                    BackendMode::Hardware => AudioMode::Hardware,
+                },
+                audio_directory.to_path_buf(),
+                port_match.to_string(),
+            ),
             replay_cache: HashMap::new(),
             replay_order: VecDeque::new(),
             emitted_event_cursor: 0,
@@ -141,6 +159,7 @@ impl RpcServer {
             BackendMode::Mock,
             DEFAULT_PORT_MATCH,
             Path::new("unused-mock-state.json"),
+            Path::new("unused-mock-recordings"),
             ClockSource::Observed,
             false,
         )
@@ -401,6 +420,34 @@ impl RpcServer {
                 Backend::Mock(state) => Ok(state.reconcile()),
                 Backend::Hardware(state) => state.reconcile().map_err(RpcDispatchError::hardware),
             },
+            "audio.list_inputs" => {
+                serde_json::to_value(self.audio.list_inputs().map_err(RpcDispatchError::audio)?)
+                    .map_err(|error| {
+                        RpcDispatchError::internal(format!(
+                            "could not encode audio inputs: {error}"
+                        ))
+                    })
+            }
+            "audio.start_recording" => {
+                let input = parse_params::<StartRecordingRequest>(&request.params)?;
+                let context = self.recording_context()?;
+                self.audio
+                    .start_recording(input, context)
+                    .map_err(RpcDispatchError::audio)
+            }
+            "audio.stop_recording" => {
+                let input = parse_params::<StopRecordingRequest>(&request.params)?;
+                self.audio
+                    .stop_recording(input)
+                    .map_err(RpcDispatchError::audio)
+            }
+            "audio.capture_pattern" => {
+                let input = parse_params::<CapturePatternAudioRequest>(&request.params)?;
+                let context = self.recording_context()?;
+                self.audio
+                    .capture_pattern_audio(input, context)
+                    .map_err(RpcDispatchError::audio)
+            }
             "test.advance_mock_transport" => match &mut self.backend {
                 Backend::Mock(state) => state
                     .advance_transport(&request.params)
@@ -444,6 +491,52 @@ impl RpcServer {
         match self.backend {
             Backend::Mock(_) => BackendMode::Mock,
             Backend::Hardware(_) => BackendMode::Hardware,
+        }
+    }
+
+    fn recording_context(&mut self) -> Result<RecordingContext, RpcDispatchError> {
+        match &mut self.backend {
+            Backend::Mock(state) => {
+                let inspected = state.inspect_state();
+                let kit = state.inspect_kit();
+                let global = state.inspect_global();
+                Ok(RecordingContext {
+                    device_model: inspected["device"]["model"]
+                        .as_str()
+                        .unwrap_or("Analog Rytm MKII")
+                        .to_string(),
+                    pattern: inspected["device"]["activePattern"]
+                        .as_str()
+                        .unwrap_or("A01")
+                        .to_string(),
+                    kit: json!({
+                        "index": kit["index"].clone(),
+                        "name": kit["name"].clone(),
+                    }),
+                    revision: inspected["revision"].as_u64().unwrap_or_default(),
+                    tempo: inspected["transport"]["tempo"].as_f64().unwrap_or(120.0),
+                    routing: global["global"]["routing"].clone(),
+                })
+            }
+            Backend::Hardware(state) => {
+                let summary = state
+                    .inspect_summary()
+                    .map_err(RpcDispatchError::hardware)?;
+                Ok(RecordingContext {
+                    device_model: "Analog Rytm MKII".to_string(),
+                    pattern: summary["pattern"]["slot"]
+                        .as_str()
+                        .unwrap_or(&state.transport_state().pattern)
+                        .to_string(),
+                    kit: json!({
+                        "index": summary["kit"]["index"].clone(),
+                        "name": summary["kit"]["name"].clone(),
+                    }),
+                    revision: state.revision(),
+                    tempo: state.transport_state().tempo,
+                    routing: summary["global"]["routing"].clone(),
+                })
+            }
         }
     }
 
@@ -491,10 +584,12 @@ impl RpcServer {
     }
 
     pub fn shutdown(&mut self) -> Result<(), String> {
-        if let Backend::Hardware(state) = &mut self.backend {
-            state.shutdown()?;
-        }
-        Ok(())
+        let audio_result = self.audio.shutdown();
+        let hardware_result = match &mut self.backend {
+            Backend::Mock(_) => Ok(()),
+            Backend::Hardware(state) => state.shutdown(),
+        };
+        audio_result.and(hardware_result)
     }
 
     fn cache_response(&mut self, id: String, request: Value, response: Value) {
@@ -513,6 +608,7 @@ pub fn serve_stdio(
     mode: BackendMode,
     port_match: &str,
     state_path: &Path,
+    audio_directory: &Path,
     clock_source: ClockSource,
     force_next_verification_failure: bool,
 ) -> Result<(), String> {
@@ -530,6 +626,7 @@ pub fn serve_stdio(
         mode,
         port_match,
         state_path,
+        audio_directory,
         clock_source,
         force_next_verification_failure,
     )?;
@@ -629,6 +726,32 @@ impl RpcDispatchError {
         }
     }
 
+    fn audio(message: String) -> Self {
+        let lower = message.to_ascii_lowercase();
+        let is_validation = lower.contains("must be")
+            || lower.contains("may contain only")
+            || lower.contains("already active")
+            || lower.contains("already exists")
+            || lower.contains("unknown recordingid")
+            || lower.contains("not requested recording");
+        let is_connection = lower.contains("disconnect")
+            || lower.contains("no coreaudio input")
+            || lower.contains("could not enumerate coreaudio")
+            || lower.contains("timed out");
+        Self {
+            code: if is_validation {
+                "validation_failed"
+            } else if is_connection {
+                "audio_disconnected"
+            } else {
+                "audio_error"
+            },
+            message,
+            retryable: is_connection,
+            details: None,
+        }
+    }
+
     fn internal(message: String) -> Self {
         Self {
             code: "internal_error",
@@ -637,6 +760,12 @@ impl RpcDispatchError {
             details: None,
         }
     }
+}
+
+fn parse_params<T: for<'de> Deserialize<'de>>(params: &Value) -> Result<T, RpcDispatchError> {
+    serde_json::from_value(params.clone()).map_err(|error| {
+        RpcDispatchError::validation(format!("params do not match the method schema: {error}"))
+    })
 }
 
 fn optional_string<'a>(params: &'a Value, key: &str) -> Result<Option<&'a str>, RpcDispatchError> {
@@ -726,6 +855,8 @@ fn hardware_state(
                 "sceneMacros": false,
                 "performanceMacros": false,
                 "songs": false,
+                "classCompliantAudio": true,
+                "overbridgeAudio": false,
             },
         },
         "transport": transport,
