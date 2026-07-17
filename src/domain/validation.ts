@@ -47,6 +47,7 @@ export function assertFiniteRange(value: number, label: string, minimum: number,
 
 export function validateApplyAt(applyAt: RytmApplyAt): void {
   if (applyAt.kind === "next_step" || applyAt.kind === "next_beat" || applyAt.kind === "next_measure" || applyAt.kind === "next_pattern") {
+    if (applyAt.transportEpoch !== undefined) assertSafeId(applyAt.transportEpoch, "applyAt.transportEpoch");
     return;
   }
   if (applyAt.kind !== "pattern_step") throw new Error("unsupported applyAt kind");

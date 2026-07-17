@@ -20,7 +20,7 @@ export type RytmBoundaryKind = "next_step" | "next_beat" | "next_measure" | "nex
 export type RytmLatePolicy = "roll-forward" | "reject";
 
 export type RytmApplyAt =
-  | { kind: RytmBoundaryKind }
+  | { kind: RytmBoundaryKind; transportEpoch?: string }
   | { kind: "pattern_step"; transportEpoch: string; pattern: RytmPatternSlot; step: number };
 
 export interface RytmCapabilities {
@@ -57,6 +57,7 @@ export interface RytmDeviceSummary {
 export interface RytmTransportState {
   epoch: string;
   playing: boolean;
+  clockSource?: "generated" | "observed";
   pattern: RytmPatternSlot;
   step: number;
   beat: number;
@@ -64,6 +65,15 @@ export interface RytmTransportState {
   stepsPerBeat: number;
   beatsPerMeasure: number;
   tempo: number;
+  patternLength?: number;
+  absoluteStep?: number;
+  midiClock?: number;
+}
+
+export interface RytmResolvedBoundary {
+  transportEpoch: string;
+  kind: RytmBoundaryKind | "pattern_step" | "immediate";
+  absoluteStep: number;
 }
 
 export type RytmPersistentOperation =
@@ -171,6 +181,11 @@ export interface QueuedRytmOperationSet {
   appliedAtBoundary?: RytmBoundaryKind | "immediate";
   resultingRevision?: RytmRevision;
   rejectionReason?: string;
+  resolvedBoundary?: RytmResolvedBoundary;
+  changed?: boolean;
+  changedObjects?: Partial<Record<"pattern" | "kit" | "global" | "settings", boolean>>;
+  writeStatus?: "already-converged" | "applied-and-verified";
+  acknowledgement?: "verified" | "not_applied" | "rollback_verified" | "rollback_failed";
 }
 
 export interface RytmValidationResult {

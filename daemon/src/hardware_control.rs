@@ -1,72 +1,102 @@
 use crate::{
     hardware::{
         apply_persistent_operations, canonical_state_summary, inspect_work_buffer_state,
-        read_work_buffer_state, restore_raw_state, state_summary, write_capture_delta,
-        ChangedObjects, RawState, RytmMidiSession,
+        parse_pattern_slot, query_pattern_summary, read_work_buffer_state, restore_raw_state,
+        send_cc, send_nrpn, state_summary, write_capture_delta,
+        write_capture_delta_with_test_verification_failure, ChangedObjects, RawState,
+        RytmMidiSession,
+    },
+    hardware_scheduler::{
+        timestamp, BoundaryTarget, ClockSource, DurableSnapshot, HardwareOperationSet,
+        HardwareOperationStatus, HardwareScheduler, HardwareTransportState,
     },
     state::{
-        parse_operation_set, parse_operations, validation_result, EventEntry, OperationSetInput,
+        parse_operation_set, parse_operations, validation_result, EventEntry, LatePolicy,
+        OperationSetInput,
     },
 };
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
-    time::{SystemTime, UNIX_EPOCH},
+    path::Path,
+    time::{Duration, Instant},
 };
 
-struct AppliedOperationSet {
-    input: Value,
-    result: Value,
-}
+const RECONNECT_INTERVAL: Duration = Duration::from_secs(1);
+const MAX_GENERATED_TICKS_PER_POLL: usize = 8;
+const TRACK_NAMES: [&str; 12] = [
+    "BD", "SD", "RS", "CP", "BT", "LT", "MT", "HT", "CH", "OH", "CY", "CB",
+];
 
-struct HardwareSnapshot {
-    label: Option<String>,
-    raw: RawState,
-    summary: Value,
+struct PendingNoteOff {
+    deadline: Instant,
+    channel: u8,
+    note: u8,
 }
 
 pub struct HardwareBridgeState {
-    session: RytmMidiSession,
-    revision: u64,
-    id_counter: u64,
-    operation_sets: Vec<Value>,
-    applied_by_id: HashMap<String, AppliedOperationSet>,
-    snapshots: HashMap<String, HardwareSnapshot>,
-    snapshot_order: Vec<String>,
-    events: Vec<EventEntry>,
+    session: Option<RytmMidiSession>,
+    port_match: String,
+    scheduler: HardwareScheduler,
+    clock_source: ClockSource,
+    next_reconnect_at: Instant,
+    next_generated_clock: Option<Instant>,
+    pending_note_offs: Vec<PendingNoteOff>,
+    disconnected_reported: bool,
+    force_next_verification_failure: bool,
 }
 
 impl HardwareBridgeState {
-    pub fn open(port_match: &str) -> Result<Self, String> {
-        Ok(Self {
-            session: RytmMidiSession::open(port_match)?,
-            revision: 0,
-            id_counter: 1,
-            operation_sets: Vec::new(),
-            applied_by_id: HashMap::new(),
-            snapshots: HashMap::new(),
-            snapshot_order: Vec::new(),
-            events: Vec::new(),
-        })
+    pub fn open(
+        port_match: &str,
+        state_path: &Path,
+        clock_source: ClockSource,
+        force_next_verification_failure: bool,
+    ) -> Result<Self, String> {
+        let mut state = Self {
+            session: None,
+            port_match: port_match.to_string(),
+            scheduler: HardwareScheduler::load(state_path)?,
+            clock_source,
+            next_reconnect_at: Instant::now(),
+            next_generated_clock: None,
+            pending_note_offs: Vec::new(),
+            disconnected_reported: false,
+            force_next_verification_failure,
+        };
+        state.try_reconnect()?;
+        Ok(state)
     }
 
-    pub fn session_mut(&mut self) -> &mut RytmMidiSession {
-        &mut self.session
+    pub fn connected(&self) -> bool {
+        self.session.is_some()
     }
 
     pub fn revision(&self) -> u64 {
-        self.revision
+        self.scheduler.state.revision
+    }
+
+    pub fn transport_state(&self) -> &HardwareTransportState {
+        &self.scheduler.state.transport
     }
 
     pub fn operation_sets(&self) -> Vec<Value> {
-        self.operation_sets.clone()
+        self.scheduler
+            .state
+            .operation_sets
+            .iter()
+            .map(HardwareOperationSet::public_value)
+            .collect()
     }
 
     pub fn snapshot_summaries(&self) -> Vec<Value> {
-        self.snapshot_order
+        self.scheduler
+            .state
+            .snapshot_order
             .iter()
             .filter_map(|id| {
-                self.snapshots
+                self.scheduler
+                    .state
+                    .snapshots
                     .get(id)
                     .map(|snapshot| snapshot.summary.clone())
             })
@@ -74,7 +104,13 @@ impl HardwareBridgeState {
     }
 
     pub fn inspect_summary(&mut self) -> Result<Value, String> {
-        inspect_work_buffer_state(&mut self.session)
+        let summary = self.with_session(inspect_work_buffer_state)?;
+        self.observe_summary(&summary, "inspect")?;
+        Ok(summary)
+    }
+
+    pub fn inspect_pattern(&mut self, pattern_index: usize) -> Result<Value, String> {
+        self.with_session(|session| query_pattern_summary(session, pattern_index))
     }
 
     pub fn inspect_kit(&mut self) -> Result<Value, String> {
@@ -104,7 +140,7 @@ impl HardwareBridgeState {
             return Ok(generic);
         }
         let operations = parse_operations(raw)?;
-        let mut capture = read_work_buffer_state(&mut self.session)?;
+        let mut capture = self.with_session(read_work_buffer_state)?;
         match apply_persistent_operations(&mut capture, &operations) {
             Ok(changed) => Ok(json!({
                 "valid": true,
@@ -129,7 +165,7 @@ impl HardwareBridgeState {
             return Ok(json!({ "validation": validation }));
         }
         let operations = parse_operations(raw)?;
-        let mut capture = read_work_buffer_state(&mut self.session)?;
+        let mut capture = self.with_session(read_work_buffer_state)?;
         let before = canonical_state_summary(&capture.project)?;
         let changed = apply_persistent_operations(&mut capture, &operations)?;
         let projected = canonical_state_summary(&capture.project)?;
@@ -143,30 +179,82 @@ impl HardwareBridgeState {
         }))
     }
 
+    pub fn queue(&mut self, params: &Value) -> Result<Value, String> {
+        let input = parse_operation_set(params)?;
+        let input_value = serde_json::to_value(&input).map_err(error_string)?;
+        if let Some(existing) = self.existing_operation(&input, &input_value)? {
+            return Ok(existing);
+        }
+        self.ensure_revision(input.expected_revision)?;
+        if !self.scheduler.state.transport.playing {
+            return Err(
+                "hardware transport must be playing before operations can be queued".into(),
+            );
+        }
+        let validation = self.validate(params)?;
+        if validation["valid"] != Value::Bool(true) {
+            return Ok(json!({ "status": "rejected", "validation": validation }));
+        }
+        let target = self.scheduler.state.transport.resolve(&input.apply_at)?;
+        let operation_set_id = input
+            .operation_set_id
+            .clone()
+            .unwrap_or_else(|| self.scheduler.next_id("ops"));
+        if input.dry_run {
+            return Ok(json!({
+                "operationSetId": operation_set_id,
+                "expectedRevision": input.expected_revision,
+                "applyAt": input.apply_at,
+                "latePolicy": input.late_policy,
+                "operations": input.operations,
+                "status": "dry_run",
+                "validation": validation,
+                "resolvedBoundary": target,
+            }));
+        }
+
+        let now = timestamp();
+        let record = HardwareOperationSet {
+            operation_set_id: operation_set_id.clone(),
+            input,
+            target: target.clone(),
+            status: HardwareOperationStatus::Queued,
+            submitted_at: now.clone(),
+            queued_at: now,
+            applied_at: None,
+            applied_at_boundary: None,
+            resulting_revision: None,
+            rejection_reason: None,
+            result: None,
+        };
+        let public = record.public_value();
+        self.scheduler.state.operation_sets.push(record);
+        self.scheduler.append_event(json!({
+            "type": "operation_set.queued",
+            "operationSetId": operation_set_id,
+            "resolvedBoundary": target,
+            "revision": self.revision(),
+        }));
+        self.scheduler.persist()?;
+        Ok(public)
+    }
+
     pub fn apply_now(&mut self, params: &Value) -> Result<Value, String> {
         let normalized = normalize_immediate_params(params)?;
         let input = parse_operation_set(&normalized)?;
         let input_value = serde_json::to_value(&input).map_err(error_string)?;
-        if let Some(id) = &input.operation_set_id {
-            if let Some(existing) = self.applied_by_id.get(id) {
-                if existing.input != input_value {
-                    return Err(format!(
-                        "operationSetId already exists with a different payload: {id}"
-                    ));
-                }
-                return Ok(existing.result.clone());
-            }
+        if let Some(existing) = self.existing_operation(&input, &input_value)? {
+            return Ok(existing);
         }
         self.ensure_revision(input.expected_revision)?;
 
-        let mut capture = read_work_buffer_state(&mut self.session)?;
+        let mut capture = self.with_session(read_work_buffer_state)?;
         let baseline = RawState::from_capture(&capture);
         let changed = apply_persistent_operations(&mut capture, &input.operations)?;
         let operation_set_id = input
             .operation_set_id
             .clone()
-            .unwrap_or_else(|| self.next_id("ops"));
-
+            .unwrap_or_else(|| self.scheduler.next_id("ops"));
         if input.dry_run {
             return Ok(json!({
                 "operationSetId": operation_set_id,
@@ -177,73 +265,192 @@ impl HardwareBridgeState {
                 "status": "dry_run",
                 "validation": { "valid": true, "errors": [], "warnings": [] },
                 "changedObjects": changed,
-                "projectedRevision": self.revision + u64::from(changed.any()),
+                "projectedRevision": self.revision() + u64::from(changed.any()),
                 "projectedState": compact_object_state(&canonical_state_summary(&capture.project)?),
             }));
         }
 
-        let write = write_capture_delta(&mut self.session, &capture, &baseline, changed)?;
+        let write = self.write_delta(&capture, &baseline, changed)?;
         if changed.any() {
-            self.revision += 1;
+            self.scheduler.state.revision += 1;
         }
+        self.scheduler.state.last_observed_state = Some(write["state"].clone());
         let now = timestamp();
-        let result = applied_result(
-            &operation_set_id,
-            &input,
-            self.revision,
-            changed,
-            &write,
-            &now,
-        );
-        self.operation_sets.push(result.clone());
-        self.applied_by_id.insert(
-            operation_set_id.clone(),
-            AppliedOperationSet {
-                input: input_value,
-                result: result.clone(),
+        let record = HardwareOperationSet {
+            operation_set_id: operation_set_id.clone(),
+            input,
+            target: BoundaryTarget {
+                transport_epoch: self.scheduler.state.transport.epoch.clone(),
+                kind: "immediate".to_string(),
+                absolute_step: self.scheduler.state.transport.absolute_step,
             },
-        );
-        self.append_event(json!({
+            status: HardwareOperationStatus::Applied,
+            submitted_at: now.clone(),
+            queued_at: now.clone(),
+            applied_at: Some(now.clone()),
+            applied_at_boundary: Some("immediate".to_string()),
+            resulting_revision: Some(self.revision()),
+            rejection_reason: None,
+            result: Some(applied_details(changed, &write)),
+        };
+        let result = record.public_value();
+        self.scheduler.state.operation_sets.push(record);
+        self.scheduler.append_event(json!({
             "type": "operation_set.applied",
             "operationSetId": operation_set_id,
             "boundary": "immediate",
-            "revision": self.revision,
+            "revision": self.revision(),
             "changed": changed.any(),
             "changedObjects": changed,
             "appliedAt": now,
+            "acknowledgement": "verified",
         }));
+        self.scheduler.persist()?;
         Ok(result)
     }
 
+    pub fn set_live_parameter(&mut self, params: &Value) -> Result<Value, String> {
+        let object = require_object(params)?;
+        let track = required_string(object, "track")?;
+        let track_index = track_index(track)?;
+        let parameter = required_string(object, "parameter")?;
+        if parameter != "track_level" {
+            return Err("hardware realtime parameter currently supports track_level".to_string());
+        }
+        let value = midi_value(object.get("value"), "value")?;
+        let lane = optional_string(object, "lane")?.unwrap_or("cc");
+        let channel = self.track_channel(track_index)?;
+        match lane {
+            "cc" => self.with_session(|session| send_cc(session, channel, 95, value))?,
+            "nrpn" => self.with_session(|session| send_nrpn(session, channel, 1, 100, value))?,
+            _ => return Err("lane must be cc or nrpn".to_string()),
+        }
+        let result = json!({
+            "track": TRACK_NAMES[track_index],
+            "parameter": parameter,
+            "value": value,
+            "lane": lane,
+            "channel": channel + 1,
+            "status": "sent",
+        });
+        self.scheduler
+            .append_event(json!({ "type": "live.parameter_sent", "input": result }));
+        self.scheduler.persist()?;
+        Ok(result)
+    }
+
+    pub fn trigger_track(&mut self, params: &Value) -> Result<Value, String> {
+        let object = require_object(params)?;
+        let track_index = track_index(required_string(object, "track")?)?;
+        let velocity = optional_midi_value(object.get("velocity"), "velocity")?.unwrap_or(100);
+        if velocity == 0 {
+            return Err("velocity must be between 1 and 127".to_string());
+        }
+        let duration_ms = optional_u64(object.get("durationMs"), "durationMs")?.unwrap_or(100);
+        if !(1..=60_000).contains(&duration_ms) {
+            return Err("durationMs must be between 1 and 60000".to_string());
+        }
+        let channel = self.track_channel(track_index)?;
+        let note = track_index as u8;
+        self.with_session(|session| session.send(&[0x90 | channel, note, velocity]))?;
+        self.pending_note_offs.push(PendingNoteOff {
+            deadline: Instant::now() + Duration::from_millis(duration_ms),
+            channel,
+            note,
+        });
+        let result = json!({
+            "track": TRACK_NAMES[track_index],
+            "velocity": velocity,
+            "durationMs": duration_ms,
+            "channel": channel + 1,
+            "note": note,
+            "status": "triggered",
+        });
+        self.scheduler
+            .append_event(json!({ "type": "track.triggered", "input": result }));
+        self.scheduler.persist()?;
+        Ok(result)
+    }
+
+    pub fn set_transport(&mut self, params: &Value) -> Result<Value, String> {
+        let object = require_object(params)?;
+        let command = required_string(object, "command")?;
+        let message = match command {
+            "start" => 0xFA,
+            "continue" => 0xFB,
+            "stop" => 0xFC,
+            _ => return Err("command must be start, stop, or continue".to_string()),
+        };
+        if let Some(tempo) = optional_f64(object.get("tempo"), "tempo")? {
+            if !(30.0..=300.0).contains(&tempo) {
+                return Err("tempo must be between 30 and 300".to_string());
+            }
+            self.scheduler.state.transport.tempo = tempo;
+        }
+        self.with_session(|session| session.send(&[message]))?;
+        match command {
+            "start" => {
+                let epoch = self.scheduler.next_id("epoch");
+                self.scheduler.state.transport.start(epoch);
+                self.reconcile_queued_epochs()?;
+                self.next_generated_clock = Some(Instant::now() + self.clock_interval());
+            }
+            "continue" => {
+                self.scheduler.state.transport.playing = true;
+                self.next_generated_clock = Some(Instant::now() + self.clock_interval());
+            }
+            "stop" => {
+                self.scheduler.state.transport.playing = false;
+                self.next_generated_clock = None;
+            }
+            _ => unreachable!(),
+        }
+        let transport =
+            serde_json::to_value(&self.scheduler.state.transport).map_err(error_string)?;
+        self.scheduler
+            .append_event(json!({ "type": "transport.changed", "transport": transport }));
+        self.scheduler.persist()?;
+        Ok(transport)
+    }
+
+    pub fn change_pattern(&mut self, params: &Value) -> Result<Value, String> {
+        let object = require_object(params)?;
+        let pattern = required_string(object, "pattern")?.to_ascii_uppercase();
+        let pattern_index = parse_pattern_slot(&pattern)?;
+        let immediate = optional_bool(object.get("immediate"), "immediate")?.unwrap_or(false);
+        let channel = self.program_change_channel()?;
+        self.with_session(|session| session.send(&[0xC0 | channel, pattern_index as u8]))?;
+        self.scheduler.state.transport.pattern.clone_from(&pattern);
+        if immediate {
+            self.scheduler.state.transport.step = 0;
+            self.scheduler.state.transport.absolute_step = 0;
+            self.scheduler.state.transport.midi_clock = 0;
+        }
+        let transport =
+            serde_json::to_value(&self.scheduler.state.transport).map_err(error_string)?;
+        self.scheduler.append_event(json!({
+            "type": "pattern.changed",
+            "pattern": pattern,
+            "program": pattern_index,
+            "channel": channel + 1,
+            "transport": transport,
+        }));
+        self.scheduler.persist()?;
+        Ok(transport)
+    }
+
     pub fn create_snapshot(&mut self, params: &Value) -> Result<Value, String> {
-        let object = params
-            .as_object()
-            .ok_or_else(|| "params must be a JSON object".to_string())?;
-        let requested_id = object
-            .get("snapshotId")
-            .map(|value| {
-                value
-                    .as_str()
-                    .ok_or_else(|| "snapshotId must be a string".to_string())
-            })
-            .transpose()?;
-        let label = object
-            .get("label")
-            .map(|value| {
-                value
-                    .as_str()
-                    .ok_or_else(|| "label must be a string".to_string())
-            })
-            .transpose()?
-            .map(str::to_string);
+        let object = require_object(params)?;
+        let requested_id = optional_string(object, "snapshotId")?;
+        let label = optional_string(object, "label")?.map(str::to_string);
         if label.as_ref().is_some_and(|label| label.len() > 80) {
             return Err("label must be 80 characters or fewer".to_string());
         }
         let snapshot_id = requested_id
             .map(str::to_string)
-            .unwrap_or_else(|| self.next_id("snapshot"));
+            .unwrap_or_else(|| self.scheduler.next_id("snapshot"));
         validate_safe_id(&snapshot_id, "snapshotId")?;
-        if let Some(existing) = self.snapshots.get(&snapshot_id) {
+        if let Some(existing) = self.scheduler.state.snapshots.get(&snapshot_id) {
             if existing.label != label {
                 return Err(format!(
                     "snapshotId already exists with a different label: {snapshot_id}"
@@ -252,172 +459,682 @@ impl HardwareBridgeState {
             return Ok(existing.summary.clone());
         }
 
-        let capture = read_work_buffer_state(&mut self.session)?;
+        let capture = self.with_session(read_work_buffer_state)?;
         let raw = RawState::from_capture(&capture);
         let summary = json!({
             "snapshotId": snapshot_id,
             "label": label,
-            "revision": self.revision,
+            "revision": self.revision(),
             "createdAt": timestamp(),
             "activePattern": raw.summary["pattern"]["slot"].clone(),
             "objects": ["work_buffer_pattern", "work_buffer_kit", "work_buffer_global", "settings"],
         });
-        self.snapshot_order.push(snapshot_id.clone());
-        self.snapshots.insert(
+        self.scheduler
+            .state
+            .snapshot_order
+            .push(snapshot_id.clone());
+        self.scheduler.state.snapshots.insert(
             snapshot_id,
-            HardwareSnapshot {
+            DurableSnapshot {
                 label,
                 raw,
                 summary: summary.clone(),
             },
         );
-        self.append_event(json!({ "type": "snapshot.created", "snapshot": summary }));
+        self.scheduler
+            .append_event(json!({ "type": "snapshot.created", "snapshot": summary }));
+        self.scheduler.persist()?;
         Ok(summary)
     }
 
     pub fn rollback_snapshot(&mut self, params: &Value) -> Result<Value, String> {
-        let object = params
-            .as_object()
-            .ok_or_else(|| "params must be a JSON object".to_string())?;
-        let snapshot_id = object
-            .get("snapshotId")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "snapshotId is required".to_string())?;
-        if let Some(expected_revision) = object.get("expectedRevision") {
-            self.ensure_revision(
-                expected_revision
-                    .as_u64()
-                    .ok_or_else(|| "expectedRevision must be a non-negative integer".to_string())?,
-            )?;
+        let object = require_object(params)?;
+        let snapshot_id = required_string(object, "snapshotId")?;
+        if let Some(expected_revision) =
+            optional_u64(object.get("expectedRevision"), "expectedRevision")?
+        {
+            self.ensure_revision(expected_revision)?;
         }
         let raw = self
+            .scheduler
+            .state
             .snapshots
             .get(snapshot_id)
             .ok_or_else(|| format!("unknown snapshotId: {snapshot_id}"))?
             .raw
             .clone();
-        let current = read_work_buffer_state(&mut self.session)?;
+        let current = self.with_session(read_work_buffer_state)?;
         let changed = changed_between(&state_summary(&current.project), &raw.summary);
         let observed = if changed.any() {
-            restore_raw_state(&mut self.session, &raw, changed)?
+            self.with_session(|session| restore_raw_state(session, &raw, changed))?
         } else {
             raw.summary.clone()
         };
         if changed.any() {
-            self.revision += 1;
+            self.scheduler.state.revision += 1;
         }
-        self.append_event(json!({
+        self.scheduler.state.last_observed_state = Some(observed.clone());
+        self.scheduler.append_event(json!({
             "type": "snapshot.rolled_back",
             "snapshotId": snapshot_id,
-            "revision": self.revision,
+            "revision": self.revision(),
             "changed": changed.any(),
             "changedObjects": changed,
+            "acknowledgement": "verified",
         }));
+        self.scheduler.persist()?;
         Ok(json!({
             "status": if changed.any() { "restored-and-verified" } else { "already-converged" },
             "snapshotId": snapshot_id,
-            "revision": self.revision,
+            "revision": self.revision(),
             "changedObjects": changed,
             "state": compact_object_state(&observed),
         }))
     }
 
     pub fn read_events(&self, params: &Value) -> Result<Value, String> {
-        let after_cursor = params
-            .get("afterCursor")
-            .map(|value| {
-                value
-                    .as_u64()
-                    .ok_or_else(|| "afterCursor must be a non-negative integer".to_string())
-            })
-            .transpose()?
-            .unwrap_or(0);
-        let limit = params
-            .get("limit")
-            .map(|value| {
-                value
-                    .as_u64()
-                    .filter(|limit| (1..=1000).contains(limit))
-                    .ok_or_else(|| "limit must be an integer between 1 and 1000".to_string())
-            })
-            .transpose()?
-            .unwrap_or(1000) as usize;
+        let after_cursor = optional_u64(params.get("afterCursor"), "afterCursor")?.unwrap_or(0);
+        let limit = optional_u64(params.get("limit"), "limit")?.unwrap_or(1000);
+        if !(1..=1000).contains(&limit) {
+            return Err("limit must be between 1 and 1000".to_string());
+        }
         serde_json::to_value(
-            self.events
+            self.scheduler
+                .state
+                .events
                 .iter()
                 .filter(|event| event.cursor > after_cursor)
-                .take(limit)
+                .take(limit as usize)
                 .collect::<Vec<_>>(),
         )
         .map_err(error_string)
     }
 
     pub fn reconcile(&mut self) -> Result<Value, String> {
-        let state = self.inspect_summary()?;
+        let previous = self.scheduler.state.last_observed_state.clone();
+        let summary = self.with_session(inspect_work_buffer_state)?;
+        let playing = self.scheduler.state.transport.playing;
+        let summary_view = reconciliation_view(&summary, playing);
+        let previous_view = previous
+            .as_ref()
+            .map(|state| reconciliation_view(state, playing));
+        let changed = previous_view
+            .as_ref()
+            .is_some_and(|state| state != &summary_view);
+        let changed_objects = previous_view
+            .as_ref()
+            .map(|state| changed_between(state, &summary_view))
+            .unwrap_or_default();
+        let midi_changed = previous_view
+            .as_ref()
+            .is_some_and(|state| state["midi"] != summary_view["midi"]);
+        let compatibility_changed = previous_view
+            .as_ref()
+            .is_some_and(|state| state["compatibility"] != summary_view["compatibility"]);
+        if changed {
+            self.scheduler.state.revision += 1;
+        }
+        self.scheduler.state.last_observed_state = Some(summary.clone());
+        self.refresh_transport_from_summary(&summary);
+        self.scheduler.append_event(json!({
+            "type": "state.reconciled",
+            "changed": changed,
+            "changedObjects": changed_objects,
+            "midiChanged": midi_changed,
+            "compatibilityChanged": compatibility_changed,
+            "revision": self.revision(),
+            "source": "explicit",
+        }));
+        self.scheduler.persist()?;
         Ok(json!({
             "status": "observed",
-            "changed": false,
-            "revision": self.revision,
-            "state": compact_object_state(&state),
+            "changed": changed,
+            "changedObjects": changed_objects,
+            "midiChanged": midi_changed,
+            "compatibilityChanged": compatibility_changed,
+            "revision": self.revision(),
+            "state": compact_object_state(&summary),
         }))
     }
 
     pub fn events_after(&self, cursor: u64) -> Vec<EventEntry> {
-        self.events
+        self.scheduler
+            .state
+            .events
             .iter()
             .filter(|event| event.cursor > cursor)
             .cloned()
             .collect()
     }
 
+    pub fn poll(&mut self) -> Result<(), String> {
+        self.try_reconnect()?;
+        if self.session.is_none() {
+            return Ok(());
+        }
+        self.send_due_note_offs();
+        self.process_observed_midi()?;
+        self.send_generated_clock()?;
+        self.apply_due_operations()
+    }
+
+    pub fn shutdown(&mut self) -> Result<(), String> {
+        let mut send_errors = Vec::new();
+        if let Some(session) = &mut self.session {
+            if let Err(error) = session.send(&[0xFC]) {
+                send_errors.push(error);
+            }
+            for channel in 0..16 {
+                if let Err(error) = send_cc(session, channel, 123, 0) {
+                    send_errors.push(error);
+                }
+            }
+        }
+        self.session = None;
+        self.scheduler.state.transport.playing = false;
+        self.next_generated_clock = None;
+        self.scheduler.append_event(json!({
+            "type": "connection.disconnected",
+            "reason": "daemon_shutdown",
+            "midiCleanup": if send_errors.is_empty() { "sent" } else { "failed" },
+            "errors": send_errors,
+        }));
+        self.scheduler.persist()
+    }
+
+    fn try_reconnect(&mut self) -> Result<bool, String> {
+        if self.session.is_some() {
+            return Ok(true);
+        }
+        if Instant::now() < self.next_reconnect_at {
+            return Ok(false);
+        }
+        self.next_reconnect_at = Instant::now() + RECONNECT_INTERVAL;
+        let mut session = match RytmMidiSession::open(&self.port_match) {
+            Ok(session) => session,
+            Err(error) => {
+                self.report_disconnected(&error)?;
+                return Ok(false);
+            }
+        };
+        let capture = match read_work_buffer_state(&mut session) {
+            Ok(capture) => capture,
+            Err(error) => {
+                self.report_disconnected(&error)?;
+                return Ok(false);
+            }
+        };
+        let summary = state_summary(&capture.project);
+        let input_name = session.input_name.clone();
+        let output_name = session.output_name.clone();
+        self.session = Some(session);
+        self.disconnected_reported = false;
+
+        let previous = self.scheduler.state.last_observed_state.clone();
+        let was_playing = self.scheduler.state.transport.playing;
+        let summary_view = reconciliation_view(&summary, was_playing);
+        let changed = previous
+            .as_ref()
+            .is_some_and(|state| reconciliation_view(state, was_playing) != summary_view);
+        if changed {
+            self.scheduler.state.revision += 1;
+        }
+        self.scheduler.state.last_observed_state = Some(summary.clone());
+        let epoch = self.scheduler.next_id("epoch");
+        let pattern = summary["pattern"]["slot"]
+            .as_str()
+            .unwrap_or("A01")
+            .to_string();
+        let length = summary["pattern"]["masterLength"]
+            .as_u64()
+            .and_then(|value| u8::try_from(value).ok())
+            .unwrap_or(64);
+        let tempo = summary["settings"]["tempo"].as_f64().unwrap_or(120.0);
+        self.scheduler.state.transport.begin_epoch(
+            epoch,
+            pattern,
+            length,
+            tempo,
+            self.clock_source,
+        );
+        self.reconcile_queued_epochs()?;
+        self.scheduler.append_event(json!({
+            "type": "connection.connected",
+            "input": input_name,
+            "output": output_name,
+            "revision": self.revision(),
+            "externalStateChanged": changed,
+            "transportEpoch": self.scheduler.state.transport.epoch,
+        }));
+        self.scheduler.append_event(json!({
+            "type": "state.reconciled",
+            "changed": changed,
+            "revision": self.revision(),
+            "source": "reconnect",
+        }));
+        self.scheduler.persist()?;
+        Ok(true)
+    }
+
+    fn report_disconnected(&mut self, reason: &str) -> Result<(), String> {
+        if !self.disconnected_reported {
+            self.scheduler.append_event(json!({
+                "type": "connection.disconnected",
+                "reason": reason,
+                "retryInMs": RECONNECT_INTERVAL.as_millis(),
+            }));
+            self.scheduler.persist()?;
+            self.disconnected_reported = true;
+        }
+        Ok(())
+    }
+
+    fn mark_disconnected(&mut self, reason: &str) {
+        self.session = None;
+        self.scheduler.state.transport.playing = false;
+        self.next_generated_clock = None;
+        self.next_reconnect_at = Instant::now() + RECONNECT_INTERVAL;
+        let _ = self.report_disconnected(reason);
+    }
+
+    fn with_session<T>(
+        &mut self,
+        operation: impl FnOnce(&mut RytmMidiSession) -> Result<T, String>,
+    ) -> Result<T, String> {
+        if self.session.is_none() && !self.try_reconnect()? {
+            return Err(format!(
+                "Analog Rytm MIDI port {:?} is disconnected",
+                self.port_match
+            ));
+        }
+        let result = operation(self.session.as_mut().expect("session was connected"));
+        if let Err(error) = &result {
+            if is_connection_error(error) {
+                self.mark_disconnected(error);
+            }
+        }
+        result
+    }
+
+    fn observe_summary(&mut self, summary: &Value, source: &str) -> Result<(), String> {
+        let previous = self.scheduler.state.last_observed_state.as_ref();
+        let playing = self.scheduler.state.transport.playing;
+        let summary_view = reconciliation_view(summary, playing);
+        let changed =
+            previous.is_some_and(|state| reconciliation_view(state, playing) != summary_view);
+        if changed {
+            self.scheduler.state.revision += 1;
+            self.scheduler.append_event(json!({
+                "type": "state.reconciled",
+                "changed": true,
+                "revision": self.revision(),
+                "source": source,
+            }));
+        }
+        self.scheduler.state.last_observed_state = Some(summary.clone());
+        self.refresh_transport_from_summary(summary);
+        self.scheduler.persist()
+    }
+
+    fn refresh_transport_from_summary(&mut self, summary: &Value) {
+        if let Some(pattern) = summary["pattern"]["slot"].as_str() {
+            self.scheduler.state.transport.pattern = pattern.to_string();
+        }
+        if let Some(length) = summary["pattern"]["masterLength"]
+            .as_u64()
+            .and_then(|value| u8::try_from(value).ok())
+        {
+            self.scheduler.state.transport.pattern_length = length.max(1);
+            self.scheduler.state.transport.step %= length.max(1);
+        }
+        if !self.scheduler.state.transport.playing {
+            if let Some(tempo) = summary["settings"]["tempo"].as_f64() {
+                self.scheduler.state.transport.tempo = tempo;
+            }
+        }
+    }
+
+    fn existing_operation(
+        &self,
+        input: &OperationSetInput,
+        input_value: &Value,
+    ) -> Result<Option<Value>, String> {
+        let Some(id) = &input.operation_set_id else {
+            return Ok(None);
+        };
+        let Some(existing) = self.scheduler.operation_by_id(id) else {
+            return Ok(None);
+        };
+        let existing_input = serde_json::to_value(&existing.input).map_err(error_string)?;
+        if existing_input != *input_value {
+            return Err(format!(
+                "operationSetId already exists with a different payload: {id}"
+            ));
+        }
+        Ok(Some(existing.public_value()))
+    }
+
     fn ensure_revision(&self, expected: u64) -> Result<(), String> {
-        if expected != self.revision {
+        if expected != self.revision() {
             return Err(format!(
                 "expected revision {expected}, current revision is {}",
-                self.revision
+                self.revision()
             ));
         }
         Ok(())
     }
 
-    fn append_event(&mut self, event: Value) {
-        self.events.push(EventEntry {
-            cursor: self.events.len() as u64 + 1,
-            received_at: timestamp(),
-            event,
-        });
+    fn reconcile_queued_epochs(&mut self) -> Result<(), String> {
+        let epoch = self.scheduler.state.transport.epoch.clone();
+        let queued = self
+            .scheduler
+            .state
+            .operation_sets
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| record.status == HardwareOperationStatus::Queued)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        for index in queued {
+            if self.scheduler.state.operation_sets[index]
+                .target
+                .transport_epoch
+                == epoch
+            {
+                continue;
+            }
+            let policy = self.scheduler.state.operation_sets[index]
+                .input
+                .late_policy
+                .clone();
+            match policy {
+                LatePolicy::Reject => {
+                    self.reject_record(
+                        index,
+                        format!(
+                            "transport epoch changed before boundary; current epoch is {epoch}"
+                        ),
+                        "not_applied",
+                    );
+                }
+                LatePolicy::RollForward => {
+                    let apply_at = self.scheduler.state.operation_sets[index]
+                        .input
+                        .apply_at
+                        .with_transport_epoch(epoch.clone());
+                    let target = self.scheduler.state.transport.resolve(&apply_at)?;
+                    let operation_set_id = self.scheduler.state.operation_sets[index]
+                        .operation_set_id
+                        .clone();
+                    self.scheduler.state.operation_sets[index].target = target.clone();
+                    self.scheduler.append_event(json!({
+                        "type": "operation_set.reconciled",
+                        "operationSetId": operation_set_id,
+                        "action": "rolled_forward",
+                        "resolvedBoundary": target,
+                    }));
+                }
+            }
+        }
+        Ok(())
     }
 
-    fn next_id(&mut self, prefix: &str) -> String {
-        let id = format!("{prefix}-{}", self.id_counter);
-        self.id_counter += 1;
-        id
+    fn send_due_note_offs(&mut self) {
+        let now = Instant::now();
+        let pending = std::mem::take(&mut self.pending_note_offs);
+        for note_off in pending {
+            if note_off.deadline > now {
+                self.pending_note_offs.push(note_off);
+                continue;
+            }
+            let result = self
+                .with_session(|session| session.send(&[0x80 | note_off.channel, note_off.note, 0]));
+            if result.is_err() {
+                break;
+            }
+        }
+    }
+
+    fn process_observed_midi(&mut self) -> Result<(), String> {
+        let messages = self
+            .session
+            .as_ref()
+            .map(RytmMidiSession::drain_midi_events)
+            .unwrap_or_default();
+        if self.clock_source != ClockSource::Observed {
+            return Ok(());
+        }
+        for message in messages {
+            for byte in message {
+                match byte {
+                    0xF8 => {
+                        self.scheduler.state.transport.tick();
+                        self.apply_due_operations()?;
+                    }
+                    0xFA => {
+                        let epoch = self.scheduler.next_id("epoch");
+                        self.scheduler.state.transport.start(epoch);
+                        self.reconcile_queued_epochs()?;
+                        self.scheduler.append_event(json!({
+                            "type": "transport.changed",
+                            "transport": self.scheduler.state.transport,
+                            "source": "midi",
+                        }));
+                        self.scheduler.persist()?;
+                    }
+                    0xFB => {
+                        self.scheduler.state.transport.playing = true;
+                        self.scheduler.append_event(json!({
+                            "type": "transport.changed",
+                            "transport": self.scheduler.state.transport,
+                            "source": "midi",
+                        }));
+                        self.scheduler.persist()?;
+                    }
+                    0xFC => {
+                        self.scheduler.state.transport.playing = false;
+                        self.scheduler.append_event(json!({
+                            "type": "transport.changed",
+                            "transport": self.scheduler.state.transport,
+                            "source": "midi",
+                        }));
+                        self.scheduler.persist()?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn send_generated_clock(&mut self) -> Result<(), String> {
+        if self.clock_source != ClockSource::Generated || !self.scheduler.state.transport.playing {
+            return Ok(());
+        }
+        let interval = self.clock_interval();
+        let mut deadline = self
+            .next_generated_clock
+            .unwrap_or_else(|| Instant::now() + interval);
+        let mut ticks = 0;
+        while Instant::now() >= deadline && ticks < MAX_GENERATED_TICKS_PER_POLL {
+            self.with_session(|session| session.send(&[0xF8]))?;
+            self.scheduler.state.transport.tick();
+            self.apply_due_operations()?;
+            deadline += interval;
+            ticks += 1;
+            if Instant::now() >= deadline + interval {
+                deadline = Instant::now() + interval;
+                break;
+            }
+        }
+        self.next_generated_clock = Some(deadline);
+        Ok(())
+    }
+
+    fn clock_interval(&self) -> Duration {
+        Duration::from_secs_f64(60.0 / (self.scheduler.state.transport.tempo * 24.0))
+    }
+
+    fn apply_due_operations(&mut self) -> Result<(), String> {
+        let due = self
+            .scheduler
+            .state
+            .operation_sets
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| {
+                record.status == HardwareOperationStatus::Queued
+                    && record.target.is_due(&self.scheduler.state.transport)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        for index in due {
+            self.apply_queued_operation(index)?;
+        }
+        Ok(())
+    }
+
+    fn apply_queued_operation(&mut self, index: usize) -> Result<(), String> {
+        let input = self.scheduler.state.operation_sets[index].input.clone();
+        let operation_set_id = self.scheduler.state.operation_sets[index]
+            .operation_set_id
+            .clone();
+        let boundary = self.scheduler.state.operation_sets[index]
+            .target
+            .kind
+            .clone();
+        if input.expected_revision != self.revision() {
+            self.reject_record(
+                index,
+                format!(
+                    "expected revision {}, current revision is {}",
+                    input.expected_revision,
+                    self.revision()
+                ),
+                "not_applied",
+            );
+            self.scheduler.persist()?;
+            return Ok(());
+        }
+
+        let execution = self.execute_operations(&input);
+        match execution {
+            Ok((changed, write)) => {
+                if changed.any() {
+                    self.scheduler.state.revision += 1;
+                }
+                self.scheduler.state.last_observed_state = Some(write["state"].clone());
+                let now = timestamp();
+                let revision = self.revision();
+                let record = &mut self.scheduler.state.operation_sets[index];
+                record.status = HardwareOperationStatus::Applied;
+                record.applied_at = Some(now.clone());
+                record.applied_at_boundary = Some(boundary.clone());
+                record.resulting_revision = Some(revision);
+                record.result = Some(applied_details(changed, &write));
+                self.scheduler.append_event(json!({
+                    "type": "operation_set.applied",
+                    "operationSetId": operation_set_id,
+                    "boundary": boundary,
+                    "revision": revision,
+                    "changed": changed.any(),
+                    "changedObjects": changed,
+                    "appliedAt": now,
+                    "acknowledgement": "verified",
+                }));
+            }
+            Err(error) => {
+                let acknowledgement = failure_acknowledgement(&error);
+                self.reject_record(index, error, acknowledgement);
+            }
+        }
+        self.scheduler.persist()
+    }
+
+    fn execute_operations(
+        &mut self,
+        input: &OperationSetInput,
+    ) -> Result<(ChangedObjects, Value), String> {
+        let mut capture = self.with_session(read_work_buffer_state)?;
+        let baseline = RawState::from_capture(&capture);
+        let changed = apply_persistent_operations(&mut capture, &input.operations)?;
+        let write = self.write_delta(&capture, &baseline, changed)?;
+        Ok((changed, write))
+    }
+
+    fn write_delta(
+        &mut self,
+        capture: &crate::hardware::StateCapture,
+        baseline: &RawState,
+        changed: ChangedObjects,
+    ) -> Result<Value, String> {
+        let inject_failure = self.force_next_verification_failure && changed.any();
+        if inject_failure {
+            self.force_next_verification_failure = false;
+        }
+        self.with_session(|session| {
+            if inject_failure {
+                write_capture_delta_with_test_verification_failure(
+                    session, capture, baseline, changed,
+                )
+            } else {
+                write_capture_delta(session, capture, baseline, changed)
+            }
+        })
+    }
+
+    fn reject_record(&mut self, index: usize, reason: String, acknowledgement: &str) {
+        let now = timestamp();
+        let operation_set_id = self.scheduler.state.operation_sets[index]
+            .operation_set_id
+            .clone();
+        let record = &mut self.scheduler.state.operation_sets[index];
+        record.status = HardwareOperationStatus::Rejected;
+        record.applied_at = Some(now.clone());
+        record.rejection_reason = Some(reason.clone());
+        record.result = Some(json!({ "acknowledgement": acknowledgement }));
+        self.scheduler.append_event(json!({
+            "type": "operation_set.rejected",
+            "operationSetId": operation_set_id,
+            "reason": reason,
+            "rejectedAt": now,
+            "acknowledgement": acknowledgement,
+        }));
+    }
+
+    fn track_channel(&self, track_index: usize) -> Result<u8, String> {
+        let summary = self
+            .scheduler
+            .state
+            .last_observed_state
+            .as_ref()
+            .ok_or_else(|| "MIDI configuration has not been observed".to_string())?;
+        let value = &summary["midi"]["trackChannels"][track_index];
+        concrete_summary_channel(value, &format!("track {}", TRACK_NAMES[track_index]))
+    }
+
+    fn program_change_channel(&self) -> Result<u8, String> {
+        let summary = self
+            .scheduler
+            .state
+            .last_observed_state
+            .as_ref()
+            .ok_or_else(|| "MIDI configuration has not been observed".to_string())?;
+        let configured = &summary["midi"]["programChangeInChannel"];
+        if configured == "auto" {
+            return concrete_summary_channel(&summary["midi"]["autoChannel"], "auto channel");
+        }
+        concrete_summary_channel(configured, "program change input")
     }
 }
 
-fn applied_result(
-    id: &str,
-    input: &OperationSetInput,
-    revision: u64,
-    changed: ChangedObjects,
-    write: &Value,
-    now: &str,
-) -> Value {
+fn applied_details(changed: ChangedObjects, write: &Value) -> Value {
     json!({
-        "operationSetId": id,
-        "expectedRevision": input.expected_revision,
-        "applyAt": input.apply_at,
-        "latePolicy": input.late_policy,
-        "operations": input.operations,
-        "status": "applied",
-        "submittedAt": now,
-        "appliedAt": now,
-        "appliedAtBoundary": "immediate",
-        "resultingRevision": revision,
         "changed": changed.any(),
         "changedObjects": changed,
         "writeStatus": write["status"].clone(),
         "observedState": compact_object_state(&write["state"]),
+        "acknowledgement": "verified",
     })
 }
 
@@ -440,6 +1157,25 @@ fn changed_between(current: &Value, target: &Value) -> ChangedObjects {
     }
 }
 
+fn reconciliation_view(summary: &Value, transport_playing: bool) -> Value {
+    let mut view = summary.clone();
+    if transport_playing {
+        view["settings"]["tempo"] = json!("external-clock-active");
+        view["pattern"]["tempo"] = json!("external-clock-active");
+    }
+    view
+}
+
+fn concrete_summary_channel(value: &Value, label: &str) -> Result<u8, String> {
+    let channel = value
+        .as_u64()
+        .ok_or_else(|| format!("{label} MIDI channel is {value}"))?;
+    if !(1..=16).contains(&channel) {
+        return Err(format!("{label} uses invalid MIDI channel {channel}"));
+    }
+    Ok(channel as u8 - 1)
+}
+
 fn validate_safe_id(value: &str, label: &str) -> Result<(), String> {
     if value.is_empty()
         || !value
@@ -453,15 +1189,107 @@ fn validate_safe_id(value: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn timestamp() -> String {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    format!(
-        "unix:{}.{:03}",
-        duration.as_secs(),
-        duration.subsec_millis()
-    )
+fn require_object(value: &Value) -> Result<&serde_json::Map<String, Value>, String> {
+    value
+        .as_object()
+        .ok_or_else(|| "params must be a JSON object".to_string())
+}
+
+fn required_string<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<&'a str, String> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{key} is required and must be a string"))
+}
+
+fn optional_string<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<&'a str>, String> {
+    object
+        .get(key)
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| format!("{key} must be a string"))
+        })
+        .transpose()
+}
+
+fn optional_bool(value: Option<&Value>, label: &str) -> Result<Option<bool>, String> {
+    value
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or_else(|| format!("{label} must be a boolean"))
+        })
+        .transpose()
+}
+
+fn optional_u64(value: Option<&Value>, label: &str) -> Result<Option<u64>, String> {
+    value
+        .map(|value| {
+            value
+                .as_u64()
+                .ok_or_else(|| format!("{label} must be a non-negative integer"))
+        })
+        .transpose()
+}
+
+fn optional_f64(value: Option<&Value>, label: &str) -> Result<Option<f64>, String> {
+    value
+        .map(|value| {
+            value
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| format!("{label} must be a finite number"))
+        })
+        .transpose()
+}
+
+fn optional_midi_value(value: Option<&Value>, label: &str) -> Result<Option<u8>, String> {
+    value
+        .map(|value| midi_value(Some(value), label))
+        .transpose()
+}
+
+fn midi_value(value: Option<&Value>, label: &str) -> Result<u8, String> {
+    let value = value
+        .and_then(Value::as_u64)
+        .filter(|value| *value <= 127)
+        .ok_or_else(|| format!("{label} must be an integer between 0 and 127"))?;
+    Ok(value as u8)
+}
+
+fn track_index(track: &str) -> Result<usize, String> {
+    TRACK_NAMES
+        .iter()
+        .position(|candidate| candidate.eq_ignore_ascii_case(track))
+        .ok_or_else(|| format!("track must be one of {}", TRACK_NAMES.join(", ")))
+}
+
+fn failure_acknowledgement(error: &str) -> &'static str {
+    if error.contains("automatic rollback also failed") {
+        "rollback_failed"
+    } else if error.contains("baseline was restored") {
+        "rollback_verified"
+    } else {
+        "not_applied"
+    }
+}
+
+fn is_connection_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("no midi input")
+        || lower.contains("no midi output")
+        || lower.contains("midi input disconnected")
+        || lower.contains("sending midi message failed")
+        || lower.contains("timed out waiting")
+        || lower.contains("connection")
+        || lower.contains("disconnected")
 }
 
 fn error_string(error: impl std::fmt::Display) -> String {
@@ -494,10 +1322,62 @@ mod tests {
         }))
         .unwrap();
         let input = parse_operation_set(&normalized).unwrap();
-        assert!(matches!(input.apply_at, crate::state::ApplyAt::NextStep));
         assert!(matches!(
-            input.late_policy,
-            crate::state::LatePolicy::Reject
+            input.apply_at,
+            crate::state::ApplyAt::NextStep { .. }
+        ));
+        assert!(matches!(input.late_policy, LatePolicy::Reject));
+    }
+
+    #[test]
+    fn classifies_verified_and_failed_rollbacks() {
+        assert_eq!(
+            failure_acknowledgement("hardware write failed and baseline was restored: mismatch"),
+            "rollback_verified"
+        );
+        assert_eq!(
+            failure_acknowledgement("automatic rollback also failed: disconnected"),
+            "rollback_failed"
+        );
+        assert_eq!(failure_acknowledgement("validation failed"), "not_applied");
+    }
+
+    #[test]
+    fn converts_one_based_observed_channels_to_midi_status_channels() {
+        assert_eq!(concrete_summary_channel(&json!(1), "track").unwrap(), 0);
+        assert_eq!(concrete_summary_channel(&json!(16), "track").unwrap(), 15);
+        assert!(concrete_summary_channel(&json!("off"), "track").is_err());
+    }
+
+    #[test]
+    fn ignores_external_clock_tempo_but_not_persistent_settings_drift() {
+        let first = json!({
+            "pattern": { "tempo": 90 },
+            "settings": { "tempo": 90, "fixedVelocity": { "amount": 100 } }
+        });
+        let mut second = first.clone();
+        second["pattern"]["tempo"] = json!(120);
+        second["settings"]["tempo"] = json!(120);
+        assert_eq!(
+            reconciliation_view(&first, true),
+            reconciliation_view(&second, true)
+        );
+
+        second["settings"]["fixedVelocity"]["amount"] = json!(101);
+        assert_ne!(
+            reconciliation_view(&first, true),
+            reconciliation_view(&second, true)
+        );
+    }
+
+    #[test]
+    fn distinguishes_configuration_errors_from_transport_disconnects() {
+        assert!(!is_connection_error("track BD MIDI channel is off"));
+        assert!(is_connection_error(
+            "MIDI input disconnected while waiting for SysEx"
+        ));
+        assert!(is_connection_error(
+            "timed out waiting for a complete SysEx response"
         ));
     }
 }

@@ -5,11 +5,12 @@ use analog_rytm_agent_daemon::{
         play_demo_patterns, query_identity, query_pattern_summary, restore_demo_patterns,
         restore_midi_config, validate_realtime_controls, RytmMidiSession, DEFAULT_PORT_MATCH,
     },
+    hardware_scheduler::ClockSource,
     mock_description,
     rpc::{serve_stdio, BackendMode},
 };
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn main() {
     if let Err(error) = run() {
@@ -28,7 +29,20 @@ fn run() -> Result<(), String> {
         Some("serve") => {
             let adapter = option_value(&args, "--adapter").unwrap_or("mock");
             let port_match = option_value(&args, "--port-match").unwrap_or(DEFAULT_PORT_MATCH);
-            serve_stdio(BackendMode::parse(adapter)?, port_match)
+            let state_directory = option_value(&args, "--state-dir")
+                .map(PathBuf::from)
+                .unwrap_or_else(default_state_directory);
+            let clock_source = option_value(&args, "--clock-source").unwrap_or("observed");
+            let force_verification_failure = args
+                .iter()
+                .any(|argument| argument == "--test-force-verification-failure");
+            serve_stdio(
+                BackendMode::parse(adapter)?,
+                port_match,
+                &state_directory.join("hardware-state.json"),
+                ClockSource::parse(clock_source)?,
+                force_verification_failure,
+            )
         }
         Some("midi-list") => print_json(list_midi_ports()?),
         Some("identity") => {
@@ -97,6 +111,17 @@ fn run() -> Result<(), String> {
         }
         Some(other) => Err(format!("unknown command: {other}\n\n{}", usage())),
     }
+}
+
+fn default_state_directory() -> PathBuf {
+    std::env::var_os("ANALOG_RYTM_STATE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".analog-rytm-agent-bridge"))
+        })
+        .unwrap_or_else(|| PathBuf::from(".analog-rytm-agent-bridge"))
 }
 
 fn option_value<'a>(args: &'a [String], option: &str) -> Option<&'a str> {

@@ -102,10 +102,38 @@ pub enum PersistentOperation {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ApplyAt {
-    NextStep,
-    NextBeat,
-    NextMeasure,
-    NextPattern,
+    NextStep {
+        #[serde(
+            default,
+            rename = "transportEpoch",
+            skip_serializing_if = "Option::is_none"
+        )]
+        transport_epoch: Option<String>,
+    },
+    NextBeat {
+        #[serde(
+            default,
+            rename = "transportEpoch",
+            skip_serializing_if = "Option::is_none"
+        )]
+        transport_epoch: Option<String>,
+    },
+    NextMeasure {
+        #[serde(
+            default,
+            rename = "transportEpoch",
+            skip_serializing_if = "Option::is_none"
+        )]
+        transport_epoch: Option<String>,
+    },
+    NextPattern {
+        #[serde(
+            default,
+            rename = "transportEpoch",
+            skip_serializing_if = "Option::is_none"
+        )]
+        transport_epoch: Option<String>,
+    },
     PatternStep {
         #[serde(rename = "transportEpoch")]
         transport_epoch: String,
@@ -115,13 +143,47 @@ pub enum ApplyAt {
 }
 
 impl ApplyAt {
-    fn kind(&self) -> &'static str {
+    pub fn kind(&self) -> &'static str {
         match self {
-            Self::NextStep => "next_step",
-            Self::NextBeat => "next_beat",
-            Self::NextMeasure => "next_measure",
-            Self::NextPattern => "next_pattern",
+            Self::NextStep { .. } => "next_step",
+            Self::NextBeat { .. } => "next_beat",
+            Self::NextMeasure { .. } => "next_measure",
+            Self::NextPattern { .. } => "next_pattern",
             Self::PatternStep { .. } => "pattern_step",
+        }
+    }
+
+    pub fn transport_epoch(&self) -> Option<&str> {
+        match self {
+            Self::NextStep { transport_epoch }
+            | Self::NextBeat { transport_epoch }
+            | Self::NextMeasure { transport_epoch }
+            | Self::NextPattern { transport_epoch } => transport_epoch.as_deref(),
+            Self::PatternStep {
+                transport_epoch, ..
+            } => Some(transport_epoch),
+        }
+    }
+
+    pub fn with_transport_epoch(&self, epoch: String) -> Self {
+        match self {
+            Self::NextStep { .. } => Self::NextStep {
+                transport_epoch: Some(epoch),
+            },
+            Self::NextBeat { .. } => Self::NextBeat {
+                transport_epoch: Some(epoch),
+            },
+            Self::NextMeasure { .. } => Self::NextMeasure {
+                transport_epoch: Some(epoch),
+            },
+            Self::NextPattern { .. } => Self::NextPattern {
+                transport_epoch: Some(epoch),
+            },
+            Self::PatternStep { pattern, step, .. } => Self::PatternStep {
+                transport_epoch: epoch,
+                pattern: pattern.clone(),
+                step: *step,
+            },
         }
     }
 }
@@ -211,7 +273,7 @@ struct SnapshotRecord {
     patterns: BTreeMap<String, Pattern>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventEntry {
     pub cursor: u64,
@@ -885,13 +947,10 @@ pub fn parse_operations(raw: &Value) -> Result<Vec<PersistentOperation>, String>
 }
 
 fn validate_apply_at(apply_at: &ApplyAt) -> Result<(), String> {
-    if let ApplyAt::PatternStep {
-        transport_epoch,
-        pattern,
-        step,
-    } = apply_at
-    {
+    if let Some(transport_epoch) = apply_at.transport_epoch() {
         validate_safe_id(transport_epoch, "applyAt.transportEpoch")?;
+    }
+    if let ApplyAt::PatternStep { pattern, step, .. } = apply_at {
         validate_pattern(pattern, "applyAt.pattern")?;
         validate_u64_range(u64::from(*step), "applyAt.step", 0, 63)?;
     }

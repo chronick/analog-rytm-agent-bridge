@@ -1,8 +1,10 @@
 use crate::{
     describe_as_json,
-    hardware::{parse_pattern_slot, query_pattern_summary, DEFAULT_PORT_MATCH},
+    hardware::{parse_pattern_slot, DEFAULT_PORT_MATCH},
     hardware_control::HardwareBridgeState,
-    hardware_description, mock_description,
+    hardware_description,
+    hardware_scheduler::ClockSource,
+    mock_description,
     state::MockBridgeState,
 };
 use serde::{Deserialize, Serialize};
@@ -10,6 +12,8 @@ use serde_json::{json, Value};
 use std::{
     collections::{HashMap, VecDeque},
     io::{self, BufRead, Write},
+    path::Path,
+    sync::mpsc::{self, RecvTimeoutError},
     thread,
     time::Duration,
 };
@@ -43,22 +47,7 @@ pub const DECLARED_METHODS: [&str; 19] = [
 
 pub const MOCK_IMPLEMENTED_METHODS: [&str; 19] = DECLARED_METHODS;
 
-pub const HARDWARE_IMPLEMENTED_METHODS: [&str; 14] = [
-    "daemon.health",
-    "daemon.describe",
-    "device.inspect_state",
-    "pattern.inspect",
-    "kit.inspect",
-    "sound.inspect",
-    "global.inspect",
-    "operations.validate",
-    "operations.propose",
-    "operations.apply_now",
-    "snapshot.create",
-    "snapshot.rollback",
-    "events.read",
-    "state.reconcile",
-];
+pub const HARDWARE_IMPLEMENTED_METHODS: [&str; 19] = DECLARED_METHODS;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -106,8 +95,8 @@ impl BackendMode {
 }
 
 enum Backend {
-    Mock(MockBridgeState),
-    Hardware(HardwareBridgeState),
+    Mock(Box<MockBridgeState>),
+    Hardware(Box<HardwareBridgeState>),
 }
 
 struct CachedResponse {
@@ -123,10 +112,21 @@ pub struct RpcServer {
 }
 
 impl RpcServer {
-    pub fn new(mode: BackendMode, port_match: &str) -> Result<Self, String> {
+    pub fn new(
+        mode: BackendMode,
+        port_match: &str,
+        state_path: &Path,
+        clock_source: ClockSource,
+        force_next_verification_failure: bool,
+    ) -> Result<Self, String> {
         let backend = match mode {
-            BackendMode::Mock => Backend::Mock(MockBridgeState::default()),
-            BackendMode::Hardware => Backend::Hardware(HardwareBridgeState::open(port_match)?),
+            BackendMode::Mock => Backend::Mock(Box::default()),
+            BackendMode::Hardware => Backend::Hardware(Box::new(HardwareBridgeState::open(
+                port_match,
+                state_path,
+                clock_source,
+                force_next_verification_failure,
+            )?)),
         };
         Ok(Self {
             backend,
@@ -137,7 +137,14 @@ impl RpcServer {
     }
 
     pub fn new_mock() -> Self {
-        Self::new(BackendMode::Mock, DEFAULT_PORT_MATCH).expect("mock backend cannot fail to open")
+        Self::new(
+            BackendMode::Mock,
+            DEFAULT_PORT_MATCH,
+            Path::new("unused-mock-state.json"),
+            ClockSource::Observed,
+            false,
+        )
+        .expect("mock backend cannot fail to open")
     }
 
     pub fn handle_line(&mut self, line: &str) -> Value {
@@ -227,8 +234,8 @@ impl RpcServer {
     fn dispatch(&mut self, request: &RpcRequest) -> Result<Value, RpcDispatchError> {
         match request.method.as_str() {
             "daemon.health" => Ok(json!({
-                "status": "ready",
-                "connected": true,
+                "status": if self.backend_connected() { "ready" } else { "degraded" },
+                "connected": self.backend_connected(),
                 "adapter": self.backend_mode().as_str(),
                 "protocolSchema": RPC_SCHEMA,
                 "daemonSchema": "analog-rytm-daemon.v1",
@@ -257,7 +264,13 @@ impl RpcServer {
                         .map_err(RpcDispatchError::hardware)?;
                     Ok(hardware_state(
                         summary,
+                        state.connected(),
                         state.revision(),
+                        serde_json::to_value(state.transport_state()).map_err(|error| {
+                            RpcDispatchError::internal(format!(
+                                "could not encode transport: {error}"
+                            ))
+                        })?,
                         state.operation_sets(),
                         state.snapshot_summaries(),
                     ))
@@ -271,11 +284,10 @@ impl RpcServer {
                     Backend::Mock(state) => state
                         .inspect_pattern(&slot.to_ascii_uppercase())
                         .map_err(RpcDispatchError::validation),
-                    Backend::Hardware(state) => {
-                        query_pattern_summary(state.session_mut(), pattern_index)
-                            .map(|summary| hardware_pattern_summary(&summary))
-                            .map_err(RpcDispatchError::hardware)
-                    }
+                    Backend::Hardware(state) => state
+                        .inspect_pattern(pattern_index)
+                        .map(|summary| hardware_pattern_summary(&summary))
+                        .map_err(RpcDispatchError::hardware),
                 }
             }
             "kit.inspect" => match &mut self.backend {
@@ -317,7 +329,9 @@ impl RpcServer {
                 Backend::Mock(state) => state
                     .queue(&request.params)
                     .map_err(RpcDispatchError::validation),
-                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+                Backend::Hardware(state) => state
+                    .queue(&request.params)
+                    .map_err(RpcDispatchError::hardware),
             },
             "operations.apply_now" => match &mut self.backend {
                 Backend::Mock(state) => state
@@ -331,25 +345,33 @@ impl RpcServer {
                 Backend::Mock(state) => state
                     .set_live_parameter(&request.params)
                     .map_err(RpcDispatchError::validation),
-                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+                Backend::Hardware(state) => state
+                    .set_live_parameter(&request.params)
+                    .map_err(RpcDispatchError::hardware),
             },
             "realtime.trigger_track" => match &mut self.backend {
                 Backend::Mock(state) => state
                     .trigger_track(&request.params)
                     .map_err(RpcDispatchError::validation),
-                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+                Backend::Hardware(state) => state
+                    .trigger_track(&request.params)
+                    .map_err(RpcDispatchError::hardware),
             },
             "realtime.set_transport" => match &mut self.backend {
                 Backend::Mock(state) => state
                     .set_transport(&request.params)
                     .map_err(RpcDispatchError::validation),
-                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+                Backend::Hardware(state) => state
+                    .set_transport(&request.params)
+                    .map_err(RpcDispatchError::hardware),
             },
             "realtime.change_pattern" => match &mut self.backend {
                 Backend::Mock(state) => state
                     .change_pattern(&request.params)
                     .map_err(RpcDispatchError::validation),
-                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+                Backend::Hardware(state) => state
+                    .change_pattern(&request.params)
+                    .map_err(RpcDispatchError::hardware),
             },
             "snapshot.create" => match &mut self.backend {
                 Backend::Mock(state) => state
@@ -425,6 +447,13 @@ impl RpcServer {
         }
     }
 
+    fn backend_connected(&self) -> bool {
+        match &self.backend {
+            Backend::Mock(_) => true,
+            Backend::Hardware(state) => state.connected(),
+        }
+    }
+
     fn implemented_methods(&self) -> &'static [&'static str] {
         match self.backend {
             Backend::Mock(_) => &MOCK_IMPLEMENTED_METHODS,
@@ -454,6 +483,20 @@ impl RpcServer {
             .collect()
     }
 
+    pub fn poll_messages(&mut self) -> Result<Vec<Value>, String> {
+        if let Backend::Hardware(state) = &mut self.backend {
+            state.poll()?;
+        }
+        Ok(self.drain_rpc_events())
+    }
+
+    pub fn shutdown(&mut self) -> Result<(), String> {
+        if let Backend::Hardware(state) = &mut self.backend {
+            state.shutdown()?;
+        }
+        Ok(())
+    }
+
     fn cache_response(&mut self, id: String, request: Value, response: Value) {
         if self.replay_cache.len() >= REPLAY_CACHE_LIMIT {
             if let Some(oldest) = self.replay_order.pop_front() {
@@ -466,27 +509,61 @@ impl RpcServer {
     }
 }
 
-pub fn serve_stdio(mode: BackendMode, port_match: &str) -> Result<(), String> {
-    let stdin = io::stdin();
+pub fn serve_stdio(
+    mode: BackendMode,
+    port_match: &str,
+    state_path: &Path,
+    clock_source: ClockSource,
+    force_next_verification_failure: bool,
+) -> Result<(), String> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        for line in io::stdin().lock().lines() {
+            let line = line.map_err(|error| format!("failed to read RPC request: {error}"));
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
     let mut stdout = io::stdout().lock();
-    let mut server = RpcServer::new(mode, port_match)?;
-    for line in stdin.lock().lines() {
-        let line = line.map_err(|error| format!("failed to read RPC request: {error}"))?;
-        if line.trim().is_empty() {
-            continue;
+    let mut server = RpcServer::new(
+        mode,
+        port_match,
+        state_path,
+        clock_source,
+        force_next_verification_failure,
+    )?;
+    loop {
+        match receiver.recv_timeout(Duration::from_millis(2)) {
+            Ok(line) => {
+                let line = line?;
+                if !line.trim().is_empty() {
+                    write_messages(&mut stdout, server.handle_messages(&line))?;
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
         }
-        for message in server.handle_messages(&line) {
-            serde_json::to_writer(&mut stdout, &message)
-                .map_err(|error| format!("failed to encode RPC response: {error}"))?;
-            stdout
-                .write_all(b"\n")
-                .map_err(|error| format!("failed to write RPC response: {error}"))?;
-        }
-        stdout
-            .flush()
-            .map_err(|error| format!("failed to flush RPC response: {error}"))?;
+        write_messages(&mut stdout, server.poll_messages()?)?;
     }
+    server.shutdown()?;
     Ok(())
+}
+
+fn write_messages(stdout: &mut impl Write, messages: Vec<Value>) -> Result<(), String> {
+    if messages.is_empty() {
+        return Ok(());
+    }
+    for message in messages {
+        serde_json::to_writer(&mut *stdout, &message)
+            .map_err(|error| format!("failed to encode RPC response: {error}"))?;
+        stdout
+            .write_all(b"\n")
+            .map_err(|error| format!("failed to write RPC response: {error}"))?;
+    }
+    stdout
+        .flush()
+        .map_err(|error| format!("failed to flush RPC response: {error}"))
 }
 
 fn hardware_capability_unavailable(method: &str) -> RpcDispatchError {
@@ -518,11 +595,37 @@ impl RpcDispatchError {
     }
 
     fn hardware(message: String) -> Self {
+        let lower = message.to_ascii_lowercase();
+        let is_connection = lower.contains("disconnected")
+            || lower.contains("no midi")
+            || lower.contains("timed out waiting")
+            || lower.contains("midi port");
+        let is_validation = lower.contains("must be")
+            || lower.contains("expected revision")
+            || lower.contains("different payload")
+            || lower.contains("outside current pattern")
+            || lower.contains("does not match current epoch")
+            || lower.contains("transport must be playing")
+            || lower.contains("unsupported hardware boundary")
+            || lower.contains("invalid operation set");
+        let rollback = if lower.contains("automatic rollback also failed") {
+            Some("rollback_failed")
+        } else if lower.contains("baseline was restored") {
+            Some("rollback_verified")
+        } else {
+            None
+        };
         Self {
-            code: "hardware_error",
+            code: if is_validation {
+                "validation_failed"
+            } else if rollback.is_some() {
+                "hardware_write_failed"
+            } else {
+                "hardware_error"
+            },
             message,
-            retryable: true,
-            details: None,
+            retryable: is_connection,
+            details: rollback.map(|acknowledgement| json!({ "acknowledgement": acknowledgement })),
         }
     }
 
@@ -591,18 +694,19 @@ fn error_response(
 
 fn hardware_state(
     summary: Value,
+    connected: bool,
     revision: u64,
+    transport: Value,
     operation_sets: Vec<Value>,
     snapshots: Vec<Value>,
 ) -> Value {
     let pattern = hardware_pattern_summary(&summary["pattern"]);
     let active_pattern = pattern["pattern"].clone();
-    let tempo = summary["settings"]["tempo"].clone();
     json!({
         "revision": revision,
         "device": {
             "model": "Analog Rytm MKII",
-            "connected": true,
+            "connected": connected,
             "activePattern": active_pattern,
             "firmware": {
                 "adapter": "rytm-rs",
@@ -624,17 +728,7 @@ fn hardware_state(
                 "songs": false,
             },
         },
-        "transport": {
-            "epoch": "hardware-observed",
-            "playing": null,
-            "pattern": pattern["pattern"].clone(),
-            "step": null,
-            "beat": null,
-            "measure": null,
-            "stepsPerBeat": 4,
-            "beatsPerMeasure": 4,
-            "tempo": tempo,
-        },
+        "transport": transport,
         "activePattern": pattern,
         "operationSets": operation_sets,
         "snapshots": snapshots,
@@ -827,5 +921,28 @@ mod tests {
         assert_eq!(normalized["trigs"][0]["track"], "BD");
         assert_eq!(normalized["trigs"][0]["locks"]["filter_frequency"], 92);
         assert!(normalized["trigs"][0].get("condition").is_none());
+    }
+
+    #[test]
+    fn classifies_hardware_failures_for_deterministic_agent_recovery() {
+        let timeout = RpcDispatchError::hardware(
+            "timed out waiting for a complete SysEx response".to_string(),
+        );
+        assert_eq!(timeout.code, "hardware_error");
+        assert!(timeout.retryable);
+
+        let stale =
+            RpcDispatchError::hardware("expected revision 3, current revision is 4".to_string());
+        assert_eq!(stale.code, "validation_failed");
+        assert!(!stale.retryable);
+
+        let rollback = RpcDispatchError::hardware(
+            "hardware write failed and baseline was restored: mismatch".to_string(),
+        );
+        assert_eq!(rollback.code, "hardware_write_failed");
+        assert_eq!(
+            rollback.details.unwrap()["acknowledgement"],
+            "rollback_verified"
+        );
     }
 }

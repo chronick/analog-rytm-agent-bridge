@@ -45,6 +45,21 @@ test("rejects invalid ranges and unsafe atoms", () => {
   assert.equal(result.errors.length, 5);
 });
 
+test("validates optional hardware transport epochs on musical boundaries", () => {
+  assert.doesNotThrow(() => validateOperationSetInput({
+    expectedRevision: 0,
+    applyAt: { kind: "next_step", transportEpoch: "epoch-12" },
+    latePolicy: "reject",
+    operations: [{ type: "set_trig", track: "BD", step: 0 }],
+  }, capabilities));
+  assert.throws(() => validateOperationSetInput({
+    expectedRevision: 0,
+    applyAt: { kind: "next_step", transportEpoch: "unsafe epoch" },
+    latePolicy: "reject",
+    operations: [{ type: "set_trig", track: "BD", step: 0 }],
+  }, capabilities), /applyAt.transportEpoch/);
+});
+
 test("keeps incomplete hardware features behind capability flags", () => {
   assert.throws(() => validateOperationSetInput({
     expectedRevision: 0,

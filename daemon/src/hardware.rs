@@ -10,7 +10,7 @@ use rytm_rs::{
     },
     prelude::*,
 };
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -31,7 +31,8 @@ pub type HardwareResult<T> = Result<T, String>;
 pub struct RytmMidiSession {
     _input: MidiInputConnection<()>,
     output: MidiOutputConnection,
-    receiver: Receiver<Vec<u8>>,
+    response_receiver: Receiver<Vec<u8>>,
+    event_receiver: Receiver<Vec<u8>>,
     pub input_name: String,
     pub output_name: String,
 }
@@ -44,7 +45,7 @@ pub struct StateCapture {
     pub settings_raw: Vec<u8>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RawState {
     pub pattern_raw: Vec<u8>,
     pub kit_raw: Vec<u8>,
@@ -65,7 +66,7 @@ impl RawState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangedObjects {
     pub pattern: bool,
@@ -107,13 +108,16 @@ impl RytmMidiSession {
             .ok_or_else(|| format!("no MIDI output contains {port_match:?}"))?;
         let output_name = output.port_name(&output_port).map_err(error_string)?;
 
-        let (sender, receiver) = mpsc::channel();
+        let (response_sender, response_receiver) = mpsc::channel();
+        let (event_sender, event_receiver) = mpsc::channel();
         let input_connection = input
             .connect(
                 &input_port,
                 "analog-rytm-agent-input",
                 move |_stamp, message, _| {
-                    let _ = sender.send(message.to_vec());
+                    let message = message.to_vec();
+                    let _ = response_sender.send(message.clone());
+                    let _ = event_sender.send(message);
                 },
                 (),
             )
@@ -125,7 +129,8 @@ impl RytmMidiSession {
         Ok(Self {
             _input: input_connection,
             output: output_connection,
-            receiver,
+            response_receiver,
+            event_receiver,
             input_name,
             output_name,
         })
@@ -136,9 +141,13 @@ impl RytmMidiSession {
     }
 
     pub fn request(&mut self, request: &[u8]) -> HardwareResult<Vec<u8>> {
-        while self.receiver.try_recv().is_ok() {}
+        while self.response_receiver.try_recv().is_ok() {}
         self.send(request)?;
         self.receive_sysex(RESPONSE_TIMEOUT)
+    }
+
+    pub fn drain_midi_events(&self) -> Vec<Vec<u8>> {
+        self.event_receiver.try_iter().collect()
     }
 
     fn receive_sysex(&self, timeout: Duration) -> HardwareResult<Vec<u8>> {
@@ -152,7 +161,7 @@ impl RytmMidiSession {
                 return Err("timed out waiting for a complete SysEx response".to_string());
             }
 
-            let message = match self.receiver.recv_timeout(remaining) {
+            let message = match self.response_receiver.recv_timeout(remaining) {
                 Ok(message) => message,
                 Err(RecvTimeoutError::Timeout) => {
                     return Err("timed out waiting for a SysEx response".to_string())
@@ -286,6 +295,26 @@ pub fn write_capture_delta(
     baseline: &RawState,
     changed: ChangedObjects,
 ) -> HardwareResult<Value> {
+    write_capture_delta_internal(session, capture, baseline, changed, false)
+}
+
+#[doc(hidden)]
+pub fn write_capture_delta_with_test_verification_failure(
+    session: &mut RytmMidiSession,
+    capture: &StateCapture,
+    baseline: &RawState,
+    changed: ChangedObjects,
+) -> HardwareResult<Value> {
+    write_capture_delta_internal(session, capture, baseline, changed, true)
+}
+
+fn write_capture_delta_internal(
+    session: &mut RytmMidiSession,
+    capture: &StateCapture,
+    baseline: &RawState,
+    changed: ChangedObjects,
+    force_verification_failure: bool,
+) -> HardwareResult<Value> {
     let expected = canonical_state_summary(&capture.project)?;
     if !changed.any() {
         return Ok(json!({
@@ -298,6 +327,9 @@ pub fn write_capture_delta(
     let write_result: HardwareResult<Value> = (|| {
         send_changed_project(session, &capture.project, changed)?;
         let observed = inspect_work_buffer_state(session)?;
+        if force_verification_failure {
+            return Err("injected readback verification failure".to_string());
+        }
         verify_changed_sections(&expected, &observed, changed)?;
         Ok(observed)
     })();
@@ -1999,7 +2031,7 @@ fn restore_kit(
     Ok(())
 }
 
-fn send_cc(
+pub fn send_cc(
     session: &mut RytmMidiSession,
     channel: u8,
     controller: u8,
@@ -2008,7 +2040,7 @@ fn send_cc(
     session.send(&[0xB0 | channel, controller, value])
 }
 
-fn send_nrpn(
+pub fn send_nrpn(
     session: &mut RytmMidiSession,
     channel: u8,
     parameter_msb: u8,

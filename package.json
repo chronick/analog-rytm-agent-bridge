@@ -9,7 +9,8 @@
     "rust:test": "cd daemon && cargo test",
     "check": "npm test && npm run rust:test",
     "demo": "node --experimental-transform-types src/bin/mock-demo.ts",
-    "hardware:control": "node --experimental-transform-types src/bin/verify-hardware-control.ts"
+    "hardware:control": "node --experimental-transform-types src/bin/verify-hardware-control.ts",
+    "hardware:scheduler": "node --experimental-transform-types src/bin/verify-hardware-scheduler.ts"
   },
   "engines": {
     "node": ">=22.14"

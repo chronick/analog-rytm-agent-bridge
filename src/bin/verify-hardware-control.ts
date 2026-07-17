@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RytmPersistentOperation } from "../domain/types.ts";
 import { RustDaemonClient } from "../rpc/RustDaemonClient.ts";
@@ -6,9 +9,13 @@ import { RustDaemonClient } from "../rpc/RustDaemonClient.ts";
 const execute = process.argv.includes("--execute");
 const repository = fileURLToPath(new URL("../../", import.meta.url));
 const snapshotId = "hardware-control-certification";
+const stateDirectory = mkdtempSync(join(tmpdir(), "analog-rytm-control-"));
 const client = new RustDaemonClient({
   command: "cargo",
-  args: ["run", "--quiet", "--manifest-path", "daemon/Cargo.toml", "--", "serve", "--adapter", "hardware"],
+  args: [
+    "run", "--quiet", "--manifest-path", "daemon/Cargo.toml", "--", "serve",
+    "--adapter", "hardware", "--state-dir", stateDirectory,
+  ],
   cwd: repository,
   requestTimeoutMs: 180_000,
 });
@@ -48,6 +55,7 @@ try {
   process.stderr.write("hardware daemon ready\n");
 
   const baselineState = asRecord(await client.inspectDeviceState());
+  const baselineRevision = baselineState.revision as number;
   const baseline = certificationFields(baselineState);
   process.stderr.write("baseline inspected\n");
 
@@ -57,12 +65,12 @@ try {
 
   const dryRun = asRecord(await client.applyOperationsNow({
     operationSetId: "hardware-control-dry-run",
-    expectedRevision: 0,
+    expectedRevision: baselineRevision,
     operations,
     dryRun: true,
   }));
   assert.equal(dryRun.status, "dry_run");
-  assert.equal(dryRun.projectedRevision, 1);
+    assert.equal(dryRun.projectedRevision, baselineRevision + 1);
   const projected = certificationFieldsFromObjectState(asRecord(dryRun.projectedState));
   process.stderr.write("dry run projected\n");
 
@@ -76,13 +84,13 @@ try {
 
     const input = {
       operationSetId: "hardware-control-apply",
-      expectedRevision: 0,
+      expectedRevision: baselineRevision,
       operations,
     } as const;
     const applied = asRecord(await client.applyOperationsNow(input));
     assert.equal(applied.status, "applied");
     assert.equal(applied.changed, true);
-    assert.equal(applied.resultingRevision, 1);
+    assert.equal(applied.resultingRevision, baselineRevision + 1);
     process.stderr.write("operation set applied and read back\n");
 
     const replay = asRecord(await client.applyOperationsNow(input));
@@ -93,9 +101,12 @@ try {
     assert.deepEqual(observed, projected);
     process.stderr.write("representative object families verified\n");
 
-    const rolledBack = asRecord(await client.rollbackSnapshot({ snapshotId, expectedRevision: 1 }));
+    const rolledBack = asRecord(await client.rollbackSnapshot({
+      snapshotId,
+      expectedRevision: baselineRevision + 1,
+    }));
     assert.equal(rolledBack.status, "restored-and-verified");
-    assert.equal(rolledBack.revision, 2);
+    assert.equal(rolledBack.revision, baselineRevision + 2);
     rollbackVerified = true;
     const restored = certificationFields(asRecord(await client.inspectDeviceState()));
     assert.deepEqual(restored, baseline);
@@ -126,6 +137,7 @@ try {
     }
   }
   await client.close();
+  rmSync(stateDirectory, { recursive: true, force: true });
 }
 
 function certificationFields(state: Record<string, unknown>): Record<string, unknown> {
