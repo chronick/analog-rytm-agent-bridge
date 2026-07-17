@@ -533,19 +533,145 @@ fn apply_persistent_operation(
             track,
             value,
         } => apply_global_parameter(project, section, parameter, track, value),
-        PersistentOperation::SetTrig { .. }
-        | PersistentOperation::ClearTrig { .. }
-        | PersistentOperation::SetParameterLock { .. }
-        | PersistentOperation::ClearParameterLock { .. }
-        | PersistentOperation::SetTrackLength { .. }
-        | PersistentOperation::CopyPattern { .. } => {
-            Err("hardware pattern delta writes are staged for the scheduler milestone".to_string())
+        PersistentOperation::SetTrig {
+            pattern,
+            track,
+            step,
+            velocity,
+            micro_timing,
+            condition,
+            retrig,
+        } => {
+            let track_index = parse_track_index(track)?;
+            let pattern = work_buffer_pattern_mut(project, pattern)?;
+            let trig = pattern.tracks_mut()[track_index]
+                .trigs_mut()
+                .get_mut(usize::from(*step))
+                .ok_or_else(|| format!("step {step} must be between 0 and 63"))?;
+            trig.set_trig_enable(true);
+            if let Some(velocity) = velocity {
+                trig.set_velocity(usize::from(*velocity))
+                    .map_err(error_string)?;
+            }
+            if let Some(micro_timing) = micro_timing {
+                trig.set_micro_timing_by_value(isize::from(*micro_timing))
+                    .map_err(error_string)?;
+            }
+            if let Some(condition) = condition {
+                trig.set_trig_condition(
+                    TrigCondition::try_from(condition.as_str()).map_err(error_string)?,
+                );
+            }
+            if let Some(retrig) = retrig {
+                trig.set_retrig(*retrig);
+            }
+            Ok(())
         }
+        PersistentOperation::ClearTrig {
+            pattern,
+            track,
+            step,
+        } => {
+            let track_index = parse_track_index(track)?;
+            let pattern = work_buffer_pattern_mut(project, pattern)?;
+            let trig = pattern.tracks_mut()[track_index]
+                .trigs_mut()
+                .get_mut(usize::from(*step))
+                .ok_or_else(|| format!("step {step} must be between 0 and 63"))?;
+            trig.set_trig_enable(false);
+            trig.set_retrig(false);
+            trig.set_trig_condition(TrigCondition::Unset);
+            trig.set_micro_timing_by_value(0).map_err(error_string)
+        }
+        PersistentOperation::SetParameterLock {
+            pattern,
+            track,
+            step,
+            parameter,
+            value,
+        } => {
+            let track_index = parse_track_index(track)?;
+            let pattern = work_buffer_pattern_mut(project, pattern)?;
+            let trig = pattern.tracks_mut()[track_index]
+                .trigs_mut()
+                .get_mut(usize::from(*step))
+                .ok_or_else(|| format!("step {step} must be between 0 and 63"))?;
+            match parameter.as_str() {
+                "filter_frequency" | "filter_cutoff" => {
+                    trig.set_parameter_lock_env(true);
+                    trig.plock_set_filter_cutoff(exact_nonnegative_usize(*value, "value")?)
+                        .map_err(error_string)
+                }
+                _ => Err(format!(
+                    "unsupported hardware parameter lock {parameter:?}; supported: filter_frequency"
+                )),
+            }
+        }
+        PersistentOperation::ClearParameterLock {
+            pattern,
+            track,
+            step,
+            parameter,
+        } => {
+            let track_index = parse_track_index(track)?;
+            let pattern = work_buffer_pattern_mut(project, pattern)?;
+            let trig = pattern.tracks_mut()[track_index]
+                .trigs_mut()
+                .get_mut(usize::from(*step))
+                .ok_or_else(|| format!("step {step} must be between 0 and 63"))?;
+            match parameter.as_str() {
+                "filter_frequency" | "filter_cutoff" => {
+                    trig.plock_clear_filter_cutoff().map_err(error_string)
+                }
+                _ => Err(format!(
+                    "unsupported hardware parameter lock {parameter:?}; supported: filter_frequency"
+                )),
+            }
+        }
+        PersistentOperation::SetTrackLength {
+            pattern,
+            track,
+            steps,
+        } => {
+            let track_index = parse_track_index(track)?;
+            work_buffer_pattern_mut(project, pattern)?.tracks_mut()[track_index]
+                .set_number_of_steps(usize::from(*steps))
+                .map_err(error_string)
+        }
+        PersistentOperation::CopyPattern { .. } => Err(
+            "copy_pattern requires a multi-slot transaction and is not available in the work-buffer mutator"
+                .to_string(),
+        ),
         PersistentOperation::AssignSampleSlot { .. } => Err(
             "sample-slot assignment is disabled until sample identity reconciliation is available"
                 .to_string(),
         ),
     }
+}
+
+fn work_buffer_pattern_mut<'a>(
+    project: &'a mut RytmProject,
+    requested_slot: &Option<String>,
+) -> HardwareResult<&'a mut Pattern> {
+    if let Some(requested_slot) = requested_slot {
+        let requested_index = parse_pattern_slot(requested_slot)?;
+        let current_index = project.work_buffer().pattern().index();
+        if requested_index != current_index {
+            return Err(format!(
+                "operation targets pattern {}, but the work buffer contains {}",
+                requested_slot.to_ascii_uppercase(),
+                pattern_slot(current_index)
+            ));
+        }
+    }
+    Ok(project.work_buffer_mut().pattern_mut())
+}
+
+fn exact_nonnegative_usize(value: f64, label: &str) -> HardwareResult<usize> {
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > usize::MAX as f64 {
+        return Err(format!("{label} must be a non-negative integer"));
+    }
+    Ok(value as usize)
 }
 
 fn apply_kit_parameter(
@@ -2397,6 +2523,65 @@ mod tests {
 
         let second = apply_persistent_operations(&mut capture, &operations).unwrap();
         assert!(!second.any());
+    }
+
+    #[test]
+    fn pattern_delta_operations_mutate_idempotently_and_validate_work_buffer_slot() {
+        let operations: Vec<PersistentOperation> = serde_json::from_value(json!([
+            { "type": "set_track_length", "pattern": "A01", "track": "BD", "steps": 16 },
+            {
+                "type": "set_trig",
+                "pattern": "A01",
+                "track": "BD",
+                "step": 4,
+                "velocity": 111,
+                "microTiming": 2,
+                "condition": "1:2",
+                "retrig": true
+            },
+            {
+                "type": "set_parameter_lock",
+                "pattern": "A01",
+                "track": "BD",
+                "step": 4,
+                "parameter": "filter_frequency",
+                "value": 92
+            }
+        ]))
+        .unwrap();
+        let mut capture = StateCapture {
+            project: RytmProject::try_default().unwrap(),
+            pattern_raw: Vec::new(),
+            kit_raw: Vec::new(),
+            global_raw: Vec::new(),
+            settings_raw: Vec::new(),
+        };
+
+        let changed = apply_persistent_operations(&mut capture, &operations).unwrap();
+        assert!(changed.pattern);
+        let summary = state_summary(&capture.project);
+        let trig = &summary["pattern"]["tracks"][0]["trigs"][0];
+        assert_eq!(trig["step"], 4);
+        assert_eq!(trig["velocity"], 111);
+        assert_eq!(trig["microTiming"], 2);
+        assert_eq!(trig["condition"], "1:2");
+        assert_eq!(trig["filterCutoffLock"], 92);
+
+        let second = apply_persistent_operations(&mut capture, &operations).unwrap();
+        assert!(!second.any());
+
+        let wrong_slot: PersistentOperation = serde_json::from_value(json!({
+            "type": "set_trig",
+            "pattern": "B01",
+            "track": "BD",
+            "step": 0
+        }))
+        .unwrap();
+        assert!(
+            apply_persistent_operation(&mut capture.project, &wrong_slot)
+                .unwrap_err()
+                .contains("work buffer contains A01")
+        );
     }
 
     #[test]
