@@ -17,7 +17,8 @@
     "hardware:audio": "node --experimental-transform-types src/bin/verify-hardware-audio.ts",
     "hardware:samples": "node --experimental-transform-types src/bin/verify-hardware-samples.ts",
     "hardware:songs": "node --experimental-transform-types src/bin/verify-hardware-songs.ts",
-    "hardware:scheduler": "node --experimental-transform-types src/bin/verify-hardware-scheduler.ts"
+    "hardware:scheduler": "node --experimental-transform-types src/bin/verify-hardware-scheduler.ts",
+    "build:project": "node --experimental-transform-types src/bin/build-project.ts"
   },
   "engines": {
     "node": ">=22.14"
