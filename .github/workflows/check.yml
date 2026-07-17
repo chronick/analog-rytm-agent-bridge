@@ -1,0 +1,28 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    # CoreMIDI/CoreAudio dependencies make the daemon macOS-only.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+      - run: cargo test --manifest-path daemon/Cargo.toml
+      - run: cargo clippy --manifest-path daemon/Cargo.toml --all-targets -- -D warnings
+      - run: cargo fmt --manifest-path daemon/Cargo.toml --check

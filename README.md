@@ -2,6 +2,18 @@
 
 Standalone control plane for agentic Analog Rytm work.
 
+## Prerequisites
+
+- macOS. The daemon depends on CoreMIDI and CoreAudio and does not build on
+  other platforms.
+- Rust ≥ 1.89 (`rustup` recommended). Cargo resolves the daemon dependencies,
+  including the pinned `chronick/rytm-rs` fork revision.
+- Node ≥ 22.14 (24+ recommended), matching the `engines` field. The TypeScript
+  slice runs on Node's native type-stripping; `npm install` is only needed for
+  the dev-time type checker.
+- For sample management: the pinned Elektroid CLI fork — see
+  [docs/HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md).
+
 This repo is intentionally separate from `pd-agent-bridge`. The two tools are meant to run side by side in a larger human/agent performance setup, but the coding agent is the only glue between them. The Rytm bridge should remain useful on its own for inspecting, validating, queueing, and applying Rytm operations.
 
 ## Shape
@@ -47,7 +59,9 @@ npm run hardware:songs -- --execute
 npm run hardware:scheduler -- --execute
 ```
 
-No npm install is required for the current mock slice. Rust dependencies are resolved by Cargo.
+The runtime has zero npm dependencies; `npm install` provisions only the dev-time
+TypeScript checker (`npm run typecheck`, included in `npm run check`). Rust
+dependencies are resolved by Cargo.
 
 Hardware commands run from `daemon/` and refuse state-changing operations unless `--execute` is present:
 
@@ -75,7 +89,9 @@ cargo run --manifest-path daemon/Cargo.toml -- serve --adapter hardware --clock-
 
 Both modes use the same request/response/event protocol. The hardware adapter reconnects its MIDI session as needed and owns its revision, operation-set idempotency, durable queue, raw snapshots, readback verification, rollback, transport epoch, and event journal. Its default store is `~/.analog-rytm-agent-bridge/hardware-state.json`; `--state-dir` selects an isolated store. See [docs/DAEMON_RPC.md](docs/DAEMON_RPC.md).
 
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the overall design.
 See [docs/HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md) before running write tests.
+See [docs/CODE_REVIEW_2026-07-17.md](docs/CODE_REVIEW_2026-07-17.md) for the second-opinion review findings and their dispositions.
 See [docs/HARDWARE_VALIDATION_2026-07-17_COMPLETE.md](docs/HARDWARE_VALIDATION_2026-07-17_COMPLETE.md) for the complete two-phase OS 1.72 certificate and restored final state.
 See [docs/CONTROL_SURFACE.md](docs/CONTROL_SURFACE.md) for the current control matrix.
 See [docs/OS_1_72_CONTROL_MAP.md](docs/OS_1_72_CONTROL_MAP.md) for the evidence-driven mapping of every manual control family.

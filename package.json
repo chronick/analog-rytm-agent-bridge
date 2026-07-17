@@ -6,8 +6,9 @@
   "description": "Standalone agent bridge for semantic Analog Rytm control.",
   "scripts": {
     "test": "node --experimental-transform-types --test test/*.test.ts",
+    "typecheck": "tsc",
     "rust:test": "cd daemon && cargo test",
-    "check": "npm test && npm run rust:test",
+    "check": "npm test && npm run typecheck && npm run rust:test",
     "demo": "node --experimental-transform-types src/bin/mock-demo.ts",
     "hardware:control": "node --experimental-transform-types src/bin/verify-hardware-control.ts",
     "hardware:all": "node --experimental-transform-types src/bin/verify-hardware-all.ts",
@@ -20,5 +21,9 @@
   },
   "engines": {
     "node": ">=22.14"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2"
   }
 }
