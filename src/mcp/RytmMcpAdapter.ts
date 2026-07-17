@@ -2,6 +2,7 @@ import type {
   RytmCapturePatternAudioInput,
   RytmChangePatternInput,
   RytmClearSampleRamInput,
+  RytmInspectSongInput,
   RytmLiveParameterInput,
   RytmOperationSetInput,
   RytmPatternDeltaInput,
@@ -12,6 +13,7 @@ import type {
   RytmSetTransportInput,
   RytmSetActiveSceneInput,
   RytmSetPerformanceMacroInput,
+  RytmSongDeltaInput,
   RytmSnapshotInput,
   RytmStartRecordingInput,
   RytmStopRecordingInput,
@@ -57,6 +59,19 @@ export class RytmMcpAdapter {
         },
       },
       {
+        name: "rytm_inspect_song",
+        description: "Inspect one or all Songs as compact rows, chains, repeats, track mutes, capabilities, and optional Pattern/Kit references.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            scope: { enum: ["work_buffer", "stored", "all"] },
+            song: { type: "integer", minimum: 1, maximum: 16 },
+            resolveReferences: { type: "boolean" },
+          },
+          additionalProperties: false,
+        },
+      },
+      {
         name: "rytm_inspect_kit",
         description: "Return compact track-level, retrig, Sound, FX, and control-input state for the active Kit.",
         inputSchema: emptyInput,
@@ -83,6 +98,18 @@ export class RytmMcpAdapter {
           type: "object",
           properties: {
             pattern: { type: "string" },
+            operations: { type: "array", minItems: 1, items: { type: "object" } },
+          },
+          required: ["operations"],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: "rytm_propose_song_delta",
+        description: "Validate Song row operations and return compact base/projected Song state without writing the device.",
+        inputSchema: {
+          type: "object",
+          properties: {
             operations: { type: "array", minItems: 1, items: { type: "object" } },
           },
           required: ["operations"],
@@ -325,6 +352,9 @@ export class RytmMcpAdapter {
         return this.daemon
           ? this.daemon.inspectPattern((args as { pattern?: string }).pattern)
           : this.service.inspectPattern((args as { pattern?: string }).pattern);
+      case "rytm_inspect_song":
+        if (!this.daemon) throw new Error("Rust Rytm daemon is required for Song inspection");
+        return this.daemon.inspectSong(args as RytmInspectSongInput);
       case "rytm_inspect_kit":
         return this.daemon ? this.daemon.inspectKit() : this.service.inspectKit();
       case "rytm_inspect_track_sound":
@@ -337,6 +367,9 @@ export class RytmMcpAdapter {
         return this.daemon
           ? this.daemon.proposePatternDelta(args as RytmPatternDeltaInput)
           : this.service.proposePatternDelta(args as RytmPatternDeltaInput);
+      case "rytm_propose_song_delta":
+        if (!this.daemon) throw new Error("Rust Rytm daemon is required for Song proposals");
+        return this.daemon.proposeSongDelta(args as RytmSongDeltaInput);
       case "rytm_validate_operations":
         return this.daemon
           ? this.daemon.validateOperations((args as { operations: RytmPersistentOperation[] }).operations)

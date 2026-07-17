@@ -21,6 +21,7 @@ import type {
   RytmClearSampleRamInput,
   RytmClearedSampleRam,
   RytmLiveParameterInput,
+  RytmInspectSongInput,
   RytmOperationSetDryRun,
   RytmOperationSetInput,
   RytmPatternDeltaInput,
@@ -34,6 +35,8 @@ import type {
   RytmSetTransportInput,
   RytmSetActiveSceneInput,
   RytmSetPerformanceMacroInput,
+  RytmSongDeltaInput,
+  RytmSongSummary,
   RytmSnapshotInput,
   RytmStartRecordingInput,
   RytmStateSnapshot,
@@ -162,6 +165,10 @@ export class RustDaemonClient implements RytmDaemonApi {
     return this.request("pattern.inspect", pattern === undefined ? {} : { pattern });
   }
 
+  async inspectSong(input: RytmInspectSongInput = {}): Promise<RytmSongSummary | { songs: RytmSongSummary[]; count: number }> {
+    return this.request("song.inspect", input as unknown as Record<string, unknown>);
+  }
+
   async inspectKit(): Promise<unknown> {
     return this.request("kit.inspect");
   }
@@ -183,6 +190,10 @@ export class RustDaemonClient implements RytmDaemonApi {
     basePattern: RytmPatternSummary;
     projectedPattern?: RytmPatternSummary;
   }> {
+    return this.request("operations.propose", input as unknown as Record<string, unknown>);
+  }
+
+  async proposeSongDelta(input: RytmSongDeltaInput): Promise<unknown> {
     return this.request("operations.propose", input as unknown as Record<string, unknown>);
   }
 

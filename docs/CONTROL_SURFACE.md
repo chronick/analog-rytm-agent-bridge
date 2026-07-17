@@ -4,7 +4,9 @@ This matrix describes the hardware adapter. The mock adapter additionally suppor
 
 ## Inspect
 
-The agent can read compact summaries through `device.inspect_state`, `pattern.inspect`, `kit.inspect`, `sound.inspect`, and `global.inspect`. The device summary includes the work-buffer Pattern, all 12 Kit Sounds, machine-specific parameters, sample/filter/amp/LFO/settings pages, track levels and retrig, all Kit FX, control inputs, Global routing, metronome, MIDI sync/ports/channels, sequencer settings, and UI/recorder Settings.
+The agent can read compact summaries through `device.inspect_state`, `pattern.inspect`, `song.inspect`, `kit.inspect`, `sound.inspect`, and `global.inspect`. The device summary includes the work-buffer Pattern and Song, all 12 Kit Sounds, machine-specific parameters, sample/filter/amp/LFO/settings pages, track levels and retrig, all Kit FX, control inputs, Global routing, metronome, MIDI sync/ports/channels, sequencer settings, and UI/recorder Settings.
+
+`song.inspect` reads the work buffer, one stored slot, or all 17 Song objects. Optional reference resolution returns compact availability, Pattern length, Kit number, and Kit name evidence for each distinct Pattern used by the Song without embedding full Pattern or Kit payloads.
 
 Full project regeneration is intentionally absent. Summaries describe the active work buffers and bridge capabilities, while raw SysEx stays inside the daemon snapshot boundary.
 
@@ -25,7 +27,9 @@ Full project regeneration is intentionally absent. Summaries describe the active
 
 Scene and Performance definitions are part of the Kit state lane. `set_*_lock`, `replace_*`, `copy_*`, and `clear_*` address public macro IDs 1 through 12. Voice locks use tracks `BD` through `CB`; FX locks use track `FX`. Inspection returns compact semantic parameter names, pages, raw parameter IDs, values or signed depths, per-macro lock counts, unknown-lock counts, and active Scene state. Each macro family has 48 lock slots per Kit; replacement rejects duplicate track/parameter targets before writing.
 
-All writes are delta based. They validate the decoded copy, compare codec-canonical desired state to current state, skip identical declarations, snapshot raw objects, write only changed object families, re-query, and automatically restore the raw baseline on mismatch.
+Song definitions use `set_song_name`, `replace_song`, `insert_song_row`, `update_song_row`, `move_song_row`, `copy_song_row`, `remove_song_row`, and `clear_song`. Row indices are zero based; Pattern slots are `A01` through `H16`; repeats are 1 through 256; rows can chain up to 256 Pattern positions total; track mutes use the 12 named voice tracks. A transaction may address only one Song target, either the work buffer or stored Song 1 through 16. Song definition writes do not activate Song mode, change the active Pattern, or alter transport.
+
+All writes are delta based. They validate the decoded copy, compare codec-canonical desired state to current state, skip identical declarations, snapshot raw objects, write only changed object families, re-query, and automatically restore the raw baseline on mismatch. Explicit snapshots include the work-buffer Song and all 16 stored Songs; routine reconciliation reads the work buffer and does not infer stored Song drift from an unqueried slot.
 
 ## Realtime Lane
 
@@ -47,6 +51,6 @@ Filesystem writes require stopped transport and are intended for preparation, no
 
 ## Capability Gaps
 
-- Songs remain disabled pending typed maintained-fork codec and hardware validation.
 - Overbridge is not a control dependency. Class-compliant stereo capture is implemented; Overbridge multitrack capture is a separate milestone.
+- Song tempo overrides, Pattern-length overrides, jumps, loops, row labels, explicit end markers, and Song activation are disabled because the maintained codec does not yet model them. Definition control is independent of transport and Pattern selection.
 - The fork targets firmware 1.70. Successful connected-device round trips are recorded as compatibility evidence, not universal certification for later firmware.

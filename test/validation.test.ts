@@ -143,3 +143,77 @@ test("validates transient macro control independently from persistent revisionin
   assert.throws(() => validateSetActiveSceneInput({ scene: 13 }, macroCapabilities), /scene/);
   assert.throws(() => validateSetPerformanceMacroInput({ performance: 1, amount: 128 }, macroCapabilities), /amount/);
 });
+
+test("validates declarative Song row operations and one-target transactions", () => {
+  const songCapabilities = { ...capabilities, songs: true };
+  assert.doesNotThrow(() => validateOperationSetInput({
+    expectedRevision: 0,
+    applyAt: { kind: "next_pattern" },
+    latePolicy: "roll-forward",
+    operations: [
+      {
+        type: "replace_song",
+        target: { scope: "stored", song: 1 },
+        name: "AGENT SONG",
+        rows: [{
+          repeats: 2,
+          patterns: [
+            { pattern: "A01" },
+            { pattern: "A02", mutedTracks: ["BD", "SD"] },
+          ],
+        }],
+      },
+      {
+        type: "insert_song_row",
+        target: { scope: "stored", song: 1 },
+        row: 1,
+        value: { repeats: 1, patterns: [{ pattern: "B01" }] },
+      },
+      { type: "move_song_row", target: { scope: "stored", song: 1 }, sourceRow: 0, targetRow: 1 },
+      { type: "copy_song_row", target: { scope: "stored", song: 1 }, sourceRow: 0, targetRow: 2 },
+      { type: "remove_song_row", target: { scope: "stored", song: 1 }, row: 0 },
+    ],
+  }, songCapabilities));
+
+  assert.throws(() => validateOperationSetInput({
+    expectedRevision: 0,
+    applyAt: { kind: "next_step" },
+    latePolicy: "reject",
+    operations: [
+      { type: "set_song_name", name: "WORK BUFFER" },
+      { type: "clear_song", target: { scope: "stored", song: 1 } },
+    ],
+  }, songCapabilities), /only one Song target/);
+});
+
+test("rejects invalid Song names, references, mutes, and capacities", () => {
+  const songCapabilities = { ...capabilities, songs: true };
+  const result = collectOperationValidation([
+    { type: "set_song_name", name: "THIS NAME IS TOO LONG" },
+    {
+      type: "replace_song",
+      rows: [{ repeats: 1, patterns: [{ pattern: "I01" }] }],
+    },
+    {
+      type: "insert_song_row",
+      row: 0,
+      value: { repeats: 257, patterns: [{ pattern: "A01" }] },
+    },
+    {
+      type: "update_song_row",
+      row: 0,
+      value: { repeats: 1, patterns: [{ pattern: "A01", mutedTracks: ["BD", "BD"] }] },
+    },
+  ], songCapabilities);
+  assert.equal(result.valid, false);
+  assert.equal(result.errors.length, 4);
+
+  assert.throws(() => validateOperationSetInput({
+    expectedRevision: 0,
+    applyAt: { kind: "next_step" },
+    latePolicy: "reject",
+    operations: [
+      { type: "clear_song", target: { scope: "stored", song: 17 } },
+    ],
+  }, songCapabilities), /song must be an integer between 1 and 16/);
+});

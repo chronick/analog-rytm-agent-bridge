@@ -29,6 +29,26 @@ export interface RytmPerformanceLockInput {
   depth: number;
 }
 
+export type RytmSongTarget =
+  | { scope: "work_buffer" }
+  | { scope: "stored"; song: number };
+
+export interface RytmSongPatternInput {
+  pattern: RytmPatternSlot;
+  mutedTracks?: RytmTrackId[];
+}
+
+export interface RytmSongRowInput {
+  patterns: RytmSongPatternInput[];
+  repeats: number;
+}
+
+export interface RytmInspectSongInput {
+  scope?: "work_buffer" | "stored" | "all";
+  song?: number;
+  resolveReferences?: boolean;
+}
+
 export type RytmBoundaryKind = "next_step" | "next_beat" | "next_measure" | "next_pattern";
 export type RytmLatePolicy = "roll-forward" | "reject";
 
@@ -214,6 +234,50 @@ export type RytmPersistentOperation =
       type: "copy_performance";
       sourcePerformance: number;
       targetPerformance: number;
+    }
+  | {
+      type: "set_song_name";
+      target?: RytmSongTarget;
+      name: string;
+    }
+  | {
+      type: "replace_song";
+      target?: RytmSongTarget;
+      name?: string;
+      rows: RytmSongRowInput[];
+    }
+  | {
+      type: "insert_song_row";
+      target?: RytmSongTarget;
+      row: number;
+      value: RytmSongRowInput;
+    }
+  | {
+      type: "update_song_row";
+      target?: RytmSongTarget;
+      row: number;
+      value: RytmSongRowInput;
+    }
+  | {
+      type: "move_song_row";
+      target?: RytmSongTarget;
+      sourceRow: number;
+      targetRow: number;
+    }
+  | {
+      type: "copy_song_row";
+      target?: RytmSongTarget;
+      sourceRow: number;
+      targetRow: number;
+    }
+  | {
+      type: "remove_song_row";
+      target?: RytmSongTarget;
+      row: number;
+    }
+  | {
+      type: "clear_song";
+      target?: RytmSongTarget;
     };
 
 export interface RytmOperationSetInput {
@@ -240,7 +304,7 @@ export interface QueuedRytmOperationSet {
   rejectionReason?: string;
   resolvedBoundary?: RytmResolvedBoundary;
   changed?: boolean;
-  changedObjects?: Partial<Record<"pattern" | "kit" | "global" | "settings", boolean>>;
+  changedObjects?: Partial<Record<"pattern" | "kit" | "global" | "settings", boolean>> & { songs?: string[] };
   writeStatus?: "already-converged" | "applied-and-verified";
   acknowledgement?: "verified" | "not_applied" | "rollback_verified" | "rollback_failed";
 }
@@ -286,6 +350,48 @@ export interface RytmPatternSummary {
   trigs: RytmPatternTrigSummary[];
 }
 
+export interface RytmSongPatternSummary {
+  pattern: RytmPatternSlot;
+  mutedTracks: RytmTrackId[];
+  mutedTracksMask: number;
+}
+
+export interface RytmSongRowSummary {
+  row: number;
+  repeats: number;
+  patterns: RytmSongPatternSummary[];
+}
+
+export interface RytmSongReferenceSummary {
+  pattern: RytmPatternSlot;
+  available: boolean;
+  kitNumber?: number;
+  kitName?: string;
+  patternLength?: number;
+}
+
+export interface RytmSongSummary {
+  target: RytmSongTarget;
+  name: string;
+  rowCount: number;
+  patternPositionCount: number;
+  rows: RytmSongRowSummary[];
+  capabilities: {
+    name: boolean;
+    rows: boolean;
+    patternChains: boolean;
+    repeats: boolean;
+    trackMutes: boolean;
+    tempoOverrides: boolean;
+    patternLengthOverrides: boolean;
+    jumps: boolean;
+    loops: boolean;
+    rowLabels: boolean;
+    explicitEnd: boolean;
+  };
+  references?: RytmSongReferenceSummary[];
+}
+
 export interface RytmStateSnapshot {
   snapshotId: RytmSnapshotId;
   label?: string;
@@ -301,6 +407,7 @@ export interface RytmBridgeState {
   transport: RytmTransportState;
   liveMacros: RytmLiveMacroState;
   activePattern: RytmPatternSummary;
+  workBufferSong?: RytmSongSummary;
   operationSets: QueuedRytmOperationSet[];
   snapshots: RytmStateSnapshot[];
 }
@@ -358,6 +465,10 @@ export interface RytmRollbackInput {
 
 export interface RytmPatternDeltaInput {
   pattern?: RytmPatternSlot;
+  operations: RytmPersistentOperation[];
+}
+
+export interface RytmSongDeltaInput {
   operations: RytmPersistentOperation[];
 }
 

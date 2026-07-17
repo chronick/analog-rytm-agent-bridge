@@ -43,7 +43,7 @@ The bridge selects the first input and output whose names contain `Elektron Anal
 
 ## Capture Before Writing
 
-Use a unique, ignored run directory. A capture stores raw work-buffer SysEx plus compact JSON summaries for the current pattern, kit, global, and settings objects.
+Use a unique, ignored run directory. A capture stores raw work-buffer SysEx plus compact JSON summaries for the current Pattern, Kit, Global, Settings, and Song objects.
 
 ```bash
 cargo run -- capture-state ../hardware/runs/my-baseline
@@ -103,6 +103,22 @@ npm run hardware:macros -- --execute
 ```
 
 Scene and Performance definitions are persistent revisioned Kit state. Active Scene and Performance amounts are live MIDI state and do not change revision. Performance values are send-cache evidence rather than device readback. The harness restores the prior active Scene and sends Performance amount zero before raw rollback; emergency restoration also runs from `finally`.
+
+## Song Certification
+
+The dry run reads the work-buffer Song and all 16 stored Songs, validates every supported Song delta, resolves codec-canonical projected state, and confirms the active Pattern is unchanged:
+
+```bash
+npm run hardware:songs
+```
+
+The execute form snapshots every Song object, exercises name plus clear/replace/insert/update/copy/move/remove row operations on stored Song 16, verifies immediate readback and operation-set replay, queues a name update for the next beat, confirms the active Pattern did not change, and restores the exact raw baseline:
+
+```bash
+npm run hardware:songs -- --execute
+```
+
+Song definitions support Pattern chains, repeats, and per-position track mutes. This command does not activate Song mode or select a Pattern. Unsupported tempo/length overrides, jumps, loops, row labels, explicit end markers, and Song activation remain capability-gated.
 
 ## Stereo Audio Certification
 
@@ -189,7 +205,7 @@ cargo run -- create-demo-patterns --execute ../hardware/runs/my-demo
 - Sound work-buffer readback did not provide a reliable proof for live filter CC validation. The harness verifies track level through the Kit work buffer instead.
 - Notes have no device-state acknowledgement. Confirm their audio separately when building closed-loop tests.
 - Class-compliant capture is one stereo pair at 48 kHz. Overbridge multitrack capture is a later, independent lane.
-- Songs and project-wide writes remain disabled or outside the current harness. Scene and Performance definitions and live controls are certified separately by `hardware:macros`.
+- Song names, rows, chains, repeats, and track mutes are certified separately by `hardware:songs`. Tempo/length overrides, jumps, loops, labels, explicit end markers, and Song activation remain unavailable.
 
 ## Power Cycle And Refresh
 

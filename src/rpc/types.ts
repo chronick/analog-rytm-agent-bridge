@@ -8,6 +8,7 @@ import type {
   RytmClearSampleRamInput,
   RytmClearedSampleRam,
   RytmLiveParameterInput,
+  RytmInspectSongInput,
   RytmOperationSetDryRun,
   RytmOperationSetInput,
   RytmPatternDeltaInput,
@@ -21,6 +22,8 @@ import type {
   RytmSetTransportInput,
   RytmSetActiveSceneInput,
   RytmSetPerformanceMacroInput,
+  RytmSongDeltaInput,
+  RytmSongSummary,
   RytmSnapshotInput,
   RytmStartRecordingInput,
   RytmStateSnapshot,
@@ -88,6 +91,7 @@ export interface RytmDaemonApi {
   health(): Promise<RytmDaemonHealth>;
   inspectDeviceState(): Promise<unknown>;
   inspectPattern(pattern?: string): Promise<unknown>;
+  inspectSong(input?: RytmInspectSongInput): Promise<RytmSongSummary | { songs: RytmSongSummary[]; count: number }>;
   inspectKit(): Promise<unknown>;
   inspectSound(track: string): Promise<unknown>;
   inspectGlobal(): Promise<unknown>;
@@ -97,6 +101,7 @@ export interface RytmDaemonApi {
     basePattern: RytmPatternSummary;
     projectedPattern?: RytmPatternSummary;
   }>;
+  proposeSongDelta(input: RytmSongDeltaInput): Promise<unknown>;
   queueOperations(input: RytmOperationSetInput): Promise<QueuedRytmOperationSet | RytmOperationSetDryRun>;
   applyOperationsNow(
     input: Omit<RytmOperationSetInput, "applyAt" | "latePolicy"> & Partial<Pick<RytmOperationSetInput, "applyAt" | "latePolicy">>,

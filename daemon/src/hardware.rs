@@ -1,4 +1,7 @@
-use crate::state::PersistentOperation;
+use crate::state::{
+    operation_song_target, parse_song_inspect_request, PersistentOperation, SongPatternInput,
+    SongRowInput, SongTarget,
+};
 use midir::{Ignore, MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 use rytm_rs::{
     object::{
@@ -6,6 +9,7 @@ use rytm_rs::{
         kit::Kit,
         pattern::Pattern,
         settings::Settings,
+        song::Song,
         sound::{machine::MachineParameterValue, Sound},
     },
     prelude::*,
@@ -13,6 +17,7 @@ use rytm_rs::{
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::Path,
     sync::mpsc::{self, Receiver, RecvTimeoutError},
@@ -43,6 +48,7 @@ pub struct StateCapture {
     pub kit_raw: Vec<u8>,
     pub global_raw: Vec<u8>,
     pub settings_raw: Vec<u8>,
+    pub song_raw: BTreeMap<String, Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -51,33 +57,36 @@ pub struct RawState {
     pub kit_raw: Vec<u8>,
     pub global_raw: Vec<u8>,
     pub settings_raw: Vec<u8>,
+    pub song_raw: BTreeMap<String, Vec<u8>>,
     pub summary: Value,
 }
 
 impl RawState {
-    pub fn from_capture(capture: &StateCapture) -> Self {
-        Self {
+    pub fn from_capture(capture: &StateCapture) -> HardwareResult<Self> {
+        Ok(Self {
             pattern_raw: capture.pattern_raw.clone(),
             kit_raw: capture.kit_raw.clone(),
             global_raw: capture.global_raw.clone(),
             settings_raw: capture.settings_raw.clone(),
-            summary: state_summary(&capture.project),
-        }
+            song_raw: capture.song_raw.clone(),
+            summary: capture_summary(capture)?,
+        })
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangedObjects {
     pub pattern: bool,
     pub kit: bool,
     pub global: bool,
     pub settings: bool,
+    pub songs: Vec<String>,
 }
 
 impl ChangedObjects {
-    pub fn any(self) -> bool {
-        self.pattern || self.kit || self.global || self.settings
+    pub fn any(&self) -> bool {
+        self.pattern || self.kit || self.global || self.settings || !self.songs.is_empty()
     }
 }
 
@@ -240,6 +249,11 @@ pub fn read_work_buffer_state(session: &mut RytmMidiSession) -> HardwareResult<S
     project
         .update_from_sysex_response(&settings_raw)
         .map_err(|error| firmware_decode_error("settings", error))?;
+    let song_raw = query_object(session, &SongQuery::new_targeting_work_buffer())?;
+    project
+        .update_from_sysex_response(&song_raw)
+        .map_err(|error| firmware_decode_error("song", error))?;
+    let song_raw = BTreeMap::from([(SongTarget::WorkBuffer.key(), song_raw)]);
 
     Ok(StateCapture {
         project,
@@ -247,7 +261,96 @@ pub fn read_work_buffer_state(session: &mut RytmMidiSession) -> HardwareResult<S
         kit_raw,
         global_raw,
         settings_raw,
+        song_raw,
     })
+}
+
+pub fn read_operation_state(
+    session: &mut RytmMidiSession,
+    operations: &[PersistentOperation],
+) -> HardwareResult<StateCapture> {
+    let mut capture = read_work_buffer_state(session)?;
+    if let Some(target) = operation_song_target(operations)? {
+        populate_song_target(session, &mut capture, &target)?;
+    }
+    Ok(capture)
+}
+
+pub fn read_snapshot_state(session: &mut RytmMidiSession) -> HardwareResult<StateCapture> {
+    let mut capture = read_work_buffer_state(session)?;
+    for song in 1..=16 {
+        populate_song_target(session, &mut capture, &SongTarget::Stored { song })?;
+    }
+    Ok(capture)
+}
+
+fn populate_song_target(
+    session: &mut RytmMidiSession,
+    capture: &mut StateCapture,
+    target: &SongTarget,
+) -> HardwareResult<()> {
+    let key = target.key();
+    if capture.song_raw.contains_key(&key) {
+        return Ok(());
+    }
+    let SongTarget::Stored { song } = target else {
+        return Err("work-buffer Song was missing from the base state capture".to_string());
+    };
+    if !(1..=16).contains(song) {
+        return Err(format!("stored Song must be between 1 and 16: {song}"));
+    }
+    let query = SongQuery::new(usize::from(*song - 1)).map_err(error_string)?;
+    let raw = query_object(session, &query)?;
+    capture
+        .project
+        .update_from_sysex_response(&raw)
+        .map_err(|error| firmware_decode_error("song", error))?;
+    capture.song_raw.insert(key, raw);
+    Ok(())
+}
+
+fn inspect_song_targets(session: &mut RytmMidiSession, keys: &[String]) -> HardwareResult<Value> {
+    let mut capture = read_work_buffer_state(session)?;
+    for key in keys {
+        populate_song_target(session, &mut capture, &song_target_from_key(key)?)?;
+    }
+    capture_summary(&capture)
+}
+
+fn capture_summary(capture: &StateCapture) -> HardwareResult<Value> {
+    let mut summary = state_summary(&capture.project);
+    summary["songs"] = song_map_summary(&capture.project, capture.song_raw.keys())?;
+    Ok(summary)
+}
+
+pub fn canonical_capture_summary(capture: &StateCapture) -> HardwareResult<Value> {
+    let mut summary = canonical_state_summary(&capture.project)?;
+    let mut songs = serde_json::Map::new();
+    for key in capture.song_raw.keys() {
+        let target = song_target_from_key(key)?;
+        let encoded = project_song(&capture.project, &target)?
+            .as_sysex()
+            .map_err(error_string)?;
+        let canonical = Song::from_sysex(&encoded).map_err(error_string)?;
+        songs.insert(key.clone(), song_summary(&canonical, &target)?);
+    }
+    summary["songs"] = Value::Object(songs);
+    Ok(summary)
+}
+
+fn song_map_summary<'a>(
+    project: &RytmProject,
+    keys: impl Iterator<Item = &'a String>,
+) -> HardwareResult<Value> {
+    let mut songs = serde_json::Map::new();
+    for key in keys {
+        let target = song_target_from_key(key)?;
+        songs.insert(
+            key.clone(),
+            song_summary(project_song(project, &target)?, &target)?,
+        );
+    }
+    Ok(Value::Object(songs))
 }
 
 pub fn capture_state(session: &mut RytmMidiSession, directory: &Path) -> HardwareResult<Value> {
@@ -257,6 +360,14 @@ pub fn capture_state(session: &mut RytmMidiSession, directory: &Path) -> Hardwar
     write_file(directory, "work-buffer-kit.syx", &capture.kit_raw)?;
     write_file(directory, "work-buffer-global.syx", &capture.global_raw)?;
     write_file(directory, "settings.syx", &capture.settings_raw)?;
+    write_file(
+        directory,
+        "work-buffer-song.syx",
+        capture
+            .song_raw
+            .get("work_buffer")
+            .expect("work-buffer capture includes Song bytes"),
+    )?;
 
     let summary = state_summary(&capture.project);
     write_file(
@@ -272,20 +383,117 @@ pub fn inspect_work_buffer_state(session: &mut RytmMidiSession) -> HardwareResul
     Ok(state_summary(&capture.project))
 }
 
+pub fn inspect_song_state(session: &mut RytmMidiSession, params: &Value) -> HardwareResult<Value> {
+    let (targets, resolve_references) = parse_song_inspect_request(params)?;
+    let mut capture = read_work_buffer_state(session)?;
+    for target in &targets {
+        populate_song_target(session, &mut capture, target)?;
+    }
+    let mut songs = targets
+        .iter()
+        .map(|target| song_summary(project_song(&capture.project, target)?, target))
+        .collect::<HardwareResult<Vec<_>>>()?;
+    if resolve_references {
+        let references = resolve_song_references(session, &songs)?;
+        for song in &mut songs {
+            let referenced = song["rows"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|row| row["patterns"].as_array().into_iter().flatten())
+                .filter_map(|position| position["pattern"].as_str())
+                .collect::<BTreeSet<_>>();
+            song["references"] = json!(references
+                .iter()
+                .filter(|reference| reference["pattern"]
+                    .as_str()
+                    .is_some_and(|slot| referenced.contains(slot)))
+                .cloned()
+                .collect::<Vec<_>>());
+        }
+    }
+    if songs.len() == 1 {
+        return Ok(songs.into_iter().next().expect("one Song was requested"));
+    }
+    Ok(json!({
+        "count": songs.len(),
+        "songs": songs,
+        "capabilities": song_summary(capture.project.work_buffer().song(), &SongTarget::WorkBuffer)?["capabilities"].clone(),
+    }))
+}
+
+fn resolve_song_references(
+    session: &mut RytmMidiSession,
+    songs: &[Value],
+) -> HardwareResult<Vec<Value>> {
+    let slots = songs
+        .iter()
+        .flat_map(|song| song["rows"].as_array().into_iter().flatten())
+        .flat_map(|row| row["patterns"].as_array().into_iter().flatten())
+        .filter_map(|position| position["pattern"].as_str())
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    let mut kit_names = BTreeMap::new();
+    let mut references = Vec::new();
+    for slot in slots {
+        let index = parse_pattern_slot(&slot)?;
+        let raw = query_object(session, &PatternQuery::new(index).map_err(error_string)?)?;
+        let pattern = decode_stored_pattern_summary(&raw, index)?;
+        let kit_number = pattern["kitNumber"].as_u64().unwrap_or(255);
+        let kit_name = if kit_number < 128 {
+            if !kit_names.contains_key(&kit_number) {
+                let raw = query_object(
+                    session,
+                    &KitQuery::new(kit_number as usize).map_err(error_string)?,
+                )?;
+                let mut project = RytmProject::try_default().map_err(error_string)?;
+                project
+                    .update_from_sysex_response(&raw)
+                    .map_err(|error| firmware_decode_error("kit", error))?;
+                kit_names.insert(
+                    kit_number,
+                    project.kits()[kit_number as usize]
+                        .name()
+                        .trim_end_matches('\0')
+                        .to_string(),
+                );
+            }
+            kit_names.get(&kit_number).cloned()
+        } else {
+            None
+        };
+        references.push(json!({
+            "pattern": slot,
+            "available": true,
+            "kitNumber": kit_number,
+            "kitName": kit_name,
+            "patternLength": pattern["masterLength"].clone(),
+        }));
+    }
+    Ok(references)
+}
+
 pub fn apply_persistent_operations(
     capture: &mut StateCapture,
     operations: &[PersistentOperation],
 ) -> HardwareResult<ChangedObjects> {
-    let before = canonical_state_summary(&capture.project)?;
+    let before = canonical_capture_summary(capture)?;
     for operation in operations {
         apply_persistent_operation(&mut capture.project, operation)?;
     }
-    let after = canonical_state_summary(&capture.project)?;
+    let after = canonical_capture_summary(capture)?;
+    let songs = capture
+        .song_raw
+        .keys()
+        .filter(|key| before["songs"][*key] != after["songs"][*key])
+        .cloned()
+        .collect();
     Ok(ChangedObjects {
         pattern: before["pattern"] != after["pattern"],
         kit: before["kit"] != after["kit"],
         global: before["global"] != after["global"],
         settings: before["settings"] != after["settings"],
+        songs,
     })
 }
 
@@ -293,7 +501,7 @@ pub fn write_capture_delta(
     session: &mut RytmMidiSession,
     capture: &StateCapture,
     baseline: &RawState,
-    changed: ChangedObjects,
+    changed: &ChangedObjects,
 ) -> HardwareResult<Value> {
     write_capture_delta_internal(session, capture, baseline, changed, false)
 }
@@ -303,7 +511,7 @@ pub fn write_capture_delta_with_test_verification_failure(
     session: &mut RytmMidiSession,
     capture: &StateCapture,
     baseline: &RawState,
-    changed: ChangedObjects,
+    changed: &ChangedObjects,
 ) -> HardwareResult<Value> {
     write_capture_delta_internal(session, capture, baseline, changed, true)
 }
@@ -312,10 +520,10 @@ fn write_capture_delta_internal(
     session: &mut RytmMidiSession,
     capture: &StateCapture,
     baseline: &RawState,
-    changed: ChangedObjects,
+    changed: &ChangedObjects,
     force_verification_failure: bool,
 ) -> HardwareResult<Value> {
-    let expected = canonical_state_summary(&capture.project)?;
+    let expected = canonical_capture_summary(capture)?;
     if !changed.any() {
         return Ok(json!({
             "status": "already-converged",
@@ -326,7 +534,7 @@ fn write_capture_delta_internal(
 
     let write_result: HardwareResult<Value> = (|| {
         send_changed_project(session, &capture.project, changed)?;
-        let observed = inspect_work_buffer_state(session)?;
+        let observed = inspect_song_targets(session, &changed.songs)?;
         if force_verification_failure {
             return Err("injected readback verification failure".to_string());
         }
@@ -354,7 +562,7 @@ fn write_capture_delta_internal(
 pub fn restore_raw_state(
     session: &mut RytmMidiSession,
     raw: &RawState,
-    changed: ChangedObjects,
+    changed: &ChangedObjects,
 ) -> HardwareResult<Value> {
     if changed.pattern {
         session.send(&raw.pattern_raw)?;
@@ -372,7 +580,15 @@ pub fn restore_raw_state(
         session.send(&raw.settings_raw)?;
         thread::sleep(Duration::from_millis(450));
     }
-    let observed = inspect_work_buffer_state(session)?;
+    for key in &changed.songs {
+        let bytes = raw
+            .song_raw
+            .get(key)
+            .ok_or_else(|| format!("rollback snapshot is missing Song target {key}"))?;
+        session.send(bytes)?;
+        thread::sleep(Duration::from_millis(750));
+    }
+    let observed = inspect_song_targets(session, &changed.songs)?;
     verify_changed_sections(&raw.summary, &observed, changed)?;
     Ok(observed)
 }
@@ -380,7 +596,7 @@ pub fn restore_raw_state(
 fn send_changed_project(
     session: &mut RytmMidiSession,
     project: &RytmProject,
-    changed: ChangedObjects,
+    changed: &ChangedObjects,
 ) -> HardwareResult<()> {
     if changed.pattern {
         session.send(
@@ -416,13 +632,21 @@ fn send_changed_project(
         session.send(&project.settings().as_sysex().map_err(error_string)?)?;
         thread::sleep(Duration::from_millis(450));
     }
+    for key in &changed.songs {
+        session.send(
+            &song_for_key(project, key)?
+                .as_sysex()
+                .map_err(error_string)?,
+        )?;
+        thread::sleep(Duration::from_millis(750));
+    }
     Ok(())
 }
 
 fn verify_changed_sections(
     expected: &Value,
     observed: &Value,
-    changed: ChangedObjects,
+    changed: &ChangedObjects,
 ) -> HardwareResult<()> {
     for (name, should_compare) in [
         ("pattern", changed.pattern),
@@ -435,6 +659,22 @@ fn verify_changed_sections(
             collect_value_differences(name, &expected[name], &observed[name], &mut differences, 12);
             return Err(format!(
                 "{name} readback did not match the requested state: {}",
+                differences.join("; ")
+            ));
+        }
+    }
+    for key in &changed.songs {
+        if expected["songs"][key] != observed["songs"][key] {
+            let mut differences = Vec::new();
+            collect_value_differences(
+                &format!("songs.{key}"),
+                &expected["songs"][key],
+                &observed["songs"][key],
+                &mut differences,
+                12,
+            );
+            return Err(format!(
+                "Song {key} readback did not match the requested state: {}",
                 differences.join("; ")
             ));
         }
@@ -743,6 +983,95 @@ fn apply_persistent_operation(
                 macro_index(*target_performance, "targetPerformance")?,
             )
             .map_err(error_string),
+        PersistentOperation::SetSongName { target, name } => project_song_mut(project, target)?
+            .set_name(name)
+            .map_err(error_string),
+        PersistentOperation::ReplaceSong { target, name, rows } => {
+            let rows = typed_song_rows(rows)?;
+            let song = project_song_mut(project, target)?;
+            if let Some(name) = name {
+                song.set_name(name).map_err(error_string)?;
+            }
+            song.replace_rows(&rows).map_err(error_string)
+        }
+        PersistentOperation::InsertSongRow { target, row, value } => {
+            let song = project_song_mut(project, target)?;
+            let mut rows = song.rows().map_err(error_string)?;
+            let row = usize::from(*row);
+            if row > rows.len() {
+                return Err(format!(
+                    "row {row} cannot be inserted into a Song with {} rows",
+                    rows.len()
+                ));
+            }
+            rows.insert(row, typed_song_row(value)?);
+            song.replace_rows(&rows).map_err(error_string)
+        }
+        PersistentOperation::UpdateSongRow { target, row, value } => {
+            let song = project_song_mut(project, target)?;
+            let mut rows = song.rows().map_err(error_string)?;
+            let row = usize::from(*row);
+            let existing = rows
+                .get_mut(row)
+                .ok_or_else(|| format!("row {row} does not exist"))?;
+            *existing = typed_song_row(value)?;
+            song.replace_rows(&rows).map_err(error_string)
+        }
+        PersistentOperation::MoveSongRow {
+            target,
+            source_row,
+            target_row,
+        } => {
+            let song = project_song_mut(project, target)?;
+            let mut rows = song.rows().map_err(error_string)?;
+            let source = usize::from(*source_row);
+            let destination = usize::from(*target_row);
+            if source >= rows.len() || destination >= rows.len() {
+                return Err(format!(
+                    "move rows must be within the current {}-row Song",
+                    rows.len()
+                ));
+            }
+            let row = rows.remove(source);
+            rows.insert(destination, row);
+            song.replace_rows(&rows).map_err(error_string)
+        }
+        PersistentOperation::CopySongRow {
+            target,
+            source_row,
+            target_row,
+        } => {
+            let song = project_song_mut(project, target)?;
+            let mut rows = song.rows().map_err(error_string)?;
+            let source = usize::from(*source_row);
+            let destination = usize::from(*target_row);
+            let row = rows
+                .get(source)
+                .cloned()
+                .ok_or_else(|| format!("row {source} does not exist"))?;
+            if destination > rows.len() {
+                return Err(format!(
+                    "row {destination} cannot be inserted into a Song with {} rows",
+                    rows.len()
+                ));
+            }
+            rows.insert(destination, row);
+            song.replace_rows(&rows).map_err(error_string)
+        }
+        PersistentOperation::RemoveSongRow { target, row } => {
+            let song = project_song_mut(project, target)?;
+            let mut rows = song.rows().map_err(error_string)?;
+            let row = usize::from(*row);
+            if row >= rows.len() {
+                return Err(format!("row {row} does not exist"));
+            }
+            rows.remove(row);
+            song.replace_rows(&rows).map_err(error_string)
+        }
+        PersistentOperation::ClearSong { target } => {
+            project_song_mut(project, target)?.clear();
+            Ok(())
+        }
     }
 }
 
@@ -762,6 +1091,77 @@ fn work_buffer_pattern_mut<'a>(
         }
     }
     Ok(project.work_buffer_mut().pattern_mut())
+}
+
+fn project_song<'a>(project: &'a RytmProject, target: &SongTarget) -> HardwareResult<&'a Song> {
+    match target {
+        SongTarget::WorkBuffer => Ok(project.work_buffer().song()),
+        SongTarget::Stored { song } if (1..=16).contains(song) => {
+            Ok(&project.songs()[usize::from(*song - 1)])
+        }
+        SongTarget::Stored { song } => Err(format!("stored Song must be between 1 and 16: {song}")),
+    }
+}
+
+fn project_song_mut<'a>(
+    project: &'a mut RytmProject,
+    target: &SongTarget,
+) -> HardwareResult<&'a mut Song> {
+    match target {
+        SongTarget::WorkBuffer => Ok(project.work_buffer_mut().song_mut()),
+        SongTarget::Stored { song } if (1..=16).contains(song) => {
+            Ok(&mut project.songs_mut()[usize::from(*song - 1)])
+        }
+        SongTarget::Stored { song } => Err(format!("stored Song must be between 1 and 16: {song}")),
+    }
+}
+
+fn song_for_key<'a>(project: &'a RytmProject, key: &str) -> HardwareResult<&'a Song> {
+    project_song(project, &song_target_from_key(key)?)
+}
+
+fn song_target_from_key(key: &str) -> HardwareResult<SongTarget> {
+    if key == "work_buffer" {
+        return Ok(SongTarget::WorkBuffer);
+    }
+    let song = key
+        .strip_prefix("stored:")
+        .ok_or_else(|| format!("invalid Song target key: {key}"))?
+        .parse::<u8>()
+        .map_err(|_| format!("invalid Song target key: {key}"))?;
+    if !(1..=16).contains(&song) {
+        return Err(format!("invalid Song target key: {key}"));
+    }
+    Ok(SongTarget::Stored { song })
+}
+
+fn typed_song_rows(rows: &[SongRowInput]) -> HardwareResult<Vec<SongRow>> {
+    rows.iter().map(typed_song_row).collect()
+}
+
+fn typed_song_row(row: &SongRowInput) -> HardwareResult<SongRow> {
+    let patterns = row
+        .patterns
+        .iter()
+        .map(typed_song_pattern)
+        .collect::<HardwareResult<Vec<_>>>()?;
+    SongRow::try_new(patterns, usize::from(row.repeats)).map_err(error_string)
+}
+
+fn typed_song_pattern(position: &SongPatternInput) -> HardwareResult<SongPattern> {
+    let mut pattern =
+        SongPattern::try_new(parse_pattern_slot(&position.pattern)?).map_err(error_string)?;
+    let mut seen = BTreeSet::new();
+    for track in &position.muted_tracks {
+        let track_index = parse_track_index(track)?;
+        if !seen.insert(track_index) {
+            return Err(format!("mutedTracks contains duplicate track: {track}"));
+        }
+        pattern
+            .set_track_muted(track_index, true)
+            .map_err(error_string)?;
+    }
+    Ok(pattern)
 }
 
 fn exact_nonnegative_usize(value: f64, label: &str) -> HardwareResult<usize> {
@@ -1960,6 +2360,8 @@ pub fn state_summary(project: &RytmProject) -> Value {
             "notes": ["All queried work-buffer object sizes decoded successfully; the device did not expose its OS version through Universal Device Inquiry."]
         },
         "pattern": pattern_summary(project.work_buffer().pattern()),
+        "song": song_summary(project.work_buffer().song(), &SongTarget::WorkBuffer)
+            .expect("typed work-buffer Song remains valid"),
         "kit": kit_summary(project.work_buffer().kit()),
         "settings": settings_summary(project.settings()),
         "global": global_summary(global),
@@ -1981,6 +2383,62 @@ pub fn state_summary(project: &RytmProject) -> Value {
             "trackChannels": track_channels
         }
     })
+}
+
+fn song_summary(song: &Song, target: &SongTarget) -> HardwareResult<Value> {
+    let rows = song
+        .rows()
+        .map_err(error_string)?
+        .into_iter()
+        .enumerate()
+        .map(|(row_index, row)| {
+            let patterns = row
+                .patterns()
+                .iter()
+                .map(|position| {
+                    let mask = position.muted_tracks_mask();
+                    let muted_tracks = TRACK_NAMES
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(track_index, track)| {
+                            (mask & (1 << track_index) != 0).then_some(*track)
+                        })
+                        .collect::<Vec<_>>();
+                    json!({
+                        "pattern": pattern_slot(position.pattern()),
+                        "mutedTracks": muted_tracks,
+                        "mutedTracksMask": mask,
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "row": row_index,
+                "repeats": row.repeats(),
+                "patterns": patterns,
+            })
+        })
+        .collect::<Vec<_>>();
+    let capabilities = song.capabilities();
+    Ok(json!({
+        "target": target,
+        "name": song.name(),
+        "rowCount": rows.len(),
+        "patternPositionCount": rows.iter().map(|row| row["patterns"].as_array().map_or(0, Vec::len)).sum::<usize>(),
+        "rows": rows,
+        "capabilities": {
+            "name": capabilities.name,
+            "rows": capabilities.rows,
+            "patternChains": capabilities.pattern_chains,
+            "repeats": capabilities.repeats,
+            "trackMutes": capabilities.track_mutes,
+            "tempoOverrides": capabilities.tempo_overrides,
+            "patternLengthOverrides": capabilities.pattern_length_overrides,
+            "jumps": capabilities.jumps,
+            "loops": capabilities.loops,
+            "rowLabels": capabilities.row_labels,
+            "explicitEnd": capabilities.explicit_end,
+        },
+    }))
 }
 
 pub fn canonical_state_summary(project: &RytmProject) -> HardwareResult<Value> {
@@ -2013,6 +2471,14 @@ pub fn canonical_state_summary(project: &RytmProject) -> HardwareResult<Value> {
         (
             "settings",
             project.settings().as_sysex().map_err(error_string)?,
+        ),
+        (
+            "song",
+            project
+                .work_buffer()
+                .song()
+                .as_sysex()
+                .map_err(error_string)?,
         ),
     ] {
         canonical
@@ -2791,6 +3257,7 @@ mod tests {
             kit_raw: Vec::new(),
             global_raw: Vec::new(),
             settings_raw: Vec::new(),
+            song_raw: BTreeMap::from([("work_buffer".to_string(), Vec::new())]),
         };
 
         let changed = apply_persistent_operations(&mut capture, &operations).unwrap();
@@ -2851,6 +3318,7 @@ mod tests {
             kit_raw: Vec::new(),
             global_raw: Vec::new(),
             settings_raw: Vec::new(),
+            song_raw: BTreeMap::from([("work_buffer".to_string(), Vec::new())]),
         };
 
         let changed = apply_persistent_operations(&mut capture, &operations).unwrap();
@@ -2927,6 +3395,7 @@ mod tests {
             kit_raw: Vec::new(),
             global_raw: Vec::new(),
             settings_raw: Vec::new(),
+            song_raw: BTreeMap::from([("work_buffer".to_string(), Vec::new())]),
         };
 
         let changed = apply_persistent_operations(&mut capture, &operations).unwrap();
@@ -2958,5 +3427,86 @@ mod tests {
         assert!(apply_persistent_operation(&mut capture.project, &invalid)
             .unwrap_err()
             .contains("unsupported macro parameter"));
+    }
+
+    #[test]
+    fn typed_song_operations_cover_row_lifecycle_idempotently() {
+        let operations: Vec<PersistentOperation> = serde_json::from_value(json!([
+            {
+                "type": "replace_song",
+                "name": "AGENT SONG",
+                "rows": [
+                    { "repeats": 2, "patterns": [{ "pattern": "A01" }, { "pattern": "A02", "mutedTracks": ["BD"] }] },
+                    { "repeats": 1, "patterns": [{ "pattern": "B01" }] }
+                ]
+            },
+            {
+                "type": "insert_song_row",
+                "row": 1,
+                "value": { "repeats": 4, "patterns": [{ "pattern": "C01", "mutedTracks": ["SD"] }] }
+            },
+            {
+                "type": "update_song_row",
+                "row": 0,
+                "value": { "repeats": 3, "patterns": [{ "pattern": "A03" }] }
+            },
+            { "type": "copy_song_row", "sourceRow": 0, "targetRow": 3 },
+            { "type": "move_song_row", "sourceRow": 3, "targetRow": 0 },
+            { "type": "remove_song_row", "row": 1 }
+        ]))
+        .unwrap();
+        let mut capture = StateCapture {
+            project: RytmProject::try_default().unwrap(),
+            pattern_raw: Vec::new(),
+            kit_raw: Vec::new(),
+            global_raw: Vec::new(),
+            settings_raw: Vec::new(),
+            song_raw: BTreeMap::from([("work_buffer".to_string(), Vec::new())]),
+        };
+
+        let changed = apply_persistent_operations(&mut capture, &operations).unwrap();
+        assert_eq!(changed.songs, ["work_buffer"]);
+        assert!(!changed.pattern);
+        let summary = capture_summary(&capture).unwrap();
+        assert_eq!(summary["song"]["name"], "AGENT SONG");
+        assert_eq!(summary["song"]["rowCount"], 3);
+        assert_eq!(summary["song"]["rows"][0]["patterns"][0]["pattern"], "A03");
+        assert_eq!(summary["song"]["rows"][1]["patterns"][0]["pattern"], "C01");
+        assert_eq!(
+            summary["song"]["rows"][1]["patterns"][0]["mutedTracksMask"],
+            2
+        );
+
+        let second = apply_persistent_operations(&mut capture, &operations).unwrap();
+        assert!(!second.any());
+    }
+
+    #[test]
+    fn canonical_capture_summary_preserves_stored_song_targets() {
+        let mut project = RytmProject::try_default().expect("default project");
+        let target = SongTarget::Stored { song: 1 };
+        project_song_mut(&mut project, &target)
+            .expect("stored Song")
+            .set_name("STORED SONG")
+            .expect("valid name");
+        let capture = StateCapture {
+            project,
+            pattern_raw: Vec::new(),
+            kit_raw: Vec::new(),
+            global_raw: Vec::new(),
+            settings_raw: Vec::new(),
+            song_raw: BTreeMap::from([
+                (SongTarget::WorkBuffer.key(), Vec::new()),
+                (target.key(), Vec::new()),
+            ]),
+        };
+
+        let summary = canonical_capture_summary(&capture).expect("canonical capture summary");
+        assert_eq!(summary["songs"]["stored:01"]["name"], "STORED SONG");
+        assert_eq!(summary["songs"]["stored:01"]["target"]["scope"], "stored");
+        assert_eq!(
+            summary["songs"]["work_buffer"]["target"]["scope"],
+            "work_buffer"
+        );
     }
 }

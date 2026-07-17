@@ -27,11 +27,12 @@ const REPLAY_CACHE_LIMIT: usize = 1024;
 const TRACK_NAMES: [&str; 12] = [
     "BD", "SD", "RS", "CP", "BT", "LT", "MT", "HT", "CH", "OH", "CY", "CB",
 ];
-pub const DECLARED_METHODS: [&str; 29] = [
+pub const DECLARED_METHODS: [&str; 30] = [
     "daemon.health",
     "daemon.describe",
     "device.inspect_state",
     "pattern.inspect",
+    "song.inspect",
     "kit.inspect",
     "sound.inspect",
     "global.inspect",
@@ -59,9 +60,9 @@ pub const DECLARED_METHODS: [&str; 29] = [
     "audio.capture_pattern",
 ];
 
-pub const MOCK_IMPLEMENTED_METHODS: [&str; 29] = DECLARED_METHODS;
+pub const MOCK_IMPLEMENTED_METHODS: [&str; 30] = DECLARED_METHODS;
 
-pub const HARDWARE_IMPLEMENTED_METHODS: [&str; 29] = DECLARED_METHODS;
+pub const HARDWARE_IMPLEMENTED_METHODS: [&str; 30] = DECLARED_METHODS;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -315,6 +316,14 @@ impl RpcServer {
                         .map_err(RpcDispatchError::hardware),
                 }
             }
+            "song.inspect" => match &mut self.backend {
+                Backend::Mock(state) => state
+                    .inspect_song(&request.params)
+                    .map_err(RpcDispatchError::validation),
+                Backend::Hardware(state) => state
+                    .inspect_song(&request.params)
+                    .map_err(RpcDispatchError::hardware),
+            },
             "kit.inspect" => match &mut self.backend {
                 Backend::Mock(state) => Ok(state.inspect_kit()),
                 Backend::Hardware(state) => state.inspect_kit().map_err(RpcDispatchError::hardware),
@@ -941,7 +950,7 @@ fn hardware_state(
                 "sampleTransfer": true,
                 "sceneMacros": true,
                 "performanceMacros": true,
-                "songs": false,
+                "songs": true,
                 "classCompliantAudio": true,
                 "overbridgeAudio": false,
             },
@@ -949,6 +958,7 @@ fn hardware_state(
         "transport": transport,
         "liveMacros": summary["liveMacros"].clone(),
         "activePattern": pattern,
+        "workBufferSong": summary["song"].clone(),
         "operationSets": operation_sets,
         "snapshots": snapshots,
         "evidence": {
@@ -956,6 +966,7 @@ fn hardware_state(
             "settings": summary["settings"].clone(),
             "global": summary["global"].clone(),
             "midi": summary["midi"].clone(),
+            "song": summary["song"].clone(),
         },
     })
 }

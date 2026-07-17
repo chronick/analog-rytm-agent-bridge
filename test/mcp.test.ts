@@ -7,7 +7,7 @@ import { RytmAgentService } from "../src/service/RytmAgentService.ts";
 test("exposes the initial Rytm MCP tool surface", () => {
   const adapter = new RytmMcpAdapter(new RytmAgentService());
   const tools = adapter.listTools();
-  assert.equal(tools.length, 27);
+  assert.equal(tools.length, 29);
   assert.ok(tools.some((tool) => tool.name === "rytm_daemon_health"));
   assert.ok(tools.some((tool) => tool.name === "rytm_inspect_track_sound"));
   assert.ok(tools.some((tool) => tool.name === "rytm_queue_operations"));
@@ -19,6 +19,8 @@ test("exposes the initial Rytm MCP tool surface", () => {
   assert.ok(tools.some((tool) => tool.name === "rytm_clear_sample_ram"));
   assert.ok(tools.some((tool) => tool.name === "rytm_set_active_scene"));
   assert.ok(tools.some((tool) => tool.name === "rytm_set_performance_macro"));
+  assert.ok(tools.some((tool) => tool.name === "rytm_inspect_song"));
+  assert.ok(tools.some((tool) => tool.name === "rytm_propose_song_delta"));
 });
 
 test("routes health and compact inspection through an optional daemon boundary", async () => {
@@ -27,6 +29,8 @@ test("routes health and compact inspection through an optional daemon boundary",
     async health() { return { status: "ready" as const, connected: true, adapter: "mock" as const, protocolSchema: "analog-rytm-rpc.v1" as const, daemonSchema: "analog-rytm-daemon.v1" as const, processId: 1, methods: { declared: [], implemented: [] } }; },
     async inspectDeviceState() { return { source: "rust-daemon" }; },
     async inspectPattern(pattern?: string) { return { source: "rust-daemon", pattern }; },
+    async inspectSong() { return { source: "rust-daemon", object: "song" }; },
+    async proposeSongDelta() { return { source: "rust-daemon", object: "song-proposal" }; },
     async inspectKit() { return { source: "rust-daemon", object: "kit" }; },
     async inspectSound(track: string) { return { source: "rust-daemon", object: "sound", track }; },
     async inspectGlobal() { return { source: "rust-daemon", object: "global" }; },
@@ -37,6 +41,8 @@ test("routes health and compact inspection through an optional daemon boundary",
   assert.equal(health.status, "ready");
   assert.deepEqual(await adapter.callTool("rytm_inspect_device_state", {}), { source: "rust-daemon" });
   assert.deepEqual(await adapter.callTool("rytm_inspect_pattern", { pattern: "B02" }), { source: "rust-daemon", pattern: "B02" });
+  assert.deepEqual(await adapter.callTool("rytm_inspect_song", {}), { source: "rust-daemon", object: "song" });
+  assert.deepEqual(await adapter.callTool("rytm_propose_song_delta", { operations: [] }), { source: "rust-daemon", object: "song-proposal" });
   assert.deepEqual(await adapter.callTool("rytm_inspect_kit", {}), { source: "rust-daemon", object: "kit" });
   assert.deepEqual(await adapter.callTool("rytm_inspect_track_sound", { track: "CH" }), { source: "rust-daemon", object: "sound", track: "CH" });
   assert.deepEqual(await adapter.callTool("rytm_inspect_global", {}), { source: "rust-daemon", object: "global" });

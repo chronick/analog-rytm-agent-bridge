@@ -37,6 +37,8 @@ npm run hardware:audio
 npm run hardware:audio -- --execute
 npm run hardware:samples
 npm run hardware:samples -- --execute
+npm run hardware:songs
+npm run hardware:songs -- --execute
 npm run hardware:scheduler -- --execute
 ```
 
@@ -121,10 +123,13 @@ Implemented:
 - declaratively set, replace, copy, and clear Scene and Performance locks through revisioned Kit writes;
 - activate or deactivate Scenes and set Performance amounts through transient CC/NRPN controls without changing persistent revision;
 - certify macro operation-set replay, device readback, and exact raw Kit rollback on Analog Rytm OS 1.72.
+- inspect the work-buffer Song, any stored Song, or all 17 Song objects with optional compact Pattern/Kit references;
+- declaratively name Songs and replace, insert, update, move, copy, remove, or clear rows containing chains, repeats, and per-position track mutes;
+- apply Song deltas immediately or at musical boundaries with revision checks, idempotent IDs, readback, snapshots, and rollback;
+- certify all supported Song row operations, next-beat scheduling, unchanged Pattern activation, and exact raw rollback on Analog Rytm OS 1.72.
 
 Not implemented yet:
 
-- Overbridge multitrack capture or DAW automation;
-- songs.
+- Overbridge multitrack capture or DAW automation.
 
-Those features remain behind capability flags. The current `rytm-rs` adapter targets firmware 1.70; successful decoding on the connected device is recorded as `decoded-unverified` until its exact OS version is independently confirmed.
+That feature remains behind a capability flag. Song tempo/length overrides, jumps, loops, labels, explicit end markers, and Song activation remain unavailable. The current `rytm-rs` adapter targets firmware 1.70; the supported Song subset is hardware-certified on the connected firmware 1.72 device, but this is not a blanket compatibility guarantee for other firmware.

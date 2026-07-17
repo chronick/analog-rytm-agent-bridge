@@ -13,6 +13,7 @@
     "hardware:macros": "node --experimental-transform-types src/bin/verify-hardware-macros.ts",
     "hardware:audio": "node --experimental-transform-types src/bin/verify-hardware-audio.ts",
     "hardware:samples": "node --experimental-transform-types src/bin/verify-hardware-samples.ts",
+    "hardware:songs": "node --experimental-transform-types src/bin/verify-hardware-songs.ts",
     "hardware:scheduler": "node --experimental-transform-types src/bin/verify-hardware-scheduler.ts"
   },
   "engines": {

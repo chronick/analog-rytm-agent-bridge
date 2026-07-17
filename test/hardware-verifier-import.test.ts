@@ -4,10 +4,12 @@ import { runHardwareAudioVerification } from "../src/bin/verify-hardware-audio.t
 import { runHardwareControlVerification } from "../src/bin/verify-hardware-control.ts";
 import { runHardwareMacroVerification } from "../src/bin/verify-hardware-macros.ts";
 import { runHardwareSampleVerification } from "../src/bin/verify-hardware-samples.ts";
+import { runHardwareSongVerification } from "../src/bin/verify-hardware-songs.ts";
 
 test("hardware certification modules are inert when imported", () => {
   assert.equal(typeof runHardwareAudioVerification, "function");
   assert.equal(typeof runHardwareControlVerification, "function");
   assert.equal(typeof runHardwareMacroVerification, "function");
   assert.equal(typeof runHardwareSampleVerification, "function");
+  assert.equal(typeof runHardwareSongVerification, "function");
 });

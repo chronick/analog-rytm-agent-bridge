@@ -2,7 +2,7 @@ use crate::samples::SampleService;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -24,6 +24,40 @@ pub struct PerformanceLockInput {
     pub track: String,
     pub parameter: String,
     pub depth: i8,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "scope", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SongTarget {
+    #[default]
+    WorkBuffer,
+    Stored {
+        song: u8,
+    },
+}
+
+impl SongTarget {
+    pub fn key(&self) -> String {
+        match self {
+            Self::WorkBuffer => "work_buffer".to_string(),
+            Self::Stored { song } => format!("stored:{song:02}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SongPatternInput {
+    pub pattern: String,
+    #[serde(default)]
+    pub muted_tracks: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SongRowInput {
+    pub patterns: Vec<SongPatternInput>,
+    pub repeats: u16,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -151,6 +185,55 @@ pub enum PersistentOperation {
         source_performance: u8,
         #[serde(rename = "targetPerformance")]
         target_performance: u8,
+    },
+    SetSongName {
+        #[serde(default)]
+        target: SongTarget,
+        name: String,
+    },
+    ReplaceSong {
+        #[serde(default)]
+        target: SongTarget,
+        #[serde(default)]
+        name: Option<String>,
+        rows: Vec<SongRowInput>,
+    },
+    InsertSongRow {
+        #[serde(default)]
+        target: SongTarget,
+        row: u8,
+        value: SongRowInput,
+    },
+    UpdateSongRow {
+        #[serde(default)]
+        target: SongTarget,
+        row: u8,
+        value: SongRowInput,
+    },
+    MoveSongRow {
+        #[serde(default)]
+        target: SongTarget,
+        #[serde(rename = "sourceRow")]
+        source_row: u8,
+        #[serde(rename = "targetRow")]
+        target_row: u8,
+    },
+    CopySongRow {
+        #[serde(default)]
+        target: SongTarget,
+        #[serde(rename = "sourceRow")]
+        source_row: u8,
+        #[serde(rename = "targetRow")]
+        target_row: u8,
+    },
+    RemoveSongRow {
+        #[serde(default)]
+        target: SongTarget,
+        row: u8,
+    },
+    ClearSong {
+        #[serde(default)]
+        target: SongTarget,
     },
 }
 
@@ -326,6 +409,7 @@ struct SnapshotRecord {
     active_pattern: String,
     transport: TransportState,
     patterns: BTreeMap<String, Pattern>,
+    songs: BTreeMap<String, MockSong>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -336,7 +420,7 @@ pub struct EventEntry {
     pub event: Value,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 struct Pattern {
     slot: String,
     length: u8,
@@ -347,14 +431,14 @@ struct Pattern {
     trigs: HashMap<String, Trig>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SampleSlot {
     slot: u8,
     sample_id: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct Trig {
     track: String,
     step: u8,
@@ -365,12 +449,20 @@ struct Trig {
     locks: BTreeMap<String, f64>,
 }
 
+#[derive(Clone, Default, PartialEq)]
+struct MockSong {
+    target: SongTarget,
+    name: String,
+    rows: Vec<SongRowInput>,
+}
+
 pub struct MockBridgeState {
     revision: u64,
     id_counter: u64,
     active_pattern: String,
     transport: TransportState,
     patterns: BTreeMap<String, Pattern>,
+    songs: BTreeMap<String, MockSong>,
     operation_sets: Vec<OperationSetRecord>,
     snapshots: Vec<SnapshotRecord>,
     events: Vec<EventEntry>,
@@ -384,6 +476,7 @@ impl Default for MockBridgeState {
         let active_pattern = "A01".to_string();
         let mut patterns = BTreeMap::new();
         patterns.insert(active_pattern.clone(), empty_pattern(&active_pattern));
+        let songs = default_mock_songs();
         Self {
             revision: 0,
             id_counter: 1,
@@ -400,6 +493,7 @@ impl Default for MockBridgeState {
                 tempo: 120.0,
             },
             patterns,
+            songs,
             operation_sets: Vec::new(),
             snapshots: Vec::new(),
             events: Vec::new(),
@@ -433,6 +527,7 @@ impl MockBridgeState {
                 "performanceAmountsSource": "mock",
             },
             "activePattern": self.inspect_pattern(&self.active_pattern).expect("active pattern is valid"),
+            "workBufferSong": self.song_summary(&SongTarget::WorkBuffer, false).expect("mock work-buffer Song exists"),
             "operationSets": self.operation_sets,
             "snapshots": self.snapshots.iter().map(|record| &record.summary).collect::<Vec<_>>(),
         })
@@ -446,6 +541,51 @@ impl MockBridgeState {
                 .cloned()
                 .unwrap_or_else(|| empty_pattern(slot)),
         ))
+    }
+
+    pub fn inspect_song(&self, params: &Value) -> Result<Value, String> {
+        let (targets, resolve_references) = parse_song_inspect_request(params)?;
+        let songs = targets
+            .iter()
+            .map(|target| self.song_summary(target, resolve_references))
+            .collect::<Result<Vec<_>, _>>()?;
+        if songs.len() == 1 {
+            return Ok(songs.into_iter().next().expect("one Song was requested"));
+        }
+        Ok(json!({
+            "songs": songs,
+            "count": songs.len(),
+            "capabilities": song_capabilities(),
+        }))
+    }
+
+    fn song_summary(&self, target: &SongTarget, resolve_references: bool) -> Result<Value, String> {
+        let song = self
+            .songs
+            .get(&target.key())
+            .ok_or_else(|| format!("unknown Song target: {}", target.key()))?;
+        let mut summary = mock_song_summary(song);
+        if resolve_references {
+            let references = song_pattern_slots(&song.rows)
+                .into_iter()
+                .map(|slot| {
+                    let pattern = self
+                        .patterns
+                        .get(&slot)
+                        .cloned()
+                        .unwrap_or_else(|| empty_pattern(&slot));
+                    json!({
+                        "pattern": slot,
+                        "available": true,
+                        "kitNumber": 0,
+                        "kitName": "MOCK KIT",
+                        "patternLength": pattern.length,
+                    })
+                })
+                .collect::<Vec<_>>();
+            summary["references"] = json!(references);
+        }
+        Ok(summary)
     }
 
     pub fn inspect_kit(&self) -> Value {
@@ -538,22 +678,34 @@ impl MockBridgeState {
             return Ok(json!({ "validation": validation, "basePattern": base }));
         }
         let operations = parse_operations(raw)?;
-        let mut projected = self.patterns.clone();
-        apply_operations(&mut projected, &operations, &pattern)?;
-        Ok(json!({
+        let mut projected_patterns = self.patterns.clone();
+        let mut projected_songs = self.songs.clone();
+        apply_operations(
+            &mut projected_patterns,
+            &mut projected_songs,
+            &operations,
+            &pattern,
+        )?;
+        let song_target = operation_song_target(&operations)?;
+        let mut result = json!({
             "validation": validation,
             "basePattern": base,
-            "projectedPattern": pattern_summary(projected.remove(&pattern).unwrap_or_else(|| empty_pattern(&pattern))),
-        }))
+            "projectedPattern": pattern_summary(projected_patterns.remove(&pattern).unwrap_or_else(|| empty_pattern(&pattern))),
+        });
+        if let Some(target) = song_target {
+            result["baseSong"] = self.song_summary(&target, false)?;
+            result["projectedSong"] = mock_song_summary(
+                projected_songs
+                    .get(&target.key())
+                    .ok_or_else(|| format!("unknown Song target: {}", target.key()))?,
+            );
+        }
+        Ok(result)
     }
 
     pub fn queue(&mut self, params: &Value) -> Result<Value, String> {
         let input = parse_operation_set(params)?;
         self.samples.validate_assignments(&input.operations)?;
-        self.ensure_current_revision(input.expected_revision)?;
-        if input.dry_run {
-            return self.dry_run(&input);
-        }
         if let Some(id) = &input.operation_set_id {
             if let Some(existing) = self
                 .operation_sets
@@ -567,6 +719,10 @@ impl MockBridgeState {
                 }
                 return serde_json::to_value(existing).map_err(error_string);
             }
+        }
+        self.ensure_current_revision(input.expected_revision)?;
+        if input.dry_run {
+            return self.dry_run(&input);
         }
 
         let id = input
@@ -612,10 +768,6 @@ impl MockBridgeState {
             .or_insert_with(|| json!("reject"));
         let input = parse_operation_set(&Value::Object(normalized))?;
         self.samples.validate_assignments(&input.operations)?;
-        self.ensure_current_revision(input.expected_revision)?;
-        if input.dry_run {
-            return self.dry_run(&input);
-        }
         if let Some(id) = &input.operation_set_id {
             if let Some(existing) = self
                 .operation_sets
@@ -629,6 +781,10 @@ impl MockBridgeState {
                 }
                 return serde_json::to_value(existing).map_err(error_string);
             }
+        }
+        self.ensure_current_revision(input.expected_revision)?;
+        if input.dry_run {
+            return self.dry_run(&input);
         }
 
         let id = input
@@ -866,6 +1022,7 @@ impl MockBridgeState {
             active_pattern: self.active_pattern.clone(),
             transport: self.transport.clone(),
             patterns: self.patterns.clone(),
+            songs: self.songs.clone(),
         });
         self.append_event(json!({ "type": "snapshot.created", "snapshot": summary }));
         serde_json::to_value(summary).map_err(error_string)
@@ -884,6 +1041,7 @@ impl MockBridgeState {
             .cloned()
             .ok_or_else(|| format!("unknown snapshot: {snapshot_id}"))?;
         self.patterns = snapshot.patterns;
+        self.songs = snapshot.songs;
         self.active_pattern = snapshot.active_pattern.clone();
         self.transport = snapshot.transport;
         self.transport.pattern = snapshot.active_pattern;
@@ -952,9 +1110,16 @@ impl MockBridgeState {
     }
 
     fn dry_run(&self, input: &OperationSetInput) -> Result<Value, String> {
-        let mut projected = self.patterns.clone();
-        apply_operations(&mut projected, &input.operations, &self.active_pattern)?;
-        Ok(json!({
+        let mut projected_patterns = self.patterns.clone();
+        let mut projected_songs = self.songs.clone();
+        apply_operations(
+            &mut projected_patterns,
+            &mut projected_songs,
+            &input.operations,
+            &self.active_pattern,
+        )?;
+        let changed = projected_patterns != self.patterns || projected_songs != self.songs;
+        let mut result = json!({
             "operationSetId": input.operation_set_id,
             "expectedRevision": input.expected_revision,
             "applyAt": input.apply_at,
@@ -962,9 +1127,17 @@ impl MockBridgeState {
             "operations": input.operations,
             "status": "dry_run",
             "validation": { "valid": true, "errors": [], "warnings": [] },
-            "projectedRevision": self.revision + 1,
-            "projectedPattern": pattern_summary(projected.remove(&self.active_pattern).unwrap_or_else(|| empty_pattern(&self.active_pattern))),
-        }))
+            "projectedRevision": self.revision + u64::from(changed),
+            "projectedPattern": pattern_summary(projected_patterns.remove(&self.active_pattern).unwrap_or_else(|| empty_pattern(&self.active_pattern))),
+        });
+        if let Some(target) = operation_song_target(&input.operations)? {
+            result["projectedSong"] = mock_song_summary(
+                projected_songs
+                    .get(&target.key())
+                    .ok_or_else(|| format!("unknown Song target: {}", target.key()))?,
+            );
+        }
+        Ok(result)
     }
 
     fn ensure_current_revision(&self, expected: u64) -> Result<(), String> {
@@ -1022,8 +1195,16 @@ impl MockBridgeState {
     fn apply_record(&mut self, index: usize, boundary: &str) -> Result<(), String> {
         let operations = self.operation_sets[index].operations.clone();
         self.samples.validate_assignments(&operations)?;
-        apply_operations(&mut self.patterns, &operations, &self.active_pattern)?;
-        self.revision += 1;
+        let before_patterns = self.patterns.clone();
+        let before_songs = self.songs.clone();
+        apply_operations(
+            &mut self.patterns,
+            &mut self.songs,
+            &operations,
+            &self.active_pattern,
+        )?;
+        let changed = self.patterns != before_patterns || self.songs != before_songs;
+        self.revision += u64::from(changed);
         let now = timestamp();
         let id = self.operation_sets[index].operation_set_id.clone();
         self.operation_sets[index].status = "applied";
@@ -1035,6 +1216,7 @@ impl MockBridgeState {
             "operationSetId": id,
             "boundary": boundary,
             "revision": self.revision,
+            "changed": changed,
             "appliedAt": now,
             "pattern": self.active_pattern,
         }));
@@ -1061,15 +1243,20 @@ pub fn validation_result(raw: &Value) -> Value {
         return json!({ "valid": false, "errors": ["operations must be an array"], "warnings": [] });
     };
     let mut errors = Vec::new();
+    let mut parsed = Vec::new();
     for value in values {
         match serde_json::from_value::<PersistentOperation>(value.clone()) {
             Ok(operation) => {
                 if let Err(error) = validate_operation(&operation) {
                     errors.push(error);
                 }
+                parsed.push(operation);
             }
             Err(error) => errors.push(format!("invalid operation: {error}")),
         }
+    }
+    if let Err(error) = operation_song_target(&parsed) {
+        errors.push(error);
     }
     json!({ "valid": errors.is_empty(), "errors": errors, "warnings": [] })
 }
@@ -1087,6 +1274,7 @@ pub fn parse_operation_set(params: &Value) -> Result<OperationSetInput, String> 
     for operation in &input.operations {
         validate_operation(operation)?;
     }
+    operation_song_target(&input.operations)?;
     Ok(input)
 }
 
@@ -1319,12 +1507,60 @@ fn validate_operation(operation: &PersistentOperation) -> Result<(), String> {
                 return Err("copy_performance source and target must differ".to_string());
             }
         }
+        PersistentOperation::SetSongName { target, name } => {
+            validate_song_target(target)?;
+            validate_song_name(name)?;
+        }
+        PersistentOperation::ReplaceSong { target, name, rows } => {
+            validate_song_target(target)?;
+            if let Some(name) = name {
+                validate_song_name(name)?;
+            }
+            validate_song_rows(rows)?;
+        }
+        PersistentOperation::InsertSongRow { target, row, value } => {
+            validate_song_target(target)?;
+            validate_u64_range(u64::from(*row), "row", 0, 64)?;
+            validate_song_row(value)?;
+        }
+        PersistentOperation::UpdateSongRow { target, row, value } => {
+            validate_song_target(target)?;
+            validate_u64_range(u64::from(*row), "row", 0, 63)?;
+            validate_song_row(value)?;
+        }
+        PersistentOperation::MoveSongRow {
+            target,
+            source_row,
+            target_row,
+        } => {
+            validate_song_target(target)?;
+            validate_u64_range(u64::from(*source_row), "sourceRow", 0, 63)?;
+            validate_u64_range(u64::from(*target_row), "targetRow", 0, 63)?;
+            if source_row == target_row {
+                return Err("move_song_row source and target must differ".to_string());
+            }
+        }
+        PersistentOperation::CopySongRow {
+            target,
+            source_row,
+            target_row,
+        } => {
+            validate_song_target(target)?;
+            validate_u64_range(u64::from(*source_row), "sourceRow", 0, 63)?;
+            validate_u64_range(u64::from(*target_row), "targetRow", 0, 64)?;
+        }
+        PersistentOperation::RemoveSongRow { target, row } => {
+            validate_song_target(target)?;
+            validate_u64_range(u64::from(*row), "row", 0, 63)?;
+        }
+        PersistentOperation::ClearSong { target } => validate_song_target(target)?,
     }
     Ok(())
 }
 
 fn apply_operations(
     patterns: &mut BTreeMap<String, Pattern>,
+    songs: &mut BTreeMap<String, MockSong>,
     operations: &[PersistentOperation],
     active_pattern: &str,
 ) -> Result<(), String> {
@@ -1566,9 +1802,264 @@ fn apply_operations(
                 let locks = mock_macro_locks(pattern, "performance", *source_performance);
                 set_mock_macro_locks(pattern, "performance", *target_performance, locks);
             }
+            PersistentOperation::SetSongName { target, name } => {
+                mock_song_mut(songs, target)?.name.clone_from(name);
+            }
+            PersistentOperation::ReplaceSong { target, name, rows } => {
+                let song = mock_song_mut(songs, target)?;
+                if let Some(name) = name {
+                    song.name.clone_from(name);
+                }
+                song.rows.clone_from(rows);
+            }
+            PersistentOperation::InsertSongRow { target, row, value } => {
+                let song = mock_song_mut(songs, target)?;
+                let row = usize::from(*row);
+                if row > song.rows.len() {
+                    return Err(format!(
+                        "row {row} cannot be inserted into a Song with {} rows",
+                        song.rows.len()
+                    ));
+                }
+                song.rows.insert(row, value.clone());
+            }
+            PersistentOperation::UpdateSongRow { target, row, value } => {
+                let song = mock_song_mut(songs, target)?;
+                let row = usize::from(*row);
+                let existing = song
+                    .rows
+                    .get_mut(row)
+                    .ok_or_else(|| format!("row {row} does not exist"))?;
+                existing.clone_from(value);
+            }
+            PersistentOperation::MoveSongRow {
+                target,
+                source_row,
+                target_row,
+            } => {
+                let song = mock_song_mut(songs, target)?;
+                let source = usize::from(*source_row);
+                let destination = usize::from(*target_row);
+                if source >= song.rows.len() || destination >= song.rows.len() {
+                    return Err(format!(
+                        "move rows must be within the current {}-row Song",
+                        song.rows.len()
+                    ));
+                }
+                let row = song.rows.remove(source);
+                song.rows.insert(destination, row);
+            }
+            PersistentOperation::CopySongRow {
+                target,
+                source_row,
+                target_row,
+            } => {
+                let song = mock_song_mut(songs, target)?;
+                let source = usize::from(*source_row);
+                let destination = usize::from(*target_row);
+                let row = song
+                    .rows
+                    .get(source)
+                    .cloned()
+                    .ok_or_else(|| format!("row {source} does not exist"))?;
+                if destination > song.rows.len() {
+                    return Err(format!(
+                        "row {destination} cannot be inserted into a Song with {} rows",
+                        song.rows.len()
+                    ));
+                }
+                song.rows.insert(destination, row);
+            }
+            PersistentOperation::RemoveSongRow { target, row } => {
+                let song = mock_song_mut(songs, target)?;
+                let row = usize::from(*row);
+                if row >= song.rows.len() {
+                    return Err(format!("row {row} does not exist"));
+                }
+                song.rows.remove(row);
+            }
+            PersistentOperation::ClearSong { target } => mock_song_mut(songs, target)?.rows.clear(),
+        }
+        if let Some(target) = persistent_operation_song_target(operation) {
+            validate_mock_song(mock_song_mut(songs, target)?)?;
         }
     }
     Ok(())
+}
+
+fn default_mock_songs() -> BTreeMap<String, MockSong> {
+    let mut songs = BTreeMap::new();
+    let work_buffer = SongTarget::WorkBuffer;
+    songs.insert(
+        work_buffer.key(),
+        MockSong {
+            target: work_buffer,
+            name: String::new(),
+            rows: Vec::new(),
+        },
+    );
+    for song in 1..=16 {
+        let target = SongTarget::Stored { song };
+        songs.insert(
+            target.key(),
+            MockSong {
+                target,
+                name: String::new(),
+                rows: Vec::new(),
+            },
+        );
+    }
+    songs
+}
+
+fn mock_song_mut<'a>(
+    songs: &'a mut BTreeMap<String, MockSong>,
+    target: &SongTarget,
+) -> Result<&'a mut MockSong, String> {
+    songs
+        .get_mut(&target.key())
+        .ok_or_else(|| format!("unknown Song target: {}", target.key()))
+}
+
+fn validate_mock_song(song: &MockSong) -> Result<(), String> {
+    if song.rows.len() > 64 {
+        return Err("a Song has at most 64 rows".to_string());
+    }
+    let positions = song
+        .rows
+        .iter()
+        .map(|row| row.patterns.len())
+        .sum::<usize>();
+    if positions > 256 {
+        return Err("a Song has at most 256 pattern positions".to_string());
+    }
+    Ok(())
+}
+
+fn mock_song_summary(song: &MockSong) -> Value {
+    let rows = song
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(row_index, row)| {
+            let patterns = row
+                .patterns
+                .iter()
+                .map(|position| {
+                    json!({
+                        "pattern": position.pattern,
+                        "mutedTracksMask": mock_mute_mask(&position.muted_tracks),
+                        "mutedTracks": position.muted_tracks,
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!({ "row": row_index, "repeats": row.repeats, "patterns": patterns })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "target": song.target,
+        "name": song.name,
+        "rowCount": song.rows.len(),
+        "patternPositionCount": song.rows.iter().map(|row| row.patterns.len()).sum::<usize>(),
+        "rows": rows,
+        "capabilities": song_capabilities(),
+    })
+}
+
+fn mock_mute_mask(tracks: &[String]) -> u16 {
+    tracks.iter().fold(0_u16, |mask, track| {
+        TRACK_NAMES
+            .iter()
+            .position(|candidate| candidate == track)
+            .map_or(mask, |index| mask | (1 << index))
+    })
+}
+
+fn song_capabilities() -> Value {
+    json!({
+        "name": true,
+        "rows": true,
+        "patternChains": true,
+        "repeats": true,
+        "trackMutes": true,
+        "tempoOverrides": false,
+        "patternLengthOverrides": false,
+        "jumps": false,
+        "loops": false,
+        "rowLabels": false,
+        "explicitEnd": false,
+    })
+}
+
+fn song_pattern_slots(rows: &[SongRowInput]) -> BTreeSet<String> {
+    rows.iter()
+        .flat_map(|row| row.patterns.iter())
+        .map(|position| position.pattern.clone())
+        .collect()
+}
+
+pub fn parse_song_inspect_request(params: &Value) -> Result<(Vec<SongTarget>, bool), String> {
+    let object = require_object(params)?;
+    let resolve_references = object
+        .get("resolveReferences")
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or_else(|| "resolveReferences must be a boolean".to_string())
+        })
+        .transpose()?
+        .unwrap_or(false);
+    let scope = object
+        .get("scope")
+        .map(|value| value_string(value, "scope"))
+        .transpose()?
+        .unwrap_or("work_buffer");
+    let targets = match scope {
+        "work_buffer" => vec![SongTarget::WorkBuffer],
+        "stored" => {
+            let song = object
+                .get("song")
+                .ok_or_else(|| "song is required when scope is stored".to_string())
+                .and_then(|value| value_u64(value, "song"))?;
+            validate_u64_range(song, "song", 1, 16)?;
+            vec![SongTarget::Stored { song: song as u8 }]
+        }
+        "all" => std::iter::once(SongTarget::WorkBuffer)
+            .chain((1..=16).map(|song| SongTarget::Stored { song }))
+            .collect(),
+        _ => return Err("scope must be work_buffer, stored, or all".to_string()),
+    };
+    Ok((targets, resolve_references))
+}
+
+pub fn operation_song_target(
+    operations: &[PersistentOperation],
+) -> Result<Option<SongTarget>, String> {
+    let mut target: Option<SongTarget> = None;
+    for operation in operations {
+        let Some(candidate) = persistent_operation_song_target(operation) else {
+            continue;
+        };
+        if target.as_ref().is_some_and(|target| target != candidate) {
+            return Err("one operation set may edit only one Song target".to_string());
+        }
+        target = Some(candidate.clone());
+    }
+    Ok(target)
+}
+
+fn persistent_operation_song_target(operation: &PersistentOperation) -> Option<&SongTarget> {
+    match operation {
+        PersistentOperation::SetSongName { target, .. }
+        | PersistentOperation::ReplaceSong { target, .. }
+        | PersistentOperation::InsertSongRow { target, .. }
+        | PersistentOperation::UpdateSongRow { target, .. }
+        | PersistentOperation::MoveSongRow { target, .. }
+        | PersistentOperation::CopySongRow { target, .. }
+        | PersistentOperation::RemoveSongRow { target, .. }
+        | PersistentOperation::ClearSong { target } => Some(target),
+        _ => None,
+    }
 }
 
 fn pattern_summary(pattern: Pattern) -> Value {
@@ -1687,7 +2178,7 @@ fn capabilities() -> Value {
         "sampleTransfer": true,
         "sceneMacros": true,
         "performanceMacros": true,
-        "songs": false,
+        "songs": true,
     })
 }
 
@@ -1707,6 +2198,51 @@ fn validate_track_step(track: &str, step: u8) -> Result<(), String> {
 fn validate_track(track: &str) -> Result<(), String> {
     if !TRACK_NAMES.contains(&track) {
         return Err("track must be a Rytm track id".to_string());
+    }
+    Ok(())
+}
+
+fn validate_song_target(target: &SongTarget) -> Result<(), String> {
+    if let SongTarget::Stored { song } = target {
+        validate_u64_range(u64::from(*song), "target.song", 1, 16)?;
+    }
+    Ok(())
+}
+
+fn validate_song_name(name: &str) -> Result<(), String> {
+    if name.len() > 15 || !name.bytes().all(|byte| (0x20..=0x7E).contains(&byte)) {
+        return Err("Song name must be at most 15 printable ASCII characters".to_string());
+    }
+    Ok(())
+}
+
+fn validate_song_rows(rows: &[SongRowInput]) -> Result<(), String> {
+    if rows.len() > 64 {
+        return Err("a Song has at most 64 rows".to_string());
+    }
+    for row in rows {
+        validate_song_row(row)?;
+    }
+    if rows.iter().map(|row| row.patterns.len()).sum::<usize>() > 256 {
+        return Err("a Song has at most 256 pattern positions".to_string());
+    }
+    Ok(())
+}
+
+fn validate_song_row(row: &SongRowInput) -> Result<(), String> {
+    if !(1..=255).contains(&row.patterns.len()) {
+        return Err("a Song row must contain between 1 and 255 pattern positions".to_string());
+    }
+    validate_u64_range(u64::from(row.repeats), "repeats", 1, 256)?;
+    for position in &row.patterns {
+        validate_pattern(&position.pattern, "Song pattern")?;
+        let mut tracks = BTreeSet::new();
+        for track in &position.muted_tracks {
+            validate_track(track)?;
+            if !tracks.insert(track) {
+                return Err(format!("mutedTracks contains duplicate track: {track}"));
+            }
+        }
     }
     Ok(())
 }
@@ -2015,6 +2551,110 @@ mod tests {
             .queue(&conflicting)
             .unwrap_err()
             .contains("different payload"));
+    }
+
+    #[test]
+    fn song_rows_are_declarative_idempotent_snapshot_backed_and_transport_independent() {
+        let mut state = MockBridgeState::default();
+        let baseline_transport = state.inspect_state()["transport"].clone();
+        state
+            .create_snapshot(&json!({ "snapshotId": "before-song" }))
+            .unwrap();
+        let create = json!({
+            "operationSetId": "song-create",
+            "expectedRevision": 0,
+            "operations": [{
+                "type": "replace_song",
+                "target": { "scope": "stored", "song": 1 },
+                "name": "AGENT SONG",
+                "rows": [{
+                    "repeats": 2,
+                    "patterns": [
+                        { "pattern": "A01" },
+                        { "pattern": "A02", "mutedTracks": ["BD"] }
+                    ]
+                }]
+            }]
+        });
+        let applied = state.apply_now(&create).unwrap();
+        assert_eq!(applied["resultingRevision"], 1);
+        assert_eq!(state.apply_now(&create).unwrap(), applied);
+
+        let created = state
+            .inspect_song(&json!({
+                "scope": "stored",
+                "song": 1,
+                "resolveReferences": true
+            }))
+            .unwrap();
+        assert_eq!(created["name"], "AGENT SONG");
+        assert_eq!(created["rowCount"], 1);
+        assert_eq!(created["rows"][0]["patterns"][1]["mutedTracksMask"], 1);
+        assert_eq!(created["references"].as_array().unwrap().len(), 2);
+        assert_eq!(state.inspect_state()["transport"], baseline_transport);
+
+        let edits = json!({
+            "operationSetId": "song-row-edits",
+            "expectedRevision": 1,
+            "operations": [
+                {
+                    "type": "insert_song_row",
+                    "target": { "scope": "stored", "song": 1 },
+                    "row": 1,
+                    "value": { "repeats": 1, "patterns": [{ "pattern": "B01" }] }
+                },
+                {
+                    "type": "update_song_row",
+                    "target": { "scope": "stored", "song": 1 },
+                    "row": 0,
+                    "value": { "repeats": 3, "patterns": [{ "pattern": "A03", "mutedTracks": ["SD"] }] }
+                },
+                {
+                    "type": "copy_song_row",
+                    "target": { "scope": "stored", "song": 1 },
+                    "sourceRow": 0,
+                    "targetRow": 2
+                },
+                {
+                    "type": "move_song_row",
+                    "target": { "scope": "stored", "song": 1 },
+                    "sourceRow": 2,
+                    "targetRow": 0
+                },
+                {
+                    "type": "remove_song_row",
+                    "target": { "scope": "stored", "song": 1 },
+                    "row": 1
+                }
+            ]
+        });
+        let dry_run = state
+            .apply_now(&json!({
+                "operationSetId": "song-row-edits-dry",
+                "expectedRevision": 1,
+                "dryRun": true,
+                "operations": edits["operations"].clone()
+            }))
+            .unwrap();
+        assert_eq!(dry_run["status"], "dry_run");
+        assert_eq!(dry_run["projectedRevision"], 2);
+        assert_eq!(dry_run["projectedSong"]["rowCount"], 2);
+        state.apply_now(&edits).unwrap();
+        let edited = state
+            .inspect_song(&json!({ "scope": "stored", "song": 1 }))
+            .unwrap();
+        assert_eq!(edited["rowCount"], 2);
+        assert_eq!(edited["rows"][0]["patterns"][0]["pattern"], "A03");
+        assert_eq!(edited["rows"][1]["patterns"][0]["pattern"], "B01");
+
+        state
+            .rollback_snapshot(&json!({ "snapshotId": "before-song", "expectedRevision": 2 }))
+            .unwrap();
+        let restored = state
+            .inspect_song(&json!({ "scope": "stored", "song": 1 }))
+            .unwrap();
+        assert_eq!(restored["rowCount"], 0);
+        assert_eq!(state.inspect_state()["revision"], 3);
     }
 
     #[test]

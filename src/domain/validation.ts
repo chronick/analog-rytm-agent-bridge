@@ -11,6 +11,8 @@ import type {
   RytmSetActiveSceneInput,
   RytmSetPerformanceMacroInput,
   RytmSetTransportInput,
+  RytmSongRowInput,
+  RytmSongTarget,
   RytmSnapshotInput,
   RytmTrackId,
   RytmTriggerTrackInput,
@@ -207,6 +209,59 @@ export function validatePersistentOperation(operation: RytmPersistentOperation, 
         throw new Error("copy_performance source and target must differ");
       }
       return;
+
+    case "set_song_name":
+      requireCapability(capabilities.songs, "songs");
+      validateSongTarget(operation.target);
+      validateSongName(operation.name);
+      return;
+
+    case "replace_song":
+      requireCapability(capabilities.songs, "songs");
+      validateSongTarget(operation.target);
+      if (operation.name !== undefined) validateSongName(operation.name);
+      validateSongRows(operation.rows);
+      return;
+
+    case "insert_song_row":
+      requireCapability(capabilities.songs, "songs");
+      validateSongTarget(operation.target);
+      assertIntegerRange(operation.row, "row", 0, 64);
+      validateSongRow(operation.value);
+      return;
+
+    case "update_song_row":
+      requireCapability(capabilities.songs, "songs");
+      validateSongTarget(operation.target);
+      assertIntegerRange(operation.row, "row", 0, 63);
+      validateSongRow(operation.value);
+      return;
+
+    case "move_song_row":
+      requireCapability(capabilities.songs, "songs");
+      validateSongTarget(operation.target);
+      assertIntegerRange(operation.sourceRow, "sourceRow", 0, 63);
+      assertIntegerRange(operation.targetRow, "targetRow", 0, 63);
+      if (operation.sourceRow === operation.targetRow) throw new Error("move_song_row source and target must differ");
+      return;
+
+    case "copy_song_row":
+      requireCapability(capabilities.songs, "songs");
+      validateSongTarget(operation.target);
+      assertIntegerRange(operation.sourceRow, "sourceRow", 0, 63);
+      assertIntegerRange(operation.targetRow, "targetRow", 0, 64);
+      return;
+
+    case "remove_song_row":
+      requireCapability(capabilities.songs, "songs");
+      validateSongTarget(operation.target);
+      assertIntegerRange(operation.row, "row", 0, 63);
+      return;
+
+    case "clear_song":
+      requireCapability(capabilities.songs, "songs");
+      validateSongTarget(operation.target);
+      return;
   }
 }
 
@@ -217,6 +272,7 @@ export function validateOperationSetInput(input: RytmOperationSetInput, capabili
   if (input.latePolicy !== "roll-forward" && input.latePolicy !== "reject") throw new Error("latePolicy must be roll-forward or reject");
   if (!Array.isArray(input.operations) || input.operations.length === 0) throw new Error("operation set must contain at least one operation");
   for (const operation of input.operations) validatePersistentOperation(operation, capabilities);
+  validateSongOperationTargetConsistency(input.operations);
 }
 
 export function collectOperationValidation(
@@ -230,6 +286,11 @@ export function collectOperationValidation(
     } catch (error) {
       errors.push(error instanceof Error ? error.message : String(error));
     }
+  }
+  try {
+    validateSongOperationTargetConsistency(operations);
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : String(error));
   }
   return {
     valid: errors.length === 0,
@@ -324,6 +385,68 @@ function validateMacroLocks<T extends RytmSceneLockInput | RytmPerformanceLockIn
     const target = lock.track + "." + lock.parameter;
     if (targets.has(target)) throw new Error("macro locks contain duplicate target: " + target);
     targets.add(target);
+  }
+}
+
+function validateSongTarget(target: RytmSongTarget | undefined): void {
+  if (target === undefined || target.scope === "work_buffer") return;
+  if (target.scope !== "stored") throw new Error("Song target scope must be work_buffer or stored");
+  assertIntegerRange(target.song, "target.song", 1, 16);
+}
+
+function validateSongName(name: string): void {
+  if (!/^[\x20-\x7E]{0,15}$/.test(name)) throw new Error("Song name must be at most 15 printable ASCII characters");
+}
+
+function validateSongRows(rows: RytmSongRowInput[]): void {
+  if (!Array.isArray(rows)) throw new Error("Song rows must be an array");
+  if (rows.length > 64) throw new Error("a Song has at most 64 rows");
+  for (const row of rows) validateSongRow(row);
+  const positions = rows.reduce((total, row) => total + row.patterns.length, 0);
+  if (positions > 256) throw new Error("a Song has at most 256 pattern positions");
+}
+
+function validateSongRow(row: RytmSongRowInput): void {
+  if (!Array.isArray(row.patterns) || row.patterns.length < 1 || row.patterns.length > 255) {
+    throw new Error("a Song row must contain between 1 and 255 pattern positions");
+  }
+  assertIntegerRange(row.repeats, "repeats", 1, 256);
+  for (const position of row.patterns) {
+    assertPatternSlot(position.pattern, "Song pattern");
+    if (position.mutedTracks === undefined) continue;
+    if (!Array.isArray(position.mutedTracks)) throw new Error("mutedTracks must be an array");
+    const unique = new Set<string>();
+    for (const track of position.mutedTracks) {
+      assertTrackId(track, "muted track");
+      if (unique.has(track)) throw new Error(`mutedTracks contains duplicate track: ${track}`);
+      unique.add(track);
+    }
+  }
+}
+
+function validateSongOperationTargetConsistency(operations: RytmPersistentOperation[]): void {
+  const targets = new Set<string>();
+  for (const operation of operations) {
+    const target = songOperationTarget(operation);
+    if (target === undefined) continue;
+    targets.add(target.scope === "work_buffer" ? "work_buffer" : `stored:${target.song}`);
+  }
+  if (targets.size > 1) throw new Error("one operation set may edit only one Song target");
+}
+
+function songOperationTarget(operation: RytmPersistentOperation): RytmSongTarget | undefined {
+  switch (operation.type) {
+    case "set_song_name":
+    case "replace_song":
+    case "insert_song_row":
+    case "update_song_row":
+    case "move_song_row":
+    case "copy_song_row":
+    case "remove_song_row":
+    case "clear_song":
+      return operation.target ?? { scope: "work_buffer" };
+    default:
+      return undefined;
   }
 }
 

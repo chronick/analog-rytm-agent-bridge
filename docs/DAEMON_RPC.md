@@ -55,6 +55,7 @@ Implemented for both mock and hardware adapters:
 - `daemon.describe`
 - `device.inspect_state`
 - `pattern.inspect`
+- `song.inspect`
 - `kit.inspect`
 - `sound.inspect`
 - `global.inspect`
@@ -88,7 +89,9 @@ The mock adapter also has `test.advance_mock_transport` and `test.delay` methods
 
 `audio.start_recording` starts a nonblocking capture. An identical explicit `recordingId` and start declaration replays the original acknowledgement; conflicting start parameters reject. `audio.stop_recording` finalizes the WAV and sidecar and replays a completed result for the same ID. `audio.capture_pattern` performs a bounded blocking capture. The daemon supplies Pattern, Kit, revision, tempo, routing, timestamps, and snapshot context from authoritative state rather than accepting those fields from the caller.
 
-Hardware `operations.apply_now` and `operations.queue` support persistent Pattern, Sound, machine, Kit, FX, Global, routing, MIDI, sequencer, Settings, Scene/Performance definitions, and identity-checked sample-assignment deltas. Realtime RPC supports track notes, transport, program change, validated `track_level` through CC 95 or NRPN 1:100, active Scene selection, and Performance amounts.
+Hardware `operations.apply_now` and `operations.queue` support persistent Pattern, Sound, machine, Kit, FX, Global, routing, MIDI, sequencer, Settings, Scene/Performance definitions, Song definitions, and identity-checked sample-assignment deltas. Realtime RPC supports track notes, transport, program change, validated `track_level` through CC 95 or NRPN 1:100, active Scene selection, and Performance amounts.
+
+`song.inspect` accepts `scope: work_buffer | stored | all`, an optional stored `song: 1..16`, and `resolveReferences`. Song delta operations address one target per operation set and use zero-based row indices. Supported row data is Pattern chains, repeats, and per-position track mutes. Song definition writes never activate Song mode; no Song activation RPC is advertised.
 
 `realtime.set_scene` accepts `scene: 1..12` or `null`, plus optional lane `cc` or `nrpn`; it verifies active Scene readback and does not change persistent revision. `realtime.set_performance` accepts `performance: 1..12`, `amount: 0..127`, and an optional lane. Performance values are transient and idempotent against the daemon's sent-value cache; they are cleared from that cache on disconnect/reconnect.
 
@@ -116,10 +119,10 @@ Hardware queue calls require `applyAt.transportEpoch`. Obtain it from `device.in
 
 The TypeScript client can start a new process after an unexpected disconnect. Mock state starts fresh. Hardware queue, snapshot, event, revision, last observation, and transport metadata reload from the durable store.
 
-Every hardware reconnect opens a new transport epoch and re-queries Pattern, Kit, Global, and Settings before accepting writes. Queued work with `latePolicy: reject` is rejected when its epoch is stale. `latePolicy: roll-forward` resolves the same boundary kind in the new epoch and emits `operation_set.reconciled`. An external semantic state change increments revision, causing old revision-checked work to reject before dispatch.
+Every hardware reconnect opens a new transport epoch and re-queries the work-buffer Pattern, Kit, Global, Settings, and Song before accepting writes. Stored Songs are queried explicitly for inspection, operations, and snapshots rather than on every reconciliation poll. Queued work with `latePolicy: reject` is rejected when its epoch is stale. `latePolicy: roll-forward` resolves the same boundary kind in the new epoch and emits `operation_set.reconciled`. An external semantic state change in queried state increments revision, causing old revision-checked work to reject before dispatch.
 
 During active external clock, the device-reported Pattern and Settings BPM are treated as transport-derived observations rather than persistent drift. The daemon still reconciles every other field normally.
 
 ## Safety
 
-Hardware mutation first reads all four raw objects, applies validated operations to a decoded copy, canonicalizes through the SysEx codec, writes only changed objects, re-queries semantic state, and restores the raw baseline automatically on mismatch. Snapshot rollback increments the public revision and verifies the restored state. The certification harness requires `--execute`; direct RPC callers are expected to use validation, dry run, expected revisions, and snapshots deliberately.
+Hardware mutation first reads all required raw objects, applies validated operations to a decoded copy, canonicalizes through the SysEx codec, writes only changed objects, re-queries semantic state, and restores the raw baseline automatically on mismatch. Explicit snapshots include the work-buffer Pattern, Kit, Global, Settings, and Song plus all 16 stored Songs. Snapshot rollback increments the public revision and verifies the restored state. The certification harness requires `--execute`; direct RPC callers are expected to use validation, dry run, expected revisions, and snapshots deliberately.

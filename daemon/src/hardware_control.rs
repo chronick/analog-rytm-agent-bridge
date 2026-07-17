@@ -1,10 +1,10 @@
 use crate::{
     hardware::{
-        apply_persistent_operations, canonical_state_summary, inspect_work_buffer_state,
-        parse_pattern_slot, query_pattern_summary, read_work_buffer_state, restore_raw_state,
-        send_cc, send_nrpn, state_summary, write_capture_delta,
-        write_capture_delta_with_test_verification_failure, ChangedObjects, RawState,
-        RytmMidiSession,
+        apply_persistent_operations, canonical_capture_summary, inspect_song_state,
+        inspect_work_buffer_state, parse_pattern_slot, query_pattern_summary, read_operation_state,
+        read_snapshot_state, read_work_buffer_state, restore_raw_state, send_cc, send_nrpn,
+        state_summary, write_capture_delta, write_capture_delta_with_test_verification_failure,
+        ChangedObjects, RawState, RytmMidiSession,
     },
     hardware_scheduler::{
         timestamp, BoundaryTarget, ClockSource, DurableSnapshot, HardwareOperationSet,
@@ -119,6 +119,10 @@ impl HardwareBridgeState {
         self.with_session(|session| query_pattern_summary(session, pattern_index))
     }
 
+    pub fn inspect_song(&mut self, params: &Value) -> Result<Value, String> {
+        self.with_session(|session| inspect_song_state(session, params))
+    }
+
     pub fn inspect_kit(&mut self) -> Result<Value, String> {
         self.inspect_summary().map(|summary| {
             let mut kit = summary["kit"].clone();
@@ -164,7 +168,8 @@ impl HardwareBridgeState {
                 "warnings": [],
             }));
         }
-        let mut capture = self.with_session(read_work_buffer_state)?;
+        let mut capture =
+            self.with_session(|session| read_operation_state(session, &operations))?;
         match apply_persistent_operations(&mut capture, &operations) {
             Ok(changed) => Ok(json!({
                 "valid": true,
@@ -189,10 +194,11 @@ impl HardwareBridgeState {
             return Ok(json!({ "validation": validation }));
         }
         let operations = parse_operations(raw)?;
-        let mut capture = self.with_session(read_work_buffer_state)?;
-        let before = canonical_state_summary(&capture.project)?;
+        let mut capture =
+            self.with_session(|session| read_operation_state(session, &operations))?;
+        let before = canonical_capture_summary(&capture)?;
         let changed = apply_persistent_operations(&mut capture, &operations)?;
-        let projected = canonical_state_summary(&capture.project)?;
+        let projected = canonical_capture_summary(&capture)?;
         Ok(json!({
             "validation": validation,
             "changedObjects": changed,
@@ -273,8 +279,9 @@ impl HardwareBridgeState {
         self.ensure_revision(input.expected_revision)?;
         self.samples.validate_assignments(&input.operations)?;
 
-        let mut capture = self.with_session(read_work_buffer_state)?;
-        let baseline = RawState::from_capture(&capture);
+        let mut capture =
+            self.with_session(|session| read_operation_state(session, &input.operations))?;
+        let baseline = RawState::from_capture(&capture)?;
         let changed = apply_persistent_operations(&mut capture, &input.operations)?;
         let operation_set_id = input
             .operation_set_id
@@ -291,11 +298,11 @@ impl HardwareBridgeState {
                 "validation": { "valid": true, "errors": [], "warnings": [] },
                 "changedObjects": changed,
                 "projectedRevision": self.revision() + u64::from(changed.any()),
-                "projectedState": compact_object_state(&canonical_state_summary(&capture.project)?),
+                "projectedState": compact_object_state(&canonical_capture_summary(&capture)?),
             }));
         }
 
-        let write = self.write_delta(&capture, &baseline, changed)?;
+        let write = self.write_delta(&capture, &baseline, &changed)?;
         if changed.any() {
             self.scheduler.state.revision += 1;
         }
@@ -316,7 +323,7 @@ impl HardwareBridgeState {
             applied_at_boundary: Some("immediate".to_string()),
             resulting_revision: Some(self.revision()),
             rejection_reason: None,
-            result: Some(applied_details(changed, &write)),
+            result: Some(applied_details(&changed, &write)),
         };
         let result = record.public_value();
         self.scheduler.state.operation_sets.push(record);
@@ -603,15 +610,15 @@ impl HardwareBridgeState {
             return Ok(existing.summary.clone());
         }
 
-        let capture = self.with_session(read_work_buffer_state)?;
-        let raw = RawState::from_capture(&capture);
+        let capture = self.with_session(read_snapshot_state)?;
+        let raw = RawState::from_capture(&capture)?;
         let summary = json!({
             "snapshotId": snapshot_id,
             "label": label,
             "revision": self.revision(),
             "createdAt": timestamp(),
             "activePattern": raw.summary["pattern"]["slot"].clone(),
-            "objects": ["work_buffer_pattern", "work_buffer_kit", "work_buffer_global", "settings"],
+            "objects": ["work_buffer_pattern", "work_buffer_kit", "work_buffer_global", "settings", "work_buffer_song", "stored_songs_1_16"],
         });
         self.scheduler
             .state
@@ -647,10 +654,10 @@ impl HardwareBridgeState {
             .ok_or_else(|| format!("unknown snapshotId: {snapshot_id}"))?
             .raw
             .clone();
-        let current = self.with_session(read_work_buffer_state)?;
-        let changed = changed_between(&state_summary(&current.project), &raw.summary);
+        let current = self.with_session(read_snapshot_state)?;
+        let changed = changed_between(&RawState::from_capture(&current)?.summary, &raw.summary);
         let observed = if changed.any() {
-            self.with_session(|session| restore_raw_state(session, &raw, changed))?
+            self.with_session(|session| restore_raw_state(session, &raw, &changed))?
         } else {
             raw.summary.clone()
         };
@@ -1209,7 +1216,7 @@ impl HardwareBridgeState {
                 record.applied_at = Some(now.clone());
                 record.applied_at_boundary = Some(boundary.clone());
                 record.resulting_revision = Some(revision);
-                record.result = Some(applied_details(changed, &write));
+                record.result = Some(applied_details(&changed, &write));
                 self.scheduler.append_event(json!({
                     "type": "operation_set.applied",
                     "operationSetId": operation_set_id,
@@ -1234,10 +1241,11 @@ impl HardwareBridgeState {
         input: &OperationSetInput,
     ) -> Result<(ChangedObjects, Value), String> {
         self.samples.validate_assignments(&input.operations)?;
-        let mut capture = self.with_session(read_work_buffer_state)?;
-        let baseline = RawState::from_capture(&capture);
+        let mut capture =
+            self.with_session(|session| read_operation_state(session, &input.operations))?;
+        let baseline = RawState::from_capture(&capture)?;
         let changed = apply_persistent_operations(&mut capture, &input.operations)?;
-        let write = self.write_delta(&capture, &baseline, changed)?;
+        let write = self.write_delta(&capture, &baseline, &changed)?;
         Ok((changed, write))
     }
 
@@ -1245,7 +1253,7 @@ impl HardwareBridgeState {
         &mut self,
         capture: &crate::hardware::StateCapture,
         baseline: &RawState,
-        changed: ChangedObjects,
+        changed: &ChangedObjects,
     ) -> Result<Value, String> {
         let inject_failure = self.force_next_verification_failure && changed.any();
         if inject_failure {
@@ -1395,7 +1403,7 @@ fn require_stopped_transport_for_sample_write(playing: bool) -> Result<(), Strin
     }
 }
 
-fn applied_details(changed: ChangedObjects, write: &Value) -> Value {
+fn applied_details(changed: &ChangedObjects, write: &Value) -> Value {
     json!({
         "changed": changed.any(),
         "changedObjects": changed,
@@ -1411,6 +1419,8 @@ fn compact_object_state(summary: &Value) -> Value {
         "kit": summary["kit"].clone(),
         "global": summary["global"].clone(),
         "settings": summary["settings"].clone(),
+        "song": summary["song"].clone(),
+        "songs": summary["songs"].clone(),
         "compatibility": summary["compatibility"].clone(),
     })
 }
@@ -1418,16 +1428,35 @@ fn compact_object_state(summary: &Value) -> Value {
 fn changed_between(current: &Value, target: &Value) -> ChangedObjects {
     let current = persistent_summary_view(current);
     let target = persistent_summary_view(target);
+    let mut songs = std::collections::BTreeSet::new();
+    if current["song"] != target["song"] {
+        songs.insert("work_buffer".to_string());
+    }
+    let current_songs = current["songs"].as_object();
+    let target_songs = target["songs"].as_object();
+    for key in current_songs
+        .into_iter()
+        .flat_map(|songs| songs.keys())
+        .chain(target_songs.into_iter().flat_map(|songs| songs.keys()))
+    {
+        if current["songs"][key] != target["songs"][key] {
+            songs.insert(key.clone());
+        }
+    }
     ChangedObjects {
         pattern: current["pattern"] != target["pattern"],
         kit: current["kit"] != target["kit"],
         global: current["global"] != target["global"],
         settings: current["settings"] != target["settings"],
+        songs: songs.into_iter().collect(),
     }
 }
 
 fn reconciliation_view(summary: &Value, transport_playing: bool) -> Value {
     let mut view = persistent_summary_view(summary);
+    view.as_object_mut()
+        .expect("state summary is an object")
+        .remove("songs");
     if transport_playing {
         view["settings"]["tempo"] = json!("external-clock-active");
         view["pattern"]["tempo"] = json!("external-clock-active");
@@ -1660,6 +1689,25 @@ mod tests {
         assert_ne!(
             reconciliation_view(&first, true),
             reconciliation_view(&second, true)
+        );
+    }
+
+    #[test]
+    fn ignores_unqueried_stored_songs_during_work_buffer_reconciliation() {
+        let work_buffer = json!({
+            "pattern": { "tempo": 90 },
+            "settings": { "tempo": 90 },
+            "song": { "target": { "scope": "work_buffer" }, "name": "ACTIVE" }
+        });
+        let mut operation_capture = work_buffer.clone();
+        operation_capture["songs"] = json!({
+            "work_buffer": work_buffer["song"].clone(),
+            "stored:16": { "target": { "scope": "stored", "song": 16 }, "name": "CERT" }
+        });
+
+        assert_eq!(
+            reconciliation_view(&work_buffer, false),
+            reconciliation_view(&operation_capture, false)
         );
     }
 

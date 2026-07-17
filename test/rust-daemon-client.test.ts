@@ -41,6 +41,7 @@ test("TypeScript client completes a real round trip through the Rust mock daemon
     assert.ok(health.methods.implemented.includes("samples.resolve_ram"));
     assert.ok(health.methods.implemented.includes("realtime.set_scene"));
     assert.ok(health.methods.implemented.includes("realtime.set_performance"));
+    assert.ok(health.methods.implemented.includes("song.inspect"));
 
     const state = await client.inspectDeviceState() as {
       device: { activePattern: string };
@@ -251,6 +252,81 @@ test("TypeScript client completes a real round trip through the Rust mock daemon
     assert.equal(cleared.status, "cleared-and-verified");
     assert.equal(cleared.driveSampleRetained, true);
 
+    await client.snapshotState({ snapshotId: "before-song" });
+    const songProposal = await facade.callTool("rytm_propose_song_delta", {
+      operations: [{
+        type: "replace_song",
+        target: { scope: "stored", song: 1 },
+        name: "AGENT SONG",
+        rows: [{
+          repeats: 2,
+          patterns: [
+            { pattern: "A01" },
+            { pattern: "A02", mutedTracks: ["BD"] },
+          ],
+        }],
+      }],
+    }) as { baseSong: { rowCount: number }; projectedSong: { rowCount: number } };
+    assert.equal(songProposal.baseSong.rowCount, 0);
+    assert.equal(songProposal.projectedSong.rowCount, 1);
+    const songInput = {
+      operationSetId: "integration-song",
+      expectedRevision: 5,
+      operations: [{
+        type: "replace_song" as const,
+        target: { scope: "stored" as const, song: 1 },
+        name: "AGENT SONG",
+        rows: [{
+          repeats: 2,
+          patterns: [
+            { pattern: "A01" as const },
+            { pattern: "A02" as const, mutedTracks: ["BD" as const] },
+          ],
+        }],
+      }],
+    };
+    const songApplied = await client.applyOperationsNow(songInput);
+    assert.equal(songApplied.resultingRevision, 6);
+    assert.deepEqual(await client.applyOperationsNow(songInput), songApplied);
+    const storedSong = await facade.callTool("rytm_inspect_song", {
+      scope: "stored",
+      song: 1,
+      resolveReferences: true,
+    }) as {
+      name: string;
+      rowCount: number;
+      rows: Array<{ patterns: Array<{ mutedTracksMask: number }> }>;
+      references: unknown[];
+    };
+    assert.equal(storedSong.name, "AGENT SONG");
+    assert.equal(storedSong.rowCount, 1);
+    assert.equal(storedSong.rows[0]?.patterns[1]?.mutedTracksMask, 1);
+    assert.equal(storedSong.references.length, 2);
+    const beforeQueuedSong = await client.inspectDeviceState() as { device: { activePattern: string } };
+    const queuedSong = await client.queueOperations({
+      operationSetId: "integration-song-queue",
+      expectedRevision: 6,
+      applyAt: { kind: "next_step" },
+      latePolicy: "roll-forward",
+      operations: [{
+        type: "insert_song_row",
+        target: { scope: "stored", song: 1 },
+        row: 1,
+        value: { repeats: 1, patterns: [{ pattern: "B01" }] },
+      }],
+    });
+    assert.equal(queuedSong.status, "queued");
+    await client.advanceMockTransport(1);
+    const queuedSongApplied = await client.inspectSong({ scope: "stored", song: 1 });
+    assert.equal("songs" in queuedSongApplied ? -1 : queuedSongApplied.rowCount, 2);
+    const afterQueuedSong = await client.inspectDeviceState() as { device: { activePattern: string }; revision: number };
+    assert.equal(afterQueuedSong.device.activePattern, beforeQueuedSong.device.activePattern);
+    assert.equal(afterQueuedSong.revision, 7);
+    const songRollback = await client.rollbackSnapshot({ snapshotId: "before-song", expectedRevision: 7 });
+    assert.equal(songRollback.revision, 8);
+    const restoredSong = await client.inspectSong({ scope: "stored", song: 1 });
+    assert.equal("songs" in restoredSong ? -1 : restoredSong.rowCount, 0);
+
     const journal = await client.getEvents();
     const eventTypes = journal.map((entry) => (entry.event as { type: string }).type);
     assert.ok(eventTypes.includes("operation_set.applied"));
@@ -263,7 +339,7 @@ test("TypeScript client completes a real round trip through the Rust mock daemon
 
     const reconciliation = await client.reconcileState() as { status: string; revision: number };
     assert.equal(reconciliation.status, "converged");
-    assert.equal(reconciliation.revision, 5);
+    assert.equal(reconciliation.revision, 8);
 
     const first = await client.request("pattern.inspect", { pattern: "B02" }, { requestId: "integration-replay" });
     const replay = await client.request("pattern.inspect", { pattern: "B02" }, { requestId: "integration-replay" });

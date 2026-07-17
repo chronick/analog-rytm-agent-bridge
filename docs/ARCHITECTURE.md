@@ -113,4 +113,5 @@ On reconnect, the daemon re-queries every owned object before writes and starts 
 5. Hardware test harness with firmware evidence. Initial validation complete; broader compatibility matrix remains.
 6. TypeScript/Rust integration. Mock and immediate hardware control planes complete.
 7. Hardware-backed scheduler and reconciliation. Complete.
-8. Capability expansion for scenes, performance macros, songs, and sample transfer.
+8. Capability expansion for scenes, performance macros, songs, and sample transfer. Complete for the maintained codec subset.
+9. Overbridge multitrack audio as an independent capture lane. In progress.

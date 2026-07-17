@@ -75,7 +75,7 @@ pub fn mock_description() -> DaemonDescription {
             sample_transfer: true,
             scene_macros: true,
             performance_macros: true,
-            songs: false,
+            songs: true,
             class_compliant_audio: true,
             overbridge_audio: false,
         },
@@ -105,7 +105,7 @@ pub fn hardware_description() -> DaemonDescription {
             sample_transfer: true,
             scene_macros: true,
             performance_macros: true,
-            songs: false,
+            songs: true,
             class_compliant_audio: true,
             overbridge_audio: false,
         },
@@ -205,11 +205,11 @@ mod tests {
     }
 
     #[test]
-    fn hardware_description_advertises_certified_macro_workflows() {
+    fn hardware_description_advertises_certified_macro_and_song_workflows() {
         let description = hardware_description();
         assert!(description.capabilities.scene_macros);
         assert!(description.capabilities.performance_macros);
-        assert!(!description.capabilities.songs);
+        assert!(description.capabilities.songs);
         assert_eq!(
             description.firmware.compatibility,
             Compatibility::Unverified
