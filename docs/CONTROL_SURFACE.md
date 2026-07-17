@@ -2,6 +2,8 @@
 
 This matrix describes the hardware adapter. The mock adapter additionally supports deterministic scheduler advancement without a MIDI device.
 
+`rytm_describe_capabilities` returns the agent-readable authority for supported, partial, unsupported, and excluded control families. Each entry reports readable/writable access, hardware verification, transport, firmware evidence, rollback, and risk. The complete manual-section audit is in [OS_1_72_CONTROL_MAP.md](OS_1_72_CONTROL_MAP.md).
+
 ## Inspect
 
 The agent can read compact summaries through `device.inspect_state`, `pattern.inspect`, `song.inspect`, `kit.inspect`, `sound.inspect`, and `global.inspect`. The device summary includes the work-buffer Pattern and Song, all 12 Kit Sounds, machine-specific parameters, sample/filter/amp/LFO/settings pages, track levels and retrig, all Kit FX, control inputs, Global routing, metronome, MIDI sync/ports/channels, sequencer settings, and UI/recorder Settings.

@@ -89,6 +89,8 @@ Also implemented by both adapters:
 
 The mock adapter also has `test.advance_mock_transport` and `test.delay` methods for deterministic scheduler and disconnect tests. They are not MCP tools.
 
+`daemon.describe` retains coarse boolean capability flags for validation and adds `capabilityEvidence`. The evidence map distinguishes supported, partial, unsupported, and deliberately excluded control families and reports readable/writable access, verification, transport, firmware certifications, rollback behavior, and risk. MCP exposes the same payload as `rytm_describe_capabilities`.
+
 `audio.start_recording` starts a nonblocking capture. An identical explicit `recordingId` and start declaration replays the original acknowledgement; conflicting start parameters reject. `audio.stop_recording` finalizes the WAV and sidecar and replays a completed result for the same ID. `audio.capture_pattern` performs a bounded blocking capture. The daemon supplies Pattern, Kit, revision, tempo, routing, timestamps, and snapshot context from authoritative state rather than accepting those fields from the caller.
 
 `audio.inspect_overbridge` always returns provider state and never requires Overbridge to be available. `audio.capture_multitrack` performs a bounded capture from one recognized 10/12/18/20-channel CoreAudio stream and emits synchronized per-bus WAVs plus shared metadata. A stereo-only device returns retryable `capability_unavailable`. See [OVERBRIDGE_AUDIO.md](OVERBRIDGE_AUDIO.md).

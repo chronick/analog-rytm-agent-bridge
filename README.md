@@ -74,6 +74,7 @@ Both modes use the same request/response/event protocol. The hardware adapter re
 
 See [docs/HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md) before running write tests.
 See [docs/CONTROL_SURFACE.md](docs/CONTROL_SURFACE.md) for the current control matrix.
+See [docs/OS_1_72_CONTROL_MAP.md](docs/OS_1_72_CONTROL_MAP.md) for the evidence-driven mapping of every manual control family.
 See [docs/AUDIO_CAPTURE.md](docs/AUDIO_CAPTURE.md) for the stereo capture contract and its separation from Overbridge.
 See [docs/OVERBRIDGE_AUDIO.md](docs/OVERBRIDGE_AUDIO.md) for optional synchronized multitrack discovery and capture.
 See [docs/SAMPLE_MANAGEMENT.md](docs/SAMPLE_MANAGEMENT.md) for sample identity, transfer, RAM resolution, assignment, and rollback boundaries.

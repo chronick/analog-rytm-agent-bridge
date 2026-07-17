@@ -79,6 +79,32 @@ export interface RytmFirmwareCompatibility {
   notes: string[];
 }
 
+export interface RytmCapabilityEvidence {
+  status: "supported" | "partial" | "implemented-unverified" | "unsupported" | "excluded";
+  readable: boolean;
+  writable: boolean;
+  verified: boolean;
+  transport: string[];
+  firmwareEvidence: {
+    adapterTargetFirmware?: string;
+    hardwareVerifiedFirmware: string[];
+    certifications: string[];
+  };
+  risk: {
+    level: "low" | "medium" | "high" | "excluded";
+    rollback: string;
+  };
+  notes: string[];
+}
+
+export interface RytmDaemonDescription {
+  schema: "analog-rytm-daemon.v1";
+  model: "Analog Rytm MKII";
+  firmware: RytmFirmwareCompatibility;
+  capabilities: RytmCapabilities;
+  capabilityEvidence: Record<string, RytmCapabilityEvidence>;
+}
+
 export interface RytmDeviceSummary {
   model: "Analog Rytm MKII" | "Analog Rytm MKI" | "unknown";
   connected: boolean;

@@ -49,6 +49,7 @@ export class RytmMcpAdapter {
   listTools(): McpToolDescriptor[] {
     return [
       { name: "rytm_daemon_health", description: "Report Rust daemon connection, adapter, protocol, and implemented-method health.", inputSchema: emptyInput },
+      { name: "rytm_describe_capabilities", description: "Describe Rytm control families with access, transport, firmware evidence, rollback, and risk.", inputSchema: emptyInput },
       { name: "rytm_inspect_device_state", description: "Return compact Rytm device, transport, queue, snapshot, and active-pattern state.", inputSchema: emptyInput },
       {
         name: "rytm_inspect_pattern",
@@ -357,6 +358,9 @@ export class RytmMcpAdapter {
       case "rytm_daemon_health":
         if (!this.daemon) throw new Error("Rust Rytm daemon is not configured");
         return this.daemon.health();
+      case "rytm_describe_capabilities":
+        if (!this.daemon) throw new Error("Rust Rytm daemon is required for capability evidence");
+        return this.daemon.describe();
       case "rytm_inspect_device_state":
         return this.daemon ? this.daemon.inspectDeviceState() : this.service.inspectDeviceState();
       case "rytm_inspect_pattern":

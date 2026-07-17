@@ -21,6 +21,7 @@ import type {
   RytmChangePatternInput,
   RytmClearSampleRamInput,
   RytmClearedSampleRam,
+  RytmDaemonDescription,
   RytmLiveParameterInput,
   RytmInspectSongInput,
   RytmOperationSetDryRun,
@@ -156,8 +157,8 @@ export class RustDaemonClient implements RytmDaemonApi {
     return this.request<RytmDaemonHealth>("daemon.health");
   }
 
-  async describe(): Promise<unknown> {
-    return this.request("daemon.describe");
+  async describe(): Promise<RytmDaemonDescription> {
+    return this.request<RytmDaemonDescription>("daemon.describe");
   }
 
   async inspectDeviceState(): Promise<unknown> {

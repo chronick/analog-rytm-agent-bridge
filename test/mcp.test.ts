@@ -7,8 +7,9 @@ import { RytmAgentService } from "../src/service/RytmAgentService.ts";
 test("exposes the initial Rytm MCP tool surface", () => {
   const adapter = new RytmMcpAdapter(new RytmAgentService());
   const tools = adapter.listTools();
-  assert.equal(tools.length, 31);
+  assert.equal(tools.length, 32);
   assert.ok(tools.some((tool) => tool.name === "rytm_daemon_health"));
+  assert.ok(tools.some((tool) => tool.name === "rytm_describe_capabilities"));
   assert.ok(tools.some((tool) => tool.name === "rytm_inspect_track_sound"));
   assert.ok(tools.some((tool) => tool.name === "rytm_queue_operations"));
   assert.ok(tools.some((tool) => tool.name === "rytm_rollback_snapshot"));
@@ -29,6 +30,7 @@ test("routes health and compact inspection through an optional daemon boundary",
   const service = new RytmAgentService();
   const daemon = {
     async health() { return { status: "ready" as const, connected: true, adapter: "mock" as const, protocolSchema: "analog-rytm-rpc.v1" as const, daemonSchema: "analog-rytm-daemon.v1" as const, processId: 1, methods: { declared: [], implemented: [] } }; },
+    async describe() { return { source: "rust-daemon", object: "capabilities" }; },
     async inspectDeviceState() { return { source: "rust-daemon" }; },
     async inspectPattern(pattern?: string) { return { source: "rust-daemon", pattern }; },
     async inspectSong() { return { source: "rust-daemon", object: "song" }; },
@@ -43,6 +45,7 @@ test("routes health and compact inspection through an optional daemon boundary",
 
   const health = await adapter.callTool("rytm_daemon_health", {}) as { status: string };
   assert.equal(health.status, "ready");
+  assert.deepEqual(await adapter.callTool("rytm_describe_capabilities", {}), { source: "rust-daemon", object: "capabilities" });
   assert.deepEqual(await adapter.callTool("rytm_inspect_device_state", {}), { source: "rust-daemon" });
   assert.deepEqual(await adapter.callTool("rytm_inspect_pattern", { pattern: "B02" }), { source: "rust-daemon", pattern: "B02" });
   assert.deepEqual(await adapter.callTool("rytm_inspect_song", {}), { source: "rust-daemon", object: "song" });

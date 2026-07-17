@@ -8,6 +8,7 @@ import type {
   RytmChangePatternInput,
   RytmClearSampleRamInput,
   RytmClearedSampleRam,
+  RytmDaemonDescription,
   RytmLiveParameterInput,
   RytmInspectSongInput,
   RytmOperationSetDryRun,
@@ -92,6 +93,7 @@ export interface RytmDaemonHealth {
 
 export interface RytmDaemonApi {
   health(): Promise<RytmDaemonHealth>;
+  describe(): Promise<RytmDaemonDescription>;
   inspectDeviceState(): Promise<unknown>;
   inspectPattern(pattern?: string): Promise<unknown>;
   inspectSong(input?: RytmInspectSongInput): Promise<RytmSongSummary | { songs: RytmSongSummary[]; count: number }>;

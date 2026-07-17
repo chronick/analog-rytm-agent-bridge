@@ -45,6 +45,11 @@ test("TypeScript client completes a real round trip through the Rust mock daemon
     assert.ok(health.methods.implemented.includes("realtime.set_performance"));
     assert.ok(health.methods.implemented.includes("song.inspect"));
 
+    const description = await client.describe();
+    assert.equal(description.capabilities.patternEdit, true);
+    assert.equal(description.capabilityEvidence.persistentPatternCore?.verified, false);
+    assert.deepEqual(description.capabilityEvidence.persistentPatternCore?.transport, ["rytm-rs Pattern SysEx"]);
+
     const state = await client.inspectDeviceState() as {
       device: { activePattern: string };
       activePattern: { trigCount: number };
