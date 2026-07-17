@@ -528,4 +528,21 @@ mod tests {
         assert_eq!(restored.state.events.len(), 1);
         fs::remove_dir_all(directory).unwrap();
     }
+
+    #[test]
+    fn loads_snapshots_written_before_song_raw_was_added() {
+        let snapshot: DurableSnapshot = serde_json::from_value(json!({
+            "label": "legacy",
+            "raw": {
+                "pattern_raw": [],
+                "kit_raw": [],
+                "global_raw": [],
+                "settings_raw": [],
+                "summary": { "pattern": {}, "kit": {}, "global": {}, "settings": {} }
+            },
+            "summary": { "snapshotId": "legacy" }
+        }))
+        .unwrap();
+        assert!(snapshot.raw.song_raw.is_empty());
+    }
 }

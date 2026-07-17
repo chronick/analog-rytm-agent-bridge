@@ -57,6 +57,7 @@ pub struct RawState {
     pub kit_raw: Vec<u8>,
     pub global_raw: Vec<u8>,
     pub settings_raw: Vec<u8>,
+    #[serde(default)]
     pub song_raw: BTreeMap<String, Vec<u8>>,
     pub summary: Value,
 }

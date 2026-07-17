@@ -182,6 +182,26 @@ npm run hardware:scheduler -- --execute
 
 The test triggers BD once at low velocity and temporarily changes its level. All persistent fields finish at their captured semantic baseline. The fault injection flag is internal to this certification command and should not be used when operating the bridge normally.
 
+## Complete Certification
+
+The complete runner executes existing focused harnesses as isolated child processes and compares a fresh semantic device inspection before and after the phase. Every child keeps its own emergency rollback; the phase passes only when the final device state matches and transport is stopped.
+
+Run the Core phase while USB CONFIG is `USB AUDIO/MIDI`:
+
+```bash
+npm run hardware:all -- --execute --phase=core
+```
+
+This covers inspect, validation, dry run, immediate apply, boundary queues, daemon restart/reconciliation, Scene/Performance definitions and live control, Song definitions, sample transfer/RAM/assignment, class-compliant audio capture, snapshots, and rollback.
+
+Then manually select USB CONFIG `OVERBRIDGE`, close competing audio hosts, and run:
+
+```bash
+npm run hardware:all -- --execute --phase=overbridge
+```
+
+The manual mode switch is why the suite has two phases. Each phase writes an ignored manifest under `hardware/runs/complete-*/manifest.json` with per-harness results and final-state evidence.
+
 ## Realtime Validation
 
 This is audible and changes track level briefly. It uses low-velocity notes, sends transport and 24 PPQN clock, verifies CC and NRPN through Kit SysEx readback, and restores the captured Kit and Settings objects before returning.

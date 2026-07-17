@@ -31,6 +31,8 @@ npm run check
 npm run demo
 npm run hardware:control
 npm run hardware:control -- --execute
+npm run hardware:all -- --execute --phase=core
+npm run hardware:all -- --execute --phase=overbridge
 npm run hardware:macros
 npm run hardware:macros -- --execute
 npm run hardware:overbridge

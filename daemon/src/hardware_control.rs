@@ -655,7 +655,8 @@ impl HardwareBridgeState {
             .raw
             .clone();
         let current = self.with_session(read_snapshot_state)?;
-        let changed = changed_between(&RawState::from_capture(&current)?.summary, &raw.summary);
+        let mut changed = changed_between(&RawState::from_capture(&current)?.summary, &raw.summary);
+        changed.songs.retain(|key| raw.song_raw.contains_key(key));
         let observed = if changed.any() {
             self.with_session(|session| restore_raw_state(session, &raw, &changed))?
         } else {
