@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -38,6 +38,7 @@ test("TypeScript client completes a real round trip through the Rust mock daemon
     assert.ok(health.methods.implemented.includes("snapshot.rollback"));
     assert.ok(health.methods.implemented.includes("sound.inspect"));
     assert.ok(health.methods.implemented.includes("audio.capture_pattern"));
+    assert.ok(health.methods.implemented.includes("samples.resolve_ram"));
 
     const state = await client.inspectDeviceState() as {
       device: { activePattern: string };
@@ -161,6 +162,84 @@ test("TypeScript client completes a real round trip through the Rust mock daemon
     const sidecar = JSON.parse(await readFile(bounded.audio.metadataPath, "utf8")) as { schema: string };
     assert.equal(sidecar.schema, "analog-rytm-recording.v1");
 
+    const samplePath = join(audioDirectory, "integration-sample.wav");
+    await writeTestWav(samplePath);
+    const uploaded = await facade.callTool("rytm_upload_sample", {
+      sourcePath: samplePath,
+      deviceDirectory: "/integration-tests",
+      name: "bridge-sine",
+    }) as {
+      status: string;
+      transferred: boolean;
+      sampleId: string;
+      devicePath: string;
+      source: { frames: number };
+    };
+    assert.equal(uploaded.status, "uploaded-and-verified");
+    assert.equal(uploaded.transferred, true);
+    assert.equal(uploaded.devicePath, "/integration-tests/bridge-sine");
+    assert.equal(uploaded.source.frames, 4_800);
+
+    const uploadReplay = await facade.callTool("rytm_upload_sample", {
+      sourcePath: samplePath,
+      deviceDirectory: "/integration-tests",
+      name: "bridge-sine",
+    }) as { status: string; transferred: boolean; sampleId: string };
+    assert.equal(uploadReplay.status, "already-present");
+    assert.equal(uploadReplay.transferred, false);
+    assert.equal(uploadReplay.sampleId, uploaded.sampleId);
+
+    const inventory = await facade.callTool("rytm_inspect_samples", {
+      drivePath: "/integration-tests",
+      includeRam: true,
+    }) as {
+      entries: Array<{ sampleId?: string }>;
+      ram: { capacity: number; occupied: number };
+    };
+    assert.equal(inventory.entries[0]?.sampleId, uploaded.sampleId);
+    assert.equal(inventory.ram.capacity, 127);
+    assert.equal(inventory.ram.occupied, 0);
+
+    const resolved = await facade.callTool("rytm_resolve_sample_ram", {
+      sampleId: uploaded.sampleId,
+      slot: 127,
+    }) as { status: string; slot: number; verified: boolean };
+    assert.equal(resolved.status, "loaded-and-verified");
+    assert.equal(resolved.slot, 127);
+    assert.equal(resolved.verified, true);
+
+    await client.snapshotState({ snapshotId: "before-sample-assignment" });
+    const sampleAssignment = await facade.callTool("rytm_apply_operations_now", {
+      operationSetId: "assign-integration-sample",
+      expectedRevision: 3,
+      operations: [{
+        type: "assign_sample_slot",
+        pattern: "B02",
+        track: "BD",
+        slot: 127,
+        sampleId: uploaded.sampleId,
+      }],
+    }) as { status: string; resultingRevision: number };
+    assert.equal(sampleAssignment.status, "applied");
+    assert.equal(sampleAssignment.resultingRevision, 4);
+    const assignedPattern = await client.inspectPattern("B02") as {
+      sampleSlots: { BD?: { slot: number; sampleId: string } };
+    };
+    assert.equal(assignedPattern.sampleSlots.BD?.slot, 127);
+    assert.equal(assignedPattern.sampleSlots.BD?.sampleId, uploaded.sampleId);
+
+    const sampleRollback = await client.rollbackSnapshot({
+      snapshotId: "before-sample-assignment",
+      expectedRevision: 4,
+    });
+    assert.equal(sampleRollback.revision, 5);
+    const cleared = await facade.callTool("rytm_clear_sample_ram", {
+      sampleId: uploaded.sampleId,
+      slot: 127,
+    }) as { status: string; driveSampleRetained: boolean };
+    assert.equal(cleared.status, "cleared-and-verified");
+    assert.equal(cleared.driveSampleRetained, true);
+
     const journal = await client.getEvents();
     const eventTypes = journal.map((entry) => (entry.event as { type: string }).type);
     assert.ok(eventTypes.includes("operation_set.applied"));
@@ -171,7 +250,7 @@ test("TypeScript client completes a real round trip through the Rust mock daemon
 
     const reconciliation = await client.reconcileState() as { status: string; revision: number };
     assert.equal(reconciliation.status, "converged");
-    assert.equal(reconciliation.revision, 3);
+    assert.equal(reconciliation.revision, 5);
 
     const first = await client.request("pattern.inspect", { pattern: "B02" }, { requestId: "integration-replay" });
     const replay = await client.request("pattern.inspect", { pattern: "B02" }, { requestId: "integration-replay" });
@@ -198,3 +277,29 @@ test("TypeScript client completes a real round trip through the Rust mock daemon
     await rm(audioDirectory, { recursive: true, force: true });
   }
 });
+
+async function writeTestWav(path: string): Promise<void> {
+  const sampleRate = 48_000;
+  const frames = 4_800;
+  const bytesPerSample = 2;
+  const dataBytes = frames * bytesPerSample;
+  const wav = Buffer.alloc(44 + dataBytes);
+  wav.write("RIFF", 0, "ascii");
+  wav.writeUInt32LE(36 + dataBytes, 4);
+  wav.write("WAVE", 8, "ascii");
+  wav.write("fmt ", 12, "ascii");
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(sampleRate, 24);
+  wav.writeUInt32LE(sampleRate * bytesPerSample, 28);
+  wav.writeUInt16LE(bytesPerSample, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write("data", 36, "ascii");
+  wav.writeUInt32LE(dataBytes, 40);
+  for (let frame = 0; frame < frames; frame += 1) {
+    const sample = Math.round(Math.sin((2 * Math.PI * 220 * frame) / sampleRate) * 8_000);
+    wav.writeInt16LE(sample, 44 + frame * bytesPerSample);
+  }
+  await writeFile(path, wav);
+}

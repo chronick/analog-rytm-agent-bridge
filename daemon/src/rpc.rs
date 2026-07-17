@@ -27,7 +27,7 @@ const REPLAY_CACHE_LIMIT: usize = 1024;
 const TRACK_NAMES: [&str; 12] = [
     "BD", "SD", "RS", "CP", "BT", "LT", "MT", "HT", "CH", "OH", "CY", "CB",
 ];
-pub const DECLARED_METHODS: [&str; 23] = [
+pub const DECLARED_METHODS: [&str; 27] = [
     "daemon.health",
     "daemon.describe",
     "device.inspect_state",
@@ -47,15 +47,19 @@ pub const DECLARED_METHODS: [&str; 23] = [
     "snapshot.rollback",
     "events.read",
     "state.reconcile",
+    "samples.inspect",
+    "samples.upload",
+    "samples.resolve_ram",
+    "samples.clear_ram",
     "audio.list_inputs",
     "audio.start_recording",
     "audio.stop_recording",
     "audio.capture_pattern",
 ];
 
-pub const MOCK_IMPLEMENTED_METHODS: [&str; 23] = DECLARED_METHODS;
+pub const MOCK_IMPLEMENTED_METHODS: [&str; 27] = DECLARED_METHODS;
 
-pub const HARDWARE_IMPLEMENTED_METHODS: [&str; 23] = DECLARED_METHODS;
+pub const HARDWARE_IMPLEMENTED_METHODS: [&str; 27] = DECLARED_METHODS;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -420,6 +424,38 @@ impl RpcServer {
                 Backend::Mock(state) => Ok(state.reconcile()),
                 Backend::Hardware(state) => state.reconcile().map_err(RpcDispatchError::hardware),
             },
+            "samples.inspect" => match &mut self.backend {
+                Backend::Mock(state) => state
+                    .inspect_samples(&request.params)
+                    .map_err(RpcDispatchError::sample),
+                Backend::Hardware(state) => state
+                    .inspect_samples(&request.params)
+                    .map_err(RpcDispatchError::sample),
+            },
+            "samples.upload" => match &mut self.backend {
+                Backend::Mock(state) => state
+                    .upload_sample(&request.params)
+                    .map_err(RpcDispatchError::sample),
+                Backend::Hardware(state) => state
+                    .upload_sample(&request.params)
+                    .map_err(RpcDispatchError::sample),
+            },
+            "samples.resolve_ram" => match &mut self.backend {
+                Backend::Mock(state) => state
+                    .resolve_sample_ram(&request.params)
+                    .map_err(RpcDispatchError::sample),
+                Backend::Hardware(state) => state
+                    .resolve_sample_ram(&request.params)
+                    .map_err(RpcDispatchError::sample),
+            },
+            "samples.clear_ram" => match &mut self.backend {
+                Backend::Mock(state) => state
+                    .clear_sample_ram(&request.params)
+                    .map_err(RpcDispatchError::sample),
+                Backend::Hardware(state) => state
+                    .clear_sample_ram(&request.params)
+                    .map_err(RpcDispatchError::sample),
+            },
             "audio.list_inputs" => {
                 serde_json::to_value(self.audio.list_inputs().map_err(RpcDispatchError::audio)?)
                     .map_err(|error| {
@@ -704,7 +740,10 @@ impl RpcDispatchError {
             || lower.contains("does not match current epoch")
             || lower.contains("transport must be playing")
             || lower.contains("unsupported hardware boundary")
-            || lower.contains("invalid operation set");
+            || lower.contains("invalid operation set")
+            || lower.contains("unknown sampleid")
+            || lower.contains("assign_sample_slot identity mismatch")
+            || lower.contains("ram slot");
         let rollback = if lower.contains("automatic rollback also failed") {
             Some("rollback_failed")
         } else if lower.contains("baseline was restored") {
@@ -745,6 +784,36 @@ impl RpcDispatchError {
                 "audio_disconnected"
             } else {
                 "audio_error"
+            },
+            message,
+            retryable: is_connection,
+            details: None,
+        }
+    }
+
+    fn sample(message: String) -> Self {
+        let lower = message.to_ascii_lowercase();
+        let is_connection = lower.contains("could not execute elektroid-cli")
+            || lower.contains("found no midi device")
+            || lower.contains("device disconnected")
+            || lower.contains("timed out");
+        let is_validation = lower.contains("must be")
+            || lower.contains("is required")
+            || lower.contains("unknown sampleid")
+            || lower.contains("already")
+            || lower.contains("occupied")
+            || lower.contains("is full")
+            || lower.contains("assigned to a track")
+            || lower.contains("refusing")
+            || lower.contains("identity mismatch")
+            || lower.contains("outside 1..=127");
+        Self {
+            code: if is_validation {
+                "validation_failed"
+            } else if is_connection {
+                "sample_transport_disconnected"
+            } else {
+                "sample_error"
             },
             message,
             retryable: is_connection,
@@ -850,8 +919,8 @@ fn hardware_state(
                 "patternEdit": true,
                 "kitEdit": true,
                 "machineEdit": true,
-                "sampleSlotAssignment": false,
-                "sampleTransfer": false,
+                "sampleSlotAssignment": true,
+                "sampleTransfer": true,
                 "sceneMacros": false,
                 "performanceMacros": false,
                 "songs": false,

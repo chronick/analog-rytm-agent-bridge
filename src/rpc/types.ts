@@ -1,3 +1,35 @@
+import type {
+  QueuedRytmOperationSet,
+  RytmAudioInputInventory,
+  RytmAudioRecording,
+  RytmBridgeState,
+  RytmCapturePatternAudioInput,
+  RytmChangePatternInput,
+  RytmClearSampleRamInput,
+  RytmClearedSampleRam,
+  RytmLiveParameterInput,
+  RytmOperationSetDryRun,
+  RytmOperationSetInput,
+  RytmPatternDeltaInput,
+  RytmPatternSummary,
+  RytmPersistentOperation,
+  RytmResolveSampleRamInput,
+  RytmResolvedSampleRam,
+  RytmRollbackInput,
+  RytmSampleInventory,
+  RytmSampleInventoryInput,
+  RytmSetTransportInput,
+  RytmSnapshotInput,
+  RytmStartRecordingInput,
+  RytmStateSnapshot,
+  RytmStopRecordingInput,
+  RytmTransportState,
+  RytmTriggerTrackInput,
+  RytmUploadedSample,
+  RytmUploadSampleInput,
+  RytmValidationResult,
+} from "../domain/types.ts";
+
 export const RYTM_RPC_SCHEMA = "analog-rytm-rpc.v1" as const;
 
 export interface RytmRpcRequest {
@@ -75,6 +107,10 @@ export interface RytmDaemonApi {
   rollbackSnapshot(input: RytmRollbackInput): Promise<RytmBridgeState>;
   getEvents(afterCursor?: number, limit?: number): Promise<Array<{ cursor: number; receivedAt: string; event: unknown }>>;
   reconcileState(): Promise<unknown>;
+  inspectSamples(input?: RytmSampleInventoryInput): Promise<RytmSampleInventory>;
+  uploadSample(input: RytmUploadSampleInput): Promise<RytmUploadedSample>;
+  resolveSampleRam(input: RytmResolveSampleRamInput): Promise<RytmResolvedSampleRam>;
+  clearSampleRam(input: RytmClearSampleRamInput): Promise<RytmClearedSampleRam>;
   listAudioInputs(): Promise<RytmAudioInputInventory>;
   startRecording(input?: RytmStartRecordingInput): Promise<RytmAudioRecording>;
   stopRecording(input: RytmStopRecordingInput): Promise<RytmAudioRecording>;

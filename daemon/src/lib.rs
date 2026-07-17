@@ -3,6 +3,7 @@ pub mod hardware;
 pub mod hardware_control;
 pub mod hardware_scheduler;
 pub mod rpc;
+pub mod samples;
 pub mod state;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -70,8 +71,8 @@ pub fn mock_description() -> DaemonDescription {
             pattern_edit: true,
             kit_edit: true,
             machine_edit: true,
-            sample_slot_assignment: false,
-            sample_transfer: false,
+            sample_slot_assignment: true,
+            sample_transfer: true,
             scene_macros: false,
             performance_macros: false,
             songs: false,
@@ -100,8 +101,8 @@ pub fn hardware_description() -> DaemonDescription {
             pattern_edit: true,
             kit_edit: true,
             machine_edit: true,
-            sample_slot_assignment: false,
-            sample_transfer: false,
+            sample_slot_assignment: true,
+            sample_transfer: true,
             scene_macros: false,
             performance_macros: false,
             songs: false,
@@ -186,11 +187,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mock_description_keeps_incomplete_features_disabled() {
+    fn mock_description_advertises_verified_sample_workflows() {
         let description = mock_description();
         assert!(description.capabilities.realtime_midi);
         assert!(description.capabilities.pattern_edit);
-        assert!(!description.capabilities.sample_transfer);
+        assert!(description.capabilities.sample_transfer);
         assert!(!description.capabilities.performance_macros);
         assert_eq!(description.firmware.compatibility, Compatibility::Mock);
     }
@@ -199,7 +200,7 @@ mod tests {
     fn json_description_contains_schema_and_flags() {
         let json = describe_as_json(&mock_description());
         assert!(json.contains("\"schema\":\"analog-rytm-daemon.v1\""));
-        assert!(json.contains("\"sampleTransfer\":false"));
+        assert!(json.contains("\"sampleTransfer\":true"));
         assert!(json.contains("\"adapter\":\"mock\""));
     }
 }

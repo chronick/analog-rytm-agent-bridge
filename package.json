@@ -11,6 +11,7 @@
     "demo": "node --experimental-transform-types src/bin/mock-demo.ts",
     "hardware:control": "node --experimental-transform-types src/bin/verify-hardware-control.ts",
     "hardware:audio": "node --experimental-transform-types src/bin/verify-hardware-audio.ts",
+    "hardware:samples": "node --experimental-transform-types src/bin/verify-hardware-samples.ts",
     "hardware:scheduler": "node --experimental-transform-types src/bin/verify-hardware-scheduler.ts"
   },
   "engines": {

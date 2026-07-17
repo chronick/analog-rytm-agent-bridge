@@ -1,3 +1,4 @@
+use crate::samples::SampleService;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{
@@ -319,6 +320,7 @@ pub struct MockBridgeState {
     operation_sets: Vec<OperationSetRecord>,
     snapshots: Vec<SnapshotRecord>,
     events: Vec<EventEntry>,
+    samples: SampleService,
 }
 
 impl Default for MockBridgeState {
@@ -345,6 +347,7 @@ impl Default for MockBridgeState {
             operation_sets: Vec::new(),
             snapshots: Vec::new(),
             events: Vec::new(),
+            samples: SampleService::mock(),
         }
     }
 }
@@ -442,32 +445,43 @@ impl MockBridgeState {
         })
     }
 
-    pub fn validate(&self, params: &Value) -> Result<Value, String> {
+    pub fn validate(&mut self, params: &Value) -> Result<Value, String> {
         let raw = required_field(params, "operations")?;
-        Ok(validation_result(raw))
+        let generic = validation_result(raw);
+        if generic["valid"] != Value::Bool(true) {
+            return Ok(generic);
+        }
+        let operations = parse_operations(raw)?;
+        match self.samples.validate_assignments(&operations) {
+            Ok(()) => Ok(generic),
+            Err(error) => Ok(json!({ "valid": false, "errors": [error], "warnings": [] })),
+        }
     }
 
-    pub fn propose(&self, params: &Value) -> Result<Value, String> {
-        let pattern = optional_field_string(params, "pattern")?.unwrap_or(&self.active_pattern);
-        validate_pattern(pattern, "pattern")?;
+    pub fn propose(&mut self, params: &Value) -> Result<Value, String> {
+        let pattern = optional_field_string(params, "pattern")?
+            .unwrap_or(&self.active_pattern)
+            .to_string();
+        validate_pattern(&pattern, "pattern")?;
         let raw = required_field(params, "operations")?;
-        let validation = validation_result(raw);
-        let base = self.inspect_pattern(pattern)?;
+        let validation = self.validate(params)?;
+        let base = self.inspect_pattern(&pattern)?;
         if validation["valid"] != Value::Bool(true) {
             return Ok(json!({ "validation": validation, "basePattern": base }));
         }
         let operations = parse_operations(raw)?;
         let mut projected = self.patterns.clone();
-        apply_operations(&mut projected, &operations, pattern)?;
+        apply_operations(&mut projected, &operations, &pattern)?;
         Ok(json!({
             "validation": validation,
             "basePattern": base,
-            "projectedPattern": pattern_summary(projected.remove(pattern).unwrap_or_else(|| empty_pattern(pattern))),
+            "projectedPattern": pattern_summary(projected.remove(&pattern).unwrap_or_else(|| empty_pattern(&pattern))),
         }))
     }
 
     pub fn queue(&mut self, params: &Value) -> Result<Value, String> {
         let input = parse_operation_set(params)?;
+        self.samples.validate_assignments(&input.operations)?;
         self.ensure_current_revision(input.expected_revision)?;
         if input.dry_run {
             return self.dry_run(&input);
@@ -529,6 +543,7 @@ impl MockBridgeState {
             .entry("latePolicy".to_string())
             .or_insert_with(|| json!("reject"));
         let input = parse_operation_set(&Value::Object(normalized))?;
+        self.samples.validate_assignments(&input.operations)?;
         self.ensure_current_revision(input.expected_revision)?;
         if input.dry_run {
             return self.dry_run(&input);
@@ -787,6 +802,28 @@ impl MockBridgeState {
         })
     }
 
+    pub fn inspect_samples(&mut self, params: &Value) -> Result<Value, String> {
+        self.samples.inspect(params)
+    }
+
+    pub fn upload_sample(&mut self, params: &Value) -> Result<Value, String> {
+        let result = self.samples.upload(params)?;
+        self.append_event(json!({ "type": "sample.uploaded", "sample": result }));
+        Ok(result)
+    }
+
+    pub fn resolve_sample_ram(&mut self, params: &Value) -> Result<Value, String> {
+        let result = self.samples.resolve_ram(params)?;
+        self.append_event(json!({ "type": "sample.ram_resolved", "sample": result }));
+        Ok(result)
+    }
+
+    pub fn clear_sample_ram(&mut self, params: &Value) -> Result<Value, String> {
+        let result = self.samples.clear_ram(params)?;
+        self.append_event(json!({ "type": "sample.ram_cleared", "sample": result }));
+        Ok(result)
+    }
+
     pub fn events_after(&self, cursor: u64) -> Vec<EventEntry> {
         self.events
             .iter()
@@ -865,6 +902,7 @@ impl MockBridgeState {
 
     fn apply_record(&mut self, index: usize, boundary: &str) -> Result<(), String> {
         let operations = self.operation_sets[index].operations.clone();
+        self.samples.validate_assignments(&operations)?;
         apply_operations(&mut self.patterns, &operations, &self.active_pattern)?;
         self.revision += 1;
         let now = timestamp();
@@ -1100,8 +1138,16 @@ fn validate_operation(operation: &PersistentOperation) -> Result<(), String> {
             validate_safe_id(parameter, "parameter")?;
             validate_control_value(value, "value")?;
         }
-        PersistentOperation::AssignSampleSlot { .. } => {
-            return Err("device capability is not enabled: sampleSlotAssignment".to_string());
+        PersistentOperation::AssignSampleSlot {
+            pattern,
+            track,
+            slot,
+            sample_id,
+        } => {
+            validate_optional_pattern(pattern)?;
+            validate_track(track)?;
+            validate_u64_range(u64::from(*slot), "slot", 1, 127)?;
+            validate_safe_id(sample_id, "sampleId")?;
         }
     }
     Ok(())
@@ -1346,8 +1392,8 @@ fn capabilities() -> Value {
         "patternEdit": true,
         "kitEdit": true,
         "machineEdit": true,
-        "sampleSlotAssignment": false,
-        "sampleTransfer": false,
+        "sampleSlotAssignment": true,
+        "sampleTransfer": true,
         "sceneMacros": false,
         "performanceMacros": false,
         "songs": false,
@@ -1594,7 +1640,7 @@ mod tests {
             { "type": "assign_sample_slot", "track": "BD", "slot": 1, "sampleId": "sample" },
         ]));
         assert_eq!(validation["valid"], false);
-        assert_eq!(validation["errors"].as_array().unwrap().len(), 2);
+        assert_eq!(validation["errors"].as_array().unwrap().len(), 1);
     }
 
     #[test]

@@ -287,6 +287,110 @@ export interface RytmPatternDeltaInput {
   operations: RytmPersistentOperation[];
 }
 
+export interface RytmSampleInventoryInput {
+  drivePath?: string;
+  includeRam?: boolean;
+  includeTracks?: boolean;
+}
+
+export interface RytmSampleDriveEntry {
+  kind: "file" | "directory";
+  name: string;
+  devicePath: string;
+  size: string;
+  sizeBytesApproximate: number;
+  checksum: string;
+  sampleId?: string;
+}
+
+export interface RytmSampleRamSlot {
+  slot: number;
+  occupied: boolean;
+  devicePath?: string;
+  usedByTrack: boolean;
+  sampleId?: string;
+}
+
+export interface RytmSampleTrackAssignment {
+  track: number;
+  slot?: number;
+  devicePath?: string;
+}
+
+export interface RytmSampleInventory {
+  adapter: "mock" | "elektroid";
+  drivePath: string;
+  entries: RytmSampleDriveEntry[];
+  ram: {
+    capacity: number;
+    occupied: number;
+    free: number;
+    slots: RytmSampleRamSlot[];
+  };
+  tracks: RytmSampleTrackAssignment[];
+  identity: Record<string, string>;
+  rollback: Record<string, string>;
+}
+
+export interface RytmUploadSampleInput {
+  sourcePath: string;
+  deviceDirectory?: string;
+  name?: string;
+}
+
+export interface RytmUploadedSample {
+  status: "uploaded-and-verified" | "already-present";
+  transferred: boolean;
+  sampleId: string;
+  devicePath: string;
+  deviceChecksum: string;
+  deviceSize: string;
+  sourceSha256: string;
+  canonicalSha256: string;
+  source: {
+    path: string;
+    channels: number;
+    sampleRate: number;
+    bitsPerSample: number;
+    sampleFormat: "int" | "float";
+    frames: number;
+  };
+  conversion: {
+    applied: boolean;
+    targetChannels: 1;
+    targetSampleRate: 48_000;
+    targetBitsPerSample: 16;
+    targetSampleFormat: "int";
+  };
+  verified: string[];
+}
+
+export interface RytmResolveSampleRamInput {
+  sampleId: string;
+  slot?: number;
+}
+
+export interface RytmResolvedSampleRam {
+  status: "loaded-and-verified" | "already-resolved";
+  sampleId: string;
+  devicePath: string;
+  slot: number;
+  verified: true;
+}
+
+export interface RytmClearSampleRamInput {
+  sampleId: string;
+  slot: number;
+}
+
+export interface RytmClearedSampleRam {
+  status: "cleared-and-verified" | "already-empty";
+  sampleId: string;
+  slot: number;
+  devicePath?: string;
+  driveSampleRetained?: true;
+}
+
 export interface RytmAudioStreamCapability {
   channels: number;
   minSampleRate: number;
@@ -386,6 +490,9 @@ export type RytmEvent =
   | { type: "operation_set.rejected"; operationSetId: RytmOperationSetId; reason: string }
   | { type: "live.parameter_sent"; input: RytmLiveParameterInput }
   | { type: "track.triggered"; input: RytmTriggerTrackInput }
+  | { type: "sample.uploaded"; sample: RytmUploadedSample }
+  | { type: "sample.ram_resolved"; sample: RytmResolvedSampleRam }
+  | { type: "sample.ram_cleared"; sample: RytmClearedSampleRam }
   | { type: "transport.changed"; transport: RytmTransportState }
   | { type: "pattern.changed"; pattern: RytmPatternSlot; transport: RytmTransportState }
   | { type: "snapshot.created"; snapshot: RytmStateSnapshot }

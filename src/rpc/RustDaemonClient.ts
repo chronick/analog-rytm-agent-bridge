@@ -18,6 +18,8 @@ import type {
   RytmBridgeState,
   RytmCapturePatternAudioInput,
   RytmChangePatternInput,
+  RytmClearSampleRamInput,
+  RytmClearedSampleRam,
   RytmLiveParameterInput,
   RytmOperationSetDryRun,
   RytmOperationSetInput,
@@ -25,6 +27,10 @@ import type {
   RytmPatternSummary,
   RytmPersistentOperation,
   RytmRollbackInput,
+  RytmSampleInventory,
+  RytmSampleInventoryInput,
+  RytmResolveSampleRamInput,
+  RytmResolvedSampleRam,
   RytmSetTransportInput,
   RytmSnapshotInput,
   RytmStartRecordingInput,
@@ -32,6 +38,8 @@ import type {
   RytmStopRecordingInput,
   RytmTransportState,
   RytmTriggerTrackInput,
+  RytmUploadedSample,
+  RytmUploadSampleInput,
   RytmValidationResult,
 } from "../domain/types.ts";
 
@@ -216,6 +224,22 @@ export class RustDaemonClient implements RytmDaemonApi {
 
   async reconcileState(): Promise<unknown> {
     return this.request("state.reconcile");
+  }
+
+  async inspectSamples(input: RytmSampleInventoryInput = {}): Promise<RytmSampleInventory> {
+    return this.request("samples.inspect", input as Record<string, unknown>);
+  }
+
+  async uploadSample(input: RytmUploadSampleInput): Promise<RytmUploadedSample> {
+    return this.request("samples.upload", input as unknown as Record<string, unknown>);
+  }
+
+  async resolveSampleRam(input: RytmResolveSampleRamInput): Promise<RytmResolvedSampleRam> {
+    return this.request("samples.resolve_ram", input as unknown as Record<string, unknown>);
+  }
+
+  async clearSampleRam(input: RytmClearSampleRamInput): Promise<RytmClearedSampleRam> {
+    return this.request("samples.clear_ram", input as unknown as Record<string, unknown>);
   }
 
   async listAudioInputs(): Promise<RytmAudioInputInventory> {

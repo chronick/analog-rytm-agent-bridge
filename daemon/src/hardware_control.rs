@@ -10,6 +10,7 @@ use crate::{
         timestamp, BoundaryTarget, ClockSource, DurableSnapshot, HardwareOperationSet,
         HardwareOperationStatus, HardwareScheduler, HardwareTransportState,
     },
+    samples::SampleService,
     state::{
         parse_operation_set, parse_operations, validation_result, EventEntry, LatePolicy,
         OperationSetInput,
@@ -43,6 +44,7 @@ pub struct HardwareBridgeState {
     pending_note_offs: Vec<PendingNoteOff>,
     disconnected_reported: bool,
     force_next_verification_failure: bool,
+    samples: SampleService,
 }
 
 impl HardwareBridgeState {
@@ -62,6 +64,7 @@ impl HardwareBridgeState {
             pending_note_offs: Vec::new(),
             disconnected_reported: false,
             force_next_verification_failure,
+            samples: SampleService::hardware(state_path, port_match)?,
         };
         state.try_reconnect()?;
         Ok(state)
@@ -140,6 +143,13 @@ impl HardwareBridgeState {
             return Ok(generic);
         }
         let operations = parse_operations(raw)?;
+        if let Err(error) = self.samples.validate_assignments(&operations) {
+            return Ok(json!({
+                "valid": false,
+                "errors": [error],
+                "warnings": [],
+            }));
+        }
         let mut capture = self.with_session(read_work_buffer_state)?;
         match apply_persistent_operations(&mut capture, &operations) {
             Ok(changed) => Ok(json!({
@@ -247,6 +257,7 @@ impl HardwareBridgeState {
             return Ok(existing);
         }
         self.ensure_revision(input.expected_revision)?;
+        self.samples.validate_assignments(&input.operations)?;
 
         let mut capture = self.with_session(read_work_buffer_state)?;
         let baseline = RawState::from_capture(&capture);
@@ -548,6 +559,37 @@ impl HardwareBridgeState {
                 .collect::<Vec<_>>(),
         )
         .map_err(error_string)
+    }
+
+    pub fn inspect_samples(&mut self, params: &Value) -> Result<Value, String> {
+        self.samples.inspect(params)
+    }
+
+    pub fn upload_sample(&mut self, params: &Value) -> Result<Value, String> {
+        require_stopped_transport_for_sample_write(self.scheduler.state.transport.playing)?;
+        let result = self.samples.upload(params)?;
+        self.scheduler
+            .append_event(json!({ "type": "sample.uploaded", "sample": result }));
+        self.scheduler.persist()?;
+        Ok(result)
+    }
+
+    pub fn resolve_sample_ram(&mut self, params: &Value) -> Result<Value, String> {
+        require_stopped_transport_for_sample_write(self.scheduler.state.transport.playing)?;
+        let result = self.samples.resolve_ram(params)?;
+        self.scheduler
+            .append_event(json!({ "type": "sample.ram_resolved", "sample": result }));
+        self.scheduler.persist()?;
+        Ok(result)
+    }
+
+    pub fn clear_sample_ram(&mut self, params: &Value) -> Result<Value, String> {
+        require_stopped_transport_for_sample_write(self.scheduler.state.transport.playing)?;
+        let result = self.samples.clear_ram(params)?;
+        self.scheduler
+            .append_event(json!({ "type": "sample.ram_cleared", "sample": result }));
+        self.scheduler.persist()?;
+        Ok(result)
     }
 
     pub fn reconcile(&mut self) -> Result<Value, String> {
@@ -1055,6 +1097,7 @@ impl HardwareBridgeState {
         &mut self,
         input: &OperationSetInput,
     ) -> Result<(ChangedObjects, Value), String> {
+        self.samples.validate_assignments(&input.operations)?;
         let mut capture = self.with_session(read_work_buffer_state)?;
         let baseline = RawState::from_capture(&capture);
         let changed = apply_persistent_operations(&mut capture, &input.operations)?;
@@ -1125,6 +1168,14 @@ impl HardwareBridgeState {
             return concrete_summary_channel(&summary["midi"]["autoChannel"], "auto channel");
         }
         concrete_summary_channel(configured, "program change input")
+    }
+}
+
+fn require_stopped_transport_for_sample_write(playing: bool) -> Result<(), String> {
+    if playing {
+        Err("sample upload and RAM mutation require transport to be stopped".to_string())
+    } else {
+        Ok(())
     }
 }
 
@@ -1379,5 +1430,11 @@ mod tests {
         assert!(is_connection_error(
             "timed out waiting for a complete SysEx response"
         ));
+    }
+
+    #[test]
+    fn sample_filesystem_writes_require_stopped_transport() {
+        assert!(require_stopped_transport_for_sample_write(false).is_ok());
+        assert!(require_stopped_transport_for_sample_write(true).is_err());
     }
 }

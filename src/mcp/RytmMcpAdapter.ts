@@ -1,16 +1,20 @@
 import type {
   RytmCapturePatternAudioInput,
   RytmChangePatternInput,
+  RytmClearSampleRamInput,
   RytmLiveParameterInput,
   RytmOperationSetInput,
   RytmPatternDeltaInput,
   RytmPersistentOperation,
   RytmRollbackInput,
+  RytmSampleInventoryInput,
+  RytmResolveSampleRamInput,
   RytmSetTransportInput,
   RytmSnapshotInput,
   RytmStartRecordingInput,
   RytmStopRecordingInput,
   RytmTriggerTrackInput,
+  RytmUploadSampleInput,
 } from "../domain/types.ts";
 import type { RytmAgentService } from "../service/RytmAgentService.ts";
 import type { RytmDaemonApi } from "../rpc/types.ts";
@@ -184,6 +188,59 @@ export class RytmMcpAdapter {
         },
       },
       {
+        name: "rytm_inspect_samples",
+        description: "Inspect a compact +Drive sample directory, all RAM slots, and optional track assignments with stable managed sample IDs.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            drivePath: { type: "string" },
+            includeRam: { type: "boolean" },
+            includeTracks: { type: "boolean" },
+          },
+          additionalProperties: false,
+        },
+      },
+      {
+        name: "rytm_upload_sample",
+        description: "Validate a local WAV, transfer it to the Rytm +Drive, read it back, and return a stable content identity.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            sourcePath: { type: "string" },
+            deviceDirectory: { type: "string" },
+            name: { type: "string" },
+          },
+          required: ["sourcePath"],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: "rytm_resolve_sample_ram",
+        description: "Idempotently load a managed +Drive sample into a free or requested Rytm RAM slot and verify readback.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            sampleId: { type: "string" },
+            slot: { type: "integer", minimum: 1, maximum: 127 },
+          },
+          required: ["sampleId"],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: "rytm_clear_sample_ram",
+        description: "Clear a Rytm RAM slot only when its observed sample identity matches the supplied managed sample ID.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            sampleId: { type: "string" },
+            slot: { type: "integer", minimum: 1, maximum: 127 },
+          },
+          required: ["sampleId", "slot"],
+          additionalProperties: false,
+        },
+      },
+      {
         name: "rytm_list_audio_inputs",
         description: "List CoreAudio inputs, Rytm matches, stream capabilities, and stale partial recording files.",
         inputSchema: emptyInput,
@@ -282,6 +339,18 @@ export class RytmMcpAdapter {
         return this.daemon
           ? this.daemon.rollbackSnapshot(args as RytmRollbackInput)
           : this.service.rollbackSnapshot(args as RytmRollbackInput);
+      case "rytm_inspect_samples":
+        if (!this.daemon) throw new Error("Rust Rytm daemon is required for sample management");
+        return this.daemon.inspectSamples(args as RytmSampleInventoryInput);
+      case "rytm_upload_sample":
+        if (!this.daemon) throw new Error("Rust Rytm daemon is required for sample management");
+        return this.daemon.uploadSample(args as RytmUploadSampleInput);
+      case "rytm_resolve_sample_ram":
+        if (!this.daemon) throw new Error("Rust Rytm daemon is required for sample management");
+        return this.daemon.resolveSampleRam(args as RytmResolveSampleRamInput);
+      case "rytm_clear_sample_ram":
+        if (!this.daemon) throw new Error("Rust Rytm daemon is required for sample management");
+        return this.daemon.clearSampleRam(args as RytmClearSampleRamInput);
       case "rytm_list_audio_inputs":
         if (!this.daemon) throw new Error("Rust Rytm daemon is required for audio capture");
         return this.daemon.listAudioInputs();

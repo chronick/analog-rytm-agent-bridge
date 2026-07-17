@@ -642,10 +642,19 @@ fn apply_persistent_operation(
             "copy_pattern requires a multi-slot transaction and is not available in the work-buffer mutator"
                 .to_string(),
         ),
-        PersistentOperation::AssignSampleSlot { .. } => Err(
-            "sample-slot assignment is disabled until sample identity reconciliation is available"
-                .to_string(),
-        ),
+        PersistentOperation::AssignSampleSlot {
+            pattern,
+            track,
+            slot,
+            ..
+        } => {
+            work_buffer_pattern_mut(project, pattern)?;
+            let track_index = parse_track_index(track)?;
+            project.work_buffer_mut().kit_mut().sounds_mut()[track_index]
+                .sample_mut()
+                .set_slice_number(usize::from(*slot))
+                .map_err(error_string)
+        }
     }
 }
 
