@@ -179,7 +179,7 @@ impl OverbridgeAudioService {
         let mut inventory = provider_inventory(
             selected.is_some(),
             device_mode,
-            selected.cloned(),
+            selected.and_then(selected_device_summary),
             installation,
             stale_partial_files(&self.output_directory)?,
             &self.output_directory,
@@ -490,6 +490,45 @@ impl OverbridgeAudioService {
         self.completed.insert(recording_id, metadata.clone());
         Ok(metadata)
     }
+}
+
+fn selected_device_summary(candidate: &Value) -> Option<Value> {
+    let configuration = candidate["configurations"]
+        .as_array()?
+        .iter()
+        .filter(|configuration| configuration["recorderSupported"] == true)
+        .max_by_key(|configuration| {
+            let preferred_rate = configuration["minSampleRate"]
+                .as_u64()
+                .is_some_and(|minimum| minimum <= u64::from(PREFERRED_SAMPLE_RATE))
+                && configuration["maxSampleRate"]
+                    .as_u64()
+                    .is_some_and(|maximum| maximum >= u64::from(PREFERRED_SAMPLE_RATE));
+            let preferred_format = configuration["sampleFormat"] == "f32";
+            let preferred_layout = matches!(configuration["channels"].as_u64(), Some(12 | 20));
+            u8::from(preferred_rate) * 4
+                + u8::from(preferred_format) * 2
+                + u8::from(preferred_layout)
+        })?;
+    let sample_rate = if configuration["minSampleRate"]
+        .as_u64()
+        .is_some_and(|minimum| minimum <= u64::from(PREFERRED_SAMPLE_RATE))
+        && configuration["maxSampleRate"]
+            .as_u64()
+            .is_some_and(|maximum| maximum >= u64::from(PREFERRED_SAMPLE_RATE))
+    {
+        u64::from(PREFERRED_SAMPLE_RATE)
+    } else {
+        configuration["maxSampleRate"].as_u64()?
+    };
+    Some(json!({
+        "id": candidate["id"].clone(),
+        "name": candidate["name"].clone(),
+        "channels": configuration["channels"].clone(),
+        "sampleRate": sample_rate,
+        "sampleFormat": configuration["sampleFormat"].clone(),
+        "layout": configuration["layout"].clone(),
+    }))
 }
 
 fn provider_inventory(
@@ -1141,6 +1180,37 @@ mod tests {
         assert_eq!(audio_unit[9].source_channel_indices, [18, 19]);
         assert!(stem_layout(2).is_none());
         assert!(stem_layout(14).is_none());
+    }
+
+    #[test]
+    fn flattens_the_selected_hardware_configuration_for_clients() {
+        let candidate = json!({
+            "id": "coreaudio:rytm",
+            "name": "Analog Rytm",
+            "configurations": [
+                {
+                    "channels": 18,
+                    "minSampleRate": 44_100,
+                    "maxSampleRate": 44_100,
+                    "sampleFormat": "i16",
+                    "recorderSupported": true,
+                    "layout": stem_layout(18).unwrap(),
+                },
+                {
+                    "channels": 12,
+                    "minSampleRate": 48_000,
+                    "maxSampleRate": 48_000,
+                    "sampleFormat": "f32",
+                    "recorderSupported": true,
+                    "layout": stem_layout(12).unwrap(),
+                },
+            ]
+        });
+        let selected = selected_device_summary(&candidate).unwrap();
+        assert_eq!(selected["channels"], 12);
+        assert_eq!(selected["sampleRate"], 48_000);
+        assert_eq!(selected["layout"].as_array().unwrap().len(), 10);
+        assert!(selected.get("configurations").is_none());
     }
 
     #[test]

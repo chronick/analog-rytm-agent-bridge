@@ -24,6 +24,7 @@ export async function runHardwareOverbridgeVerification(): Promise<void> {
   const runId = new Date().toISOString().replaceAll(":", "-").replace(".", "-");
   const audioDirectory = join(repository, "hardware", "runs", `overbridge-${runId}`);
   const stateDirectory = mkdtempSync(join(tmpdir(), "analog-rytm-overbridge-state-"));
+  const triggerStateDirectory = mkdtempSync(join(tmpdir(), "analog-rytm-overbridge-trigger-state-"));
   const snapshotId = `hardware-overbridge-${runId}`;
   const recordingId = `stems-${runId}`;
   mkdirSync(audioDirectory, { recursive: true });
@@ -36,9 +37,17 @@ export async function runHardwareOverbridgeVerification(): Promise<void> {
     cwd: repository,
     requestTimeoutMs: Math.max(180_000, durationMs + 120_000),
   });
+  const triggerClient = new RustDaemonClient({
+    command: "cargo",
+    args: [
+      "run", "--quiet", "--manifest-path", "daemon/Cargo.toml", "--", "serve",
+      "--adapter", "hardware", "--state-dir", triggerStateDirectory,
+    ],
+    cwd: repository,
+    requestTimeoutMs: 180_000,
+  });
   let snapshotCreated = false;
   let rollbackVerified = false;
-  let transportStarted = false;
 
   try {
     const health = await client.start();
@@ -71,7 +80,6 @@ export async function runHardwareOverbridgeVerification(): Promise<void> {
     const baseline = asRecord(await client.inspectDeviceState());
     const baselineRevision = requiredNumber(baseline.revision, "baseline revision");
     const activePattern = asRecord(baseline.activePattern).pattern as RytmPatternSlot;
-    const tempo = requiredNumber(asRecord(baseline.transport).tempo, "transport tempo");
     const operations = patternOperations(activePattern);
     const validation = await client.validateOperations(operations);
     assert.equal(validation.valid, true, validation.errors.join("; "));
@@ -86,16 +94,18 @@ export async function runHardwareOverbridgeVerification(): Promise<void> {
     const preparedRevision = requiredNumber(applied.resultingRevision, "prepared revision");
     process.stderr.write("disposable all-voice capture pattern applied\n");
 
-    await client.setTransport({ command: "start", tempo });
-    transportStarted = true;
-    await delay(250);
-    const recording = await client.captureMultitrackAudio({
-      recordingId,
-      snapshotId,
-      durationMs,
-    });
-    await client.setTransport({ command: "stop" });
-    transportStarted = false;
+    const triggerHealth = await triggerClient.start();
+    assert.equal(triggerHealth.adapter, "hardware");
+    assert.ok(triggerHealth.methods.implemented.includes("realtime.trigger_track"));
+    process.stderr.write("independent realtime trigger daemon ready\n");
+
+    const [captureResult, triggerResult] = await Promise.allSettled([
+      client.captureMultitrackAudio({ recordingId, snapshotId, durationMs }),
+      sendCaptureTriggers(triggerClient, durationMs),
+    ]);
+    if (triggerResult.status === "rejected") throw triggerResult.reason;
+    if (captureResult.status === "rejected") throw captureResult.reason;
+    const recording = captureResult.value;
     verifyRecording(recording, durationMs, activePattern, preparedRevision, snapshotId);
     assert.deepEqual(
       await client.captureMultitrackAudio({ recordingId, snapshotId, durationMs }),
@@ -120,14 +130,6 @@ export async function runHardwareOverbridgeVerification(): Promise<void> {
       restoredRevision: rolledBack.revision,
     }, null, 2));
   } finally {
-    if (transportStarted) {
-      try {
-        await client.setTransport({ command: "stop" });
-        process.stderr.write("emergency transport stop completed\n");
-      } catch (error) {
-        process.stderr.write(`EMERGENCY TRANSPORT STOP FAILED: ${String(error)}\n`);
-      }
-    }
     if (snapshotCreated && !rollbackVerified) {
       try {
         await client.rollbackSnapshot({ snapshotId });
@@ -136,8 +138,10 @@ export async function runHardwareOverbridgeVerification(): Promise<void> {
         process.stderr.write(`EMERGENCY OVERBRIDGE ROLLBACK FAILED: ${String(error)}\n`);
       }
     }
+    await triggerClient.close();
     await client.close();
     rmSync(stateDirectory, { recursive: true, force: true });
+    rmSync(triggerStateDirectory, { recursive: true, force: true });
   }
 }
 
@@ -212,6 +216,21 @@ function verifyRecording(
 function requiredNumber(value: unknown, label: string): number {
   assert.equal(typeof value, "number", `${label} must be numeric`);
   return value;
+}
+
+async function sendCaptureTriggers(client: RustDaemonClient, captureDurationMs: number): Promise<void> {
+  const triggerIntervalMs = 125;
+  const triggerWindowMs = Math.max(1_000, captureDurationMs - 500);
+  const triggerCount = Math.max(1, Math.floor(triggerWindowMs / triggerIntervalMs));
+  await delay(250);
+  for (let index = 0; index < triggerCount; index += 1) {
+    await client.triggerTrack({
+      track: representativeTracks[index % representativeTracks.length],
+      velocity: 116 - (index % 4) * 4,
+      durationMs: 90,
+    });
+    if (index + 1 < triggerCount) await delay(triggerIntervalMs);
+  }
 }
 
 function asRecord(value: unknown): Record<string, any> {

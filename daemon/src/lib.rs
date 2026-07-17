@@ -120,7 +120,7 @@ pub fn mock_description() -> DaemonDescription {
             performance_macros: true,
             songs: true,
             class_compliant_audio: true,
-            overbridge_audio: false,
+            overbridge_audio: true,
         },
         capability_evidence: mock_capability_evidence(),
     }
@@ -151,9 +151,9 @@ pub fn hardware_description() -> DaemonDescription {
             performance_macros: true,
             songs: true,
             class_compliant_audio: true,
-            overbridge_audio: false,
+            overbridge_audio: true,
         },
-        capability_evidence: hardware_capability_evidence(false),
+        capability_evidence: hardware_capability_evidence(true),
     }
 }
 
@@ -586,13 +586,14 @@ mod tests {
     }
 
     #[test]
-    fn hardware_description_advertises_certified_macro_and_song_workflows() {
+    fn hardware_description_advertises_all_certified_optional_workflows() {
         let description = hardware_description();
         assert!(description.capabilities.scene_macros);
         assert!(description.capabilities.performance_macros);
         assert!(description.capabilities.songs);
+        assert!(description.capabilities.overbridge_audio);
         assert!(description.capability_evidence["songDefinitions"].verified);
-        assert!(!description.capability_evidence["overbridgeMultitrackAudio"].verified);
+        assert!(description.capability_evidence["overbridgeMultitrackAudio"].verified);
         assert_eq!(
             description.firmware.compatibility,
             Compatibility::Unverified

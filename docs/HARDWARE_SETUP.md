@@ -202,7 +202,7 @@ npm run hardware:all -- --execute --phase=overbridge
 
 The manual mode switch is why the suite has two phases. Each phase writes an ignored manifest under `hardware/runs/complete-*/manifest.json` with per-harness results and final-state evidence.
 
-The latest Core-phase evidence is recorded in [HARDWARE_VALIDATION_2026-07-17_COMPLETE_CORE.md](HARDWARE_VALIDATION_2026-07-17_COMPLETE_CORE.md).
+The latest phase evidence is recorded in [HARDWARE_VALIDATION_2026-07-17_COMPLETE_CORE.md](HARDWARE_VALIDATION_2026-07-17_COMPLETE_CORE.md) and [HARDWARE_VALIDATION_2026-07-17_OVERBRIDGE.md](HARDWARE_VALIDATION_2026-07-17_OVERBRIDGE.md).
 
 ## Realtime Validation
 
@@ -245,7 +245,7 @@ cargo run -- create-demo-patterns --execute ../hardware/runs/my-demo
 - Requested values are compared after a local SysEx encode/decode round trip. This makes codec quantization explicit; for example, a requested delay feedback value may converge to the nearest representable value.
 - Sound work-buffer readback did not provide a reliable proof for live filter CC validation. The harness verifies track level through the Kit work buffer instead.
 - Notes have no device-state acknowledgement. Confirm their audio separately when building closed-loop tests.
-- Class-compliant capture is one stereo pair at 48 kHz. Overbridge multitrack capture is a later, independent lane.
+- Class-compliant capture is one stereo pair at 48 kHz. The independently certified Overbridge lane exposes Main, eight physical voice-group stems, and the external input at 48 kHz when the Rytm is in `OVERBRIDGE` mode.
 - Song names, rows, chains, repeats, and track mutes are certified separately by `hardware:songs`. Tempo/length overrides, jumps, loops, labels, explicit end markers, and Song activation remain unavailable.
 
 ## Power Cycle And Refresh

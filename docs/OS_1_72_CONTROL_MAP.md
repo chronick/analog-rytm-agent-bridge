@@ -14,7 +14,7 @@ Status meanings:
 | Manual section | Status | Agent mapping and limit |
 | --- | --- | --- |
 | 6.2-6.5 parameter editing, copy/paste, naming | Partial | Semantic deltas replace panel gestures. Sound, Kit, Scene, Performance, Song, and Pattern-copy operations are exposed where listed below; arbitrary UI cursor/key emulation is absent. |
-| 6.6 Overbridge | Partial | Optional provider inspection and synchronized Main/voice/input capture exist. Plug-in parameter automation is not a control dependency and is not exposed. |
+| 6.6 Overbridge | Partial | Hardware-certified optional provider inspection and synchronized Main/voice/input capture exist. Plug-in parameter automation is not a control dependency and is not exposed. |
 | 6.7 class-compliant device | Supported | CoreAudio Main stereo inventory and bounded/start-stop WAV capture. |
 | 6.8 backup and restore | Partial | Raw owned-object snapshots cover Pattern, Kit, Global, Settings, and all Songs. This is rollback evidence, not a whole-Project Elektron Transfer archive. |
 | 8.1, 8.6 pads and MIDI notes | Partial | `trigger_track` covers the 12 track notes with velocity/duration. Arbitrary chromatic note performance and pad-pressure gestures are not exposed. |

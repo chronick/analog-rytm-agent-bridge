@@ -11,6 +11,7 @@ This repo is intentionally separate from `pd-agent-bridge`. The two tools are me
 - Standard MIDI for realtime gestures.
 - SysEx/state lane for persistent edits.
 - Class-compliant CoreAudio stereo capture for closed-loop analysis and archival.
+- Optional Overbridge CoreAudio multitrack capture, independent of the control plane.
 - Delta operations instead of whole-project regeneration.
 - Compact state summaries for agents.
 
@@ -134,9 +135,11 @@ Implemented:
 - declaratively name Songs and replace, insert, update, move, copy, remove, or clear rows containing chains, repeats, and per-position track mutes;
 - apply Song deltas immediately or at musical boundaries with revision checks, idempotent IDs, readback, snapshots, and rollback;
 - certify all supported Song row operations, next-beat scheduling, unchanged Pattern activation, and exact raw rollback on Analog Rytm OS 1.72.
+- discover the installed Overbridge provider and capture synchronized Main, eight physical voice-group, and external-input stems from one CoreAudio stream;
+- certify non-silent Main and voice-group stems, exact frame alignment, callback timing, no drops/disconnects, idempotent recording replay, and raw state rollback on Analog Rytm OS 1.72.
 
 Not implemented yet:
 
-- Overbridge multitrack capture or DAW automation.
+- Overbridge plug-in hosting and DAW automation.
 
-That feature remains behind a capability flag. Song tempo/length overrides, jumps, loops, labels, explicit end markers, and Song activation remain unavailable. The current `rytm-rs` adapter targets firmware 1.70; the supported Song subset is hardware-certified on the connected firmware 1.72 device, but this is not a blanket compatibility guarantee for other firmware.
+Those plug-in features remain explicitly unsupported; the optional multitrack provider is hardware-certified. Song tempo/length overrides, jumps, loops, labels, explicit end markers, and Song activation remain unavailable. The current `rytm-rs` adapter targets firmware 1.70; the supported Song and audio workflows are hardware-certified on the connected firmware 1.72 device, but this is not a blanket compatibility guarantee for other firmware.

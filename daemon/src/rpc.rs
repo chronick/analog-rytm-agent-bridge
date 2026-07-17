@@ -978,7 +978,7 @@ fn hardware_state(
                 "performanceMacros": true,
                 "songs": true,
                 "classCompliantAudio": true,
-                "overbridgeAudio": false,
+                "overbridgeAudio": true,
             },
         },
         "transport": transport,

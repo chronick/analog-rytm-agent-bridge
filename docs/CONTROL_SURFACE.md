@@ -55,6 +55,6 @@ Filesystem writes require stopped transport and are intended for preparation, no
 
 ## Capability Gaps
 
-- Overbridge is not a control dependency. Its provider and mock capture are implemented; hardware certification requires the Rytm to be placed in mutually exclusive Overbridge USB mode.
+- Overbridge is not a control dependency. Provider discovery and multitrack capture are hardware-certified on OS 1.72; capture still requires the Rytm to be placed manually in mutually exclusive Overbridge USB mode.
 - Song tempo overrides, Pattern-length overrides, jumps, loops, row labels, explicit end markers, and Song activation are disabled because the maintained codec does not yet model them. Definition control is independent of transport and Pattern selection.
 - The fork targets firmware 1.70. Successful connected-device round trips are recorded as compatibility evidence, not universal certification for later firmware.

@@ -59,6 +59,20 @@ All stems are deinterleaved from one CoreAudio callback stream. They therefore s
 
 The sidecar includes authoritative Pattern, Kit, revision, tempo, routing, snapshot ID, source configuration, exact stem/channel mapping, per-stem peak/RMS/silence/clipping, callback latency, timestamp gaps, writer-queue drops, duration tolerance, and disconnect state. Reusing a completed `recordingId` with the same declaration returns the existing result; conflicting reuse rejects.
 
+The bounded capture occupies its daemon request worker until recording finalization. Persistent state should remain unchanged during capture. The hardware certification generates direct notes through a second isolated realtime daemon so the recorder remains read-only and the realtime/state lanes stay independent.
+
+## Hardware Certification
+
+The provider is certified on Analog Rytm MKII OS 1.72 with Overbridge 2.25.7. The 2026-07-17 run captured a 12-channel 48 kHz `f32` stream for eight seconds: Main and all eight physical voice-group stems were non-silent and unclipped, every stem contained exactly 384,000 frames, and the run reported zero frame drift, timestamp gaps, dropped blocks, or disconnects. The external-input stem was structurally valid and silent because no external source was connected. Recording replay was idempotent and the raw Pattern/Kit/Global/Settings baseline was restored.
+
+Run the same reversible certificate with:
+
+```bash
+npm run hardware:all -- --execute --phase=overbridge --duration-ms=8000
+```
+
+See [HARDWARE_VALIDATION_2026-07-17_OVERBRIDGE.md](HARDWARE_VALIDATION_2026-07-17_OVERBRIDGE.md) for the measured evidence.
+
 ## Failure And Recovery
 
 - Installed Overbridge with a stereo-only Rytm reports `available: false`, `deviceMode: class_compliant`, and does not affect other tools.
