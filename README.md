@@ -19,7 +19,7 @@ The repo contains three connected vertical slices:
 - a Rust/CoreMIDI hardware harness for bidirectional SysEx inspection, realtime MIDI, declarative configuration, verified pattern writes, snapshots, and rollback.
 - a versioned JSON-lines process boundary that connects every TypeScript semantic tool to a long-running Rust mock or hardware daemon.
 
-The Rust mock daemon owns revisioned deltas, dry runs, queue scheduling, snapshots, rollback, realtime state, reconciliation, and event acknowledgements. The original TypeScript mock service remains as a daemon-free fallback and parity reference. Hardware mutation methods use the same RPC names but return `capability_unavailable` until their write, readback, snapshot, and rollback paths are verified.
+The Rust mock daemon owns revisioned deltas, dry runs, queue scheduling, snapshots, rollback, realtime state, reconciliation, and event acknowledgements. The original TypeScript mock service remains as a daemon-free fallback and parity reference. The hardware daemon supports inspection, validation, proposals, immediate persistent writes, raw snapshots, rollback, events, and reconciliation with semantic readback verification.
 
 ## Commands
 
@@ -28,6 +28,8 @@ npm test
 npm run rust:test
 npm run check
 npm run demo
+npm run hardware:control
+npm run hardware:control -- --execute
 ```
 
 No npm install is required for the current mock slice. Rust dependencies are resolved by Cargo.
@@ -56,9 +58,10 @@ Run the hardware-backed daemon with its default CoreMIDI port match:
 cargo run --manifest-path daemon/Cargo.toml -- serve --adapter hardware
 ```
 
-Both modes use the same request/response/event protocol. The hardware adapter opens one long-lived MIDI session; its implemented RPC methods are read-only inspection, validation, and reconciliation. See [docs/DAEMON_RPC.md](docs/DAEMON_RPC.md).
+Both modes use the same request/response/event protocol. The hardware adapter opens one long-lived MIDI session and owns its revision, request idempotency, raw snapshots, readback verification, rollback, and event journal. See [docs/DAEMON_RPC.md](docs/DAEMON_RPC.md).
 
 See [docs/HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md) before running write tests.
+See [docs/CONTROL_SURFACE.md](docs/CONTROL_SURFACE.md) for the current control matrix.
 
 ## Current Slice
 
@@ -84,13 +87,19 @@ Implemented:
 - send notes, transport, clock, CC, NRPN, and program changes;
 - create and read back trigs, velocities, conditions, microtiming, track lengths, time mode, and filter parameter locks;
 - preserve raw SysEx baselines and verify hardware rollback.
+- inspect complete work-buffer Sound, Kit, FX, Global, routing, MIDI, sequencer, and Settings state;
+- validate and dry-run delta operations against decoded hardware state;
+- apply idempotent Sound, machine, Kit, FX, routing, Global, and Settings deltas immediately;
+- canonicalize codec-quantized values before desired-vs-observed comparisons;
+- snapshot raw Pattern, Kit, Global, and Settings objects and restore them with semantic verification;
+- use the maintained sibling `rytm-rs` fork for validated machine parameters and retrig round trips.
 
 Not implemented yet:
 
-- hardware mutation, queue, snapshot, rollback, and event dispatch across TypeScript-to-Rust RPC;
 - durable daemon queue/snapshot recovery after a process restart;
 - device-derived musical-boundary scheduling for persistent hardware edits;
-- broad parameter and machine compatibility coverage;
+- hardware queue and realtime methods across TypeScript-to-Rust RPC;
+- sample inventory, identity reconciliation, transfer, and assignment;
 - Overbridge or DAW automation;
 - scenes, performance macros, songs, and sample transfer.
 

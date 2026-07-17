@@ -12,6 +12,13 @@ The Rust harness uses the Analog Rytm CoreMIDI port directly for realtime MIDI a
 
 ## Build And Discover
 
+Clone the maintained fork as a sibling of this repository. The daemon uses a path dependency so fork fixes and bridge behavior are tested together.
+
+```text
+~/git/analog-rytm-agent-bridge
+~/git/rytm-rs
+```
+
 ```bash
 cd daemon
 cargo run -- midi-list
@@ -48,6 +55,22 @@ cargo run -- configure-midi --execute ../hardware/runs/my-baseline
 ```
 
 The second invocation should report `changed: false` and `already-converged`.
+
+## Reversible Control Certification
+
+Run the dry run first. It reads the connected work buffers, validates every operation, and projects the codec-canonical result without writing.
+
+```bash
+npm run hardware:control
+```
+
+The execute form captures a daemon-owned raw snapshot, mutates a representative field from every supported object/page family, verifies semantic readback, replays the same operation-set ID, rolls back, and compares the restored state to the baseline.
+
+```bash
+npm run hardware:control -- --execute
+```
+
+The harness performs an emergency rollback in `finally` if any assertion fails. Keep the disposable project open and do not interrupt the process during SysEx writes.
 
 ## Realtime Validation
 
@@ -87,6 +110,7 @@ cargo run -- create-demo-patterns --execute ../hardware/runs/my-demo
 - Never use a valuable project for a new firmware or operation class.
 - Keep raw baselines until the device state has been manually confirmed.
 - The adapter uses `rytm-rs` 0.1.3, whose documented target is firmware 1.70. Successful object decoding on newer firmware is evidence, not a blanket compatibility guarantee.
+- Requested values are compared after a local SysEx encode/decode round trip. This makes codec quantization explicit; for example, a requested delay feedback value may converge to the nearest representable value.
 - Sound work-buffer readback did not provide a reliable proof for live filter CC validation. The harness verifies track level through the Kit work buffer instead.
 - Notes have no device-state acknowledgement. Confirm their audio separately when building closed-loop tests.
 - Scenes, performance macros, songs, sample transfer, and project-wide writes remain disabled or outside the current harness.

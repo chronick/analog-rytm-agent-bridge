@@ -51,25 +51,28 @@ Implemented for both mock and hardware adapters:
 - `daemon.describe`
 - `device.inspect_state`
 - `pattern.inspect`
+- `kit.inspect`
+- `sound.inspect`
+- `global.inspect`
 - `operations.validate`
+- `operations.propose`
+- `operations.apply_now`
+- `snapshot.create`
+- `snapshot.rollback`
+- `events.read`
 - `state.reconcile`
 
 Also implemented by the mock adapter:
 
-- `operations.propose`
 - `operations.queue`
-- `operations.apply_now`
 - `realtime.set_parameter`
 - `realtime.trigger_track`
 - `realtime.set_transport`
 - `realtime.change_pattern`
-- `snapshot.create`
-- `snapshot.rollback`
-- `events.read`
 
 The mock adapter also has `test.advance_mock_transport` and `test.delay` methods for deterministic scheduler and disconnect tests. They are not MCP tools.
 
-Hardware mutation methods return `capability_unavailable` until they have verified snapshot, write, readback, and rollback behavior. `daemon.health` reports adapter-specific implemented methods so callers do not infer hardware support from protocol presence.
+Hardware `operations.apply_now` supports persistent Sound, machine, Kit, FX, Global, routing, MIDI, sequencer, and Settings deltas. Hardware queueing, realtime RPC, pattern deltas, and sample assignment still return `capability_unavailable`. `daemon.health` reports adapter-specific implemented methods so callers do not infer support from protocol presence.
 
 ## Idempotency And Failure
 
@@ -91,4 +94,4 @@ Durable daemon-owned queue and snapshot recovery is intentionally not claimed ye
 
 ## Safety
 
-The implemented RPC hardware methods only query or validate device state. Existing state-changing harness commands remain separate and still require their explicit `--execute` flag. Mutation methods will not be marked implemented until they preserve snapshots, readback verification, revision checks, and rollback behavior across this boundary.
+Hardware mutation first reads all four raw objects, applies validated operations to a decoded copy, canonicalizes through the SysEx codec, writes only changed objects, re-queries semantic state, and restores the raw baseline automatically on mismatch. Snapshot rollback increments the public revision and verifies the restored state. The certification harness requires `--execute`; direct RPC callers are expected to use validation, dry run, expected revisions, and snapshots deliberately.

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted direction. The TypeScript facade, Rust mock control plane, Rust hardware harness, and versioned process boundary are implemented. Mock revision, mutation, scheduling, snapshot, rollback, reconciliation, and event state now live behind the Rust boundary. Hardware mutation remains capability-gated.
+Accepted direction. The TypeScript facade, Rust mock control plane, Rust hardware control plane, and versioned process boundary are implemented. Hardware inspection, validation, immediate persistent mutation, snapshots, rollback, reconciliation, and event state live behind the Rust boundary. Hardware queueing, realtime RPC, and incomplete object families remain capability-gated.
 
 ## Relationship To Pd Agent Bridge
 
@@ -53,6 +53,8 @@ The process protocol is `analog-rytm-rpc.v1`. Every request carries a caller-gen
 The daemon caches the last 1,024 completed requests. Repeating an ID with the same envelope returns the original response. Reusing an ID with a different envelope returns `request_id_conflict`.
 
 The schema defines request, response, and event envelopes. State-changing mock requests emit asynchronous acknowledgements after the response and retain the same events for cursor-based catch-up. Request replay never duplicates an event.
+
+Hardware operation-set IDs are checked before revision guards. An identical replay returns the original acknowledgement without writing again. Desired and observed state are both canonicalized through the local SysEx encoder/decoder so representable-value quantization does not create false drift.
 
 See [DAEMON_RPC.md](DAEMON_RPC.md) for the method registry and examples.
 
@@ -105,6 +107,6 @@ The hardware scheduler must follow observed musical/device time, not wall-clock 
 3. CoreMIDI realtime lane. Hardware harness complete; MCP exposure remains.
 4. `rytm-rs` SysEx state lane. Pattern, Kit, Global, and Settings vertical slice complete.
 5. Hardware test harness with firmware evidence. Initial validation complete; broader compatibility matrix remains.
-6. TypeScript/Rust integration. Mock control plane and event dispatch complete; hardware mutation remains.
+6. TypeScript/Rust integration. Mock and immediate hardware control planes complete.
 7. Hardware-backed scheduler and reconciliation.
 8. Capability expansion for scenes, performance macros, songs, and sample transfer.
