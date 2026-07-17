@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted initial direction. The first implementation is mock-only and hardware independent.
+Accepted direction. The mock control plane and a standalone Rust hardware harness are implemented. The harness validates CoreMIDI, realtime MIDI, SysEx state reads/writes, semantic reconciliation, snapshots, and rollback on an Analog Rytm MKII. TypeScript-to-Rust IPC and hardware-backed MCP tools are the next process-boundary milestone.
 
 ## Relationship To Pd Agent Bridge
 
@@ -31,7 +31,7 @@ Different for Rytm:
 ```text
 Coding agent / MCP host
   -> TypeScript Rytm API facade
-  -> Rust Rytm daemon
+  -> Rust Rytm daemon (IPC not wired yet)
   -> CoreMIDI / MIDI / SysEx
   -> Analog Rytm
 
@@ -87,10 +87,10 @@ The hardware scheduler must follow observed musical/device time, not wall-clock 
 
 ## Phases
 
-1. Mock TypeScript vertical slice.
-2. Rust daemon scaffold and IPC contract.
-3. CoreMIDI realtime lane.
-4. `rytm-rs` SysEx state lane.
-5. Hardware test harness with firmware evidence.
-6. Capability expansion for scenes, performance macros, songs, and sample transfer.
-
+1. Mock TypeScript vertical slice. Complete.
+2. Rust daemon scaffold. Complete; IPC contract remains.
+3. CoreMIDI realtime lane. Hardware harness complete; MCP exposure remains.
+4. `rytm-rs` SysEx state lane. Pattern, Kit, Global, and Settings vertical slice complete.
+5. Hardware test harness with firmware evidence. Initial validation complete; broader compatibility matrix remains.
+6. Hardware-backed scheduler and TypeScript/Rust integration.
+7. Capability expansion for scenes, performance macros, songs, and sample transfer.
