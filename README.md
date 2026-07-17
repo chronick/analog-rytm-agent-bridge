@@ -33,6 +33,8 @@ npm run hardware:control
 npm run hardware:control -- --execute
 npm run hardware:audio
 npm run hardware:audio -- --execute
+npm run hardware:samples
+npm run hardware:samples -- --execute
 npm run hardware:scheduler -- --execute
 ```
 
@@ -67,6 +69,7 @@ Both modes use the same request/response/event protocol. The hardware adapter re
 See [docs/HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md) before running write tests.
 See [docs/CONTROL_SURFACE.md](docs/CONTROL_SURFACE.md) for the current control matrix.
 See [docs/AUDIO_CAPTURE.md](docs/AUDIO_CAPTURE.md) for the stereo capture contract and its separation from Overbridge.
+See [docs/SAMPLE_MANAGEMENT.md](docs/SAMPLE_MANAGEMENT.md) for sample identity, transfer, RAM resolution, assignment, and rollback boundaries.
 
 ## Current Slice
 
@@ -109,11 +112,13 @@ Implemented:
 - detect silence, clipping, duration mismatch, dropped callback blocks, disconnects, and stale partial files;
 - expose class-compliant audio through Rust RPC and four semantic MCP tools;
 - certify an audible bounded hardware recording and restore the disposable Pattern/Global baseline.
+- inspect +Drive, all 127 RAM slots, and track sample assignments through the pinned Elektroid fork;
+- validate, upload, download, and content-identify WAV samples without duplicate transfers;
+- resolve managed samples into RAM, assign them declaratively to Sounds, verify readback, roll back the Kit, and clear RAM safely.
 
 Not implemented yet:
 
-- sample inventory, identity reconciliation, transfer, and assignment;
 - Overbridge multitrack capture or DAW automation;
-- scenes, performance macros, songs, and sample transfer.
+- scenes, performance macros, and songs.
 
 Those features remain behind capability flags. The current `rytm-rs` adapter targets firmware 1.70; successful decoding on the connected device is recorded as `decoded-unverified` until its exact OS version is independently confirmed.

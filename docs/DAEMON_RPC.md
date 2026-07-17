@@ -65,6 +65,10 @@ Implemented for both mock and hardware adapters:
 - `snapshot.rollback`
 - `events.read`
 - `state.reconcile`
+- `samples.inspect`
+- `samples.upload`
+- `samples.resolve_ram`
+- `samples.clear_ram`
 - `audio.list_inputs`
 - `audio.start_recording`
 - `audio.stop_recording`
@@ -82,7 +86,9 @@ The mock adapter also has `test.advance_mock_transport` and `test.delay` methods
 
 `audio.start_recording` starts a nonblocking capture. An identical explicit `recordingId` and start declaration replays the original acknowledgement; conflicting start parameters reject. `audio.stop_recording` finalizes the WAV and sidecar and replays a completed result for the same ID. `audio.capture_pattern` performs a bounded blocking capture. The daemon supplies Pattern, Kit, revision, tempo, routing, timestamps, and snapshot context from authoritative state rather than accepting those fields from the caller.
 
-Hardware `operations.apply_now` and `operations.queue` support persistent Pattern, Sound, machine, Kit, FX, Global, routing, MIDI, sequencer, and Settings deltas. Realtime RPC supports track notes, transport, program change, and validated `track_level` through CC 95 or NRPN 1:100. Sample assignment remains capability-gated.
+Hardware `operations.apply_now` and `operations.queue` support persistent Pattern, Sound, machine, Kit, FX, Global, routing, MIDI, sequencer, Settings, and identity-checked sample-assignment deltas. Realtime RPC supports track notes, transport, program change, and validated `track_level` through CC 95 or NRPN 1:100.
+
+Sample RPC uses the pinned Elektroid fork as a separate process. `samples.inspect` returns compact +Drive, RAM, and optional track inventory. `samples.upload` verifies local input and canonical device readback. `samples.resolve_ram` and `samples.clear_ram` are identity guarded and idempotent. The managed registry is stored beside hardware daemon state; see [SAMPLE_MANAGEMENT.md](SAMPLE_MANAGEMENT.md).
 
 Hardware queue calls require `applyAt.transportEpoch`. Obtain it from `device.inspect_state.transport.epoch` after transport start. A boundary is resolved to an absolute step in that epoch; it is never inferred from request arrival time.
 
@@ -96,6 +102,7 @@ Hardware queue calls require `applyAt.transportEpoch`. Obtain it from `device.in
 - A process exit or broken pipe returns `daemon_disconnected` and is retryable unless the client intentionally closed the daemon.
 - MIDI disconnects and SysEx timeouts return retryable `hardware_error` responses.
 - Audio callback failures and disconnects are recorded in the finalized sidecar; active captures finalize on explicit stop or daemon shutdown.
+- Missing Elektroid or a disconnected sample transport is retryable; RAM conflicts, full RAM, unmanaged-path collisions, and sample identity failures are not.
 - Stale revisions, stale epochs, invalid values, and conflicting operation-set IDs return non-retryable `validation_failed` responses.
 - A failed write whose raw baseline was restored reports `hardware_write_failed` with `acknowledgement: rollback_verified`.
 - Schema, envelope, and domain validation failures are not retryable without changing the request.

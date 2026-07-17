@@ -35,9 +35,16 @@ Persistent operation sets can be queued for next step, beat, measure, pattern, o
 
 The bridge lists CoreAudio inputs and records the Rytm's class-compliant 48 kHz stereo stream through start/stop or bounded-capture tools. Final WAV files have authoritative state sidecars and signal/duration/disconnect analysis. This is one Main/selected stereo pair; individual Overbridge streams are not part of this lane.
 
+## Sample Lane
+
+The bridge can inspect +Drive sample directories, all 127 RAM slots, and current track assignments. It validates and uploads WAV files through a pinned Elektroid fork, downloads the canonical device result, assigns stable IDs, resolves samples into RAM without duplication, and clears only identity-matched slots that are no longer used by a track.
+
+Filesystem writes require stopped transport and are intended for preparation, not realtime use.
+
+`assign_sample_slot` changes a track Sound's selected sample number through the normal persistent operation path. Validation and boundary dispatch re-read RAM identity, while raw Kit snapshots cover assignment rollback. +Drive uploads and RAM contents are not part of SysEx snapshots. See [SAMPLE_MANAGEMENT.md](SAMPLE_MANAGEMENT.md).
+
 ## Capability Gaps
 
-- `sample.number` and `assign_sample_slot` are disabled until sample identity and inventory are reconciled; sample transfer is not implemented.
 - Scene definitions, Performance macro definitions, Songs, and their codecs remain disabled pending maintained-fork support.
 - Overbridge is not a control dependency. Class-compliant stereo capture is implemented; Overbridge multitrack capture is a separate milestone.
 - The fork targets firmware 1.70. Successful connected-device round trips are recorded as compatibility evidence, not universal certification for later firmware.

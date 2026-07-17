@@ -17,6 +17,22 @@ checkout is optional and is used only while developing codec changes. Update the
 `daemon/Cargo.toml` only after the fork commit has passed its deterministic and connected-device
 fixture tests and has been pushed to `origin`.
 
+Sample operations also require the maintained Elektroid fork at commit `681fa8c`. Install its CLI on macOS with:
+
+```bash
+brew install automake libtool pkg-config libzip libsamplerate rtmidi rubberband libsndfile
+git clone https://github.com/chronick/elektroid.git ~/git/elektroid
+cd ~/git/elektroid
+git checkout 681fa8c
+autoreconf -fi
+./configure CLI_ONLY=yes --prefix="$HOME/.local"
+make -j4
+make check CPPFLAGS="$(pkg-config --cflags sndfile samplerate)"
+make install
+```
+
+Ensure `~/.local/bin` is on `PATH`, or set `ANALOG_RYTM_ELEKTROID_CLI` to the absolute executable path. Stock Elektroid does not expose the Rytm RAM/track filesystems or transport-safe connection option required by this bridge.
+
 ```bash
 cd daemon
 cargo run -- midi-list
@@ -89,6 +105,22 @@ npm run hardware:audio -- --execute --duration-ms=8000
 
 The sidecar records device/input format, Pattern, Kit, revision, tempo, semantic routing, snapshot ID, timestamps, duration, peak/RMS, clipping, dropped blocks, and disconnect status. WAV and JSON files are written as `.partial` files and renamed only after their contents are finalized and synced. See [AUDIO_CAPTURE.md](AUDIO_CAPTURE.md).
 
+## Sample Certification
+
+The default command reads +Drive, all RAM slots, and track assignments without writing:
+
+```bash
+npm run hardware:samples
+```
+
+The execute form creates a deterministic mono WAV, uploads and downloads it for verification, repeats the upload without transfer, resolves and re-resolves one RAM slot, snapshots the Kit, assigns the sample to BD through `assign_sample_slot`, verifies Sound readback, restores the baseline, and clears RAM:
+
+```bash
+npm run hardware:samples -- --execute
+```
+
+The test asset remains at `/agent-bridge-tests/bridge-certification-sine`; a second execution must report `already-present` with `transferred: false`. The harness uses a persistent certification registry under `~/.analog-rytm-agent-bridge/sample-certification`. See [SAMPLE_MANAGEMENT.md](SAMPLE_MANAGEMENT.md).
+
 ## Scheduler And Reconnect Certification
 
 The scheduler harness uses an isolated durable state directory, generated 24 PPQN clock, and explicit transport epochs. It verifies next-step application, a queued edit surviving daemon shutdown/restart, stale-epoch reject and roll-forward policies, duplicate ID behavior, realtime RPC, no-op reconciliation, and multi-object raw rollback after an injected verification failure.
@@ -141,10 +173,12 @@ cargo run -- create-demo-patterns --execute ../hardware/runs/my-demo
 - Sound work-buffer readback did not provide a reliable proof for live filter CC validation. The harness verifies track level through the Kit work buffer instead.
 - Notes have no device-state acknowledgement. Confirm their audio separately when building closed-loop tests.
 - Class-compliant capture is one stereo pair at 48 kHz. Overbridge multitrack capture is a later, independent lane.
-- Scenes, performance macros, songs, sample transfer, and project-wide writes remain disabled or outside the current harness.
+- Scenes, performance macros, songs, and project-wide writes remain disabled or outside the current harness.
 
 ## Power Cycle And Refresh
 
 The CLI certification scripts are not part of plugin refresh and never run on import. A long-lived hardware daemon owns the connection lifecycle. If the Rytm is power-cycled, in-flight MIDI/SysEx calls fail as retryable hardware errors; the daemon reconnects when the CoreMIDI ports return, re-queries owned work buffers, opens a new transport epoch, and reconciles durable queued work before accepting writes.
 
 An active audio callback reports a disconnect in the recording analysis. Stop or shut down the daemon to finalize that capture as failed; then start a new recording after CoreAudio exposes the device again. Declarative configuration can be replayed after reconnect: matching operation-set/request IDs replay their prior acknowledgement, while a new operation-set ID with the newly inspected revision converges current device state. Never assume a stale pre-power-cycle revision or transport epoch is valid.
+
+Sample registry state also survives daemon restart. Re-inspect +Drive and RAM after a power cycle before assignment; RAM is volatile and must be resolved again. Every Elektroid call uses `-k`, so reconnecting the sample adapter does not intentionally stop transport.
