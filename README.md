@@ -76,6 +76,7 @@ cargo run --manifest-path daemon/Cargo.toml -- serve --adapter hardware --clock-
 Both modes use the same request/response/event protocol. The hardware adapter reconnects its MIDI session as needed and owns its revision, operation-set idempotency, durable queue, raw snapshots, readback verification, rollback, transport epoch, and event journal. Its default store is `~/.analog-rytm-agent-bridge/hardware-state.json`; `--state-dir` selects an isolated store. See [docs/DAEMON_RPC.md](docs/DAEMON_RPC.md).
 
 See [docs/HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md) before running write tests.
+See [docs/HARDWARE_VALIDATION_2026-07-17_COMPLETE.md](docs/HARDWARE_VALIDATION_2026-07-17_COMPLETE.md) for the complete two-phase OS 1.72 certificate and restored final state.
 See [docs/CONTROL_SURFACE.md](docs/CONTROL_SURFACE.md) for the current control matrix.
 See [docs/OS_1_72_CONTROL_MAP.md](docs/OS_1_72_CONTROL_MAP.md) for the evidence-driven mapping of every manual control family.
 See [docs/AGENT_WORKFLOW.md](docs/AGENT_WORKFLOW.md) for the coding-agent operation and recovery sequence.

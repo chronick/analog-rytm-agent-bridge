@@ -202,7 +202,7 @@ npm run hardware:all -- --execute --phase=overbridge
 
 The manual mode switch is why the suite has two phases. Each phase writes an ignored manifest under `hardware/runs/complete-*/manifest.json` with per-harness results and final-state evidence.
 
-The latest phase evidence is recorded in [HARDWARE_VALIDATION_2026-07-17_COMPLETE_CORE.md](HARDWARE_VALIDATION_2026-07-17_COMPLETE_CORE.md) and [HARDWARE_VALIDATION_2026-07-17_OVERBRIDGE.md](HARDWARE_VALIDATION_2026-07-17_OVERBRIDGE.md).
+The latest phase evidence is recorded in [HARDWARE_VALIDATION_2026-07-17_COMPLETE_CORE.md](HARDWARE_VALIDATION_2026-07-17_COMPLETE_CORE.md) and [HARDWARE_VALIDATION_2026-07-17_OVERBRIDGE.md](HARDWARE_VALIDATION_2026-07-17_OVERBRIDGE.md). The combined release gate and restored final state are in [HARDWARE_VALIDATION_2026-07-17_COMPLETE.md](HARDWARE_VALIDATION_2026-07-17_COMPLETE.md).
 
 ## Realtime Validation
 
