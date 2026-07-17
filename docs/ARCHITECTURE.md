@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted direction. The mock control plane and a standalone Rust hardware harness are implemented. The harness validates CoreMIDI, realtime MIDI, SysEx state reads/writes, semantic reconciliation, snapshots, and rollback on an Analog Rytm MKII. TypeScript-to-Rust IPC and hardware-backed MCP tools are the next process-boundary milestone.
+Accepted direction. The mock control plane, Rust hardware harness, and first TypeScript-to-Rust process boundary are implemented. The facade can start a long-running mock or hardware daemon and route health and compact inspection through it. Mutation and scheduler state ownership have not moved across that boundary yet.
 
 ## Relationship To Pd Agent Bridge
 
@@ -31,7 +31,8 @@ Different for Rytm:
 ```text
 Coding agent / MCP host
   -> TypeScript Rytm API facade
-  -> Rust Rytm daemon (IPC not wired yet)
+  -> versioned JSON-lines RPC over stdio
+  -> long-running Rust Rytm daemon
   -> CoreMIDI / MIDI / SysEx
   -> Analog Rytm
 
@@ -42,6 +43,18 @@ Analog Rytm audio
 ```
 
 The coding agent is the orchestrator across Pd, Rytm, audio analysis, and human-controlled instruments. The Rytm bridge does not import Pd code, call Pd APIs, or assume the Pd bridge is running.
+
+The TypeScript facade may run without the Rust daemon for deterministic mock tests. When a daemon client is supplied, health and inspect tools use that boundary. Remaining MCP calls continue to use the TypeScript service until equivalent daemon methods are implemented.
+
+## Daemon Protocol
+
+The process protocol is `analog-rytm-rpc.v1`. Every request carries a caller-generated ID, method, and object-valued parameters. Every response echoes the ID and contains either a result or a structured error with a stable code and retryability flag.
+
+The daemon caches the last 1,024 completed requests. Repeating an ID with the same envelope returns the original response. Reusing an ID with a different envelope returns `request_id_conflict`.
+
+The schema defines request, response, and event envelopes. This milestone emits request responses only; asynchronous state and acknowledgement events are reserved in the contract and will be enabled when queue ownership moves into Rust.
+
+See [DAEMON_RPC.md](DAEMON_RPC.md) for the method registry and examples.
 
 ## Lanes
 
@@ -92,5 +105,6 @@ The hardware scheduler must follow observed musical/device time, not wall-clock 
 3. CoreMIDI realtime lane. Hardware harness complete; MCP exposure remains.
 4. `rytm-rs` SysEx state lane. Pattern, Kit, Global, and Settings vertical slice complete.
 5. Hardware test harness with firmware evidence. Initial validation complete; broader compatibility matrix remains.
-6. Hardware-backed scheduler and TypeScript/Rust integration.
-7. Capability expansion for scenes, performance macros, songs, and sample transfer.
+6. TypeScript/Rust integration. Read-only process boundary complete; mutation and event dispatch remain.
+7. Hardware-backed scheduler and reconciliation.
+8. Capability expansion for scenes, performance macros, songs, and sample transfer.

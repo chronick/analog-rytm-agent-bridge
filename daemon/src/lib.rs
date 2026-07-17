@@ -1,4 +1,5 @@
 pub mod hardware;
+pub mod rpc;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AdapterMode {
@@ -56,6 +57,34 @@ pub fn mock_description() -> DaemonDescription {
             observed_firmware: None,
             compatibility: Compatibility::Mock,
             notes: vec!["Mock daemon. No MIDI or SysEx transport is open.".to_string()],
+        },
+        capabilities: CapabilityFlags {
+            realtime_midi: true,
+            sysex_state: true,
+            pattern_edit: true,
+            kit_edit: true,
+            machine_edit: true,
+            sample_slot_assignment: false,
+            sample_transfer: false,
+            scene_macros: false,
+            performance_macros: false,
+            songs: false,
+        },
+    }
+}
+
+pub fn hardware_description() -> DaemonDescription {
+    DaemonDescription {
+        schema: "analog-rytm-daemon.v1",
+        model: "Analog Rytm MKII",
+        firmware: FirmwareCompatibility {
+            adapter: AdapterMode::RytmRs,
+            adapter_target_firmware: Some("1.70".to_string()),
+            observed_firmware: None,
+            compatibility: Compatibility::Unverified,
+            notes: vec![
+                "rytm-rs 0.1.3 targets firmware 1.70; connected-device decoding must be verified independently.".to_string(),
+            ],
         },
         capabilities: CapabilityFlags {
             realtime_midi: true,

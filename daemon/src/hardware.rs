@@ -214,6 +214,11 @@ pub fn capture_state(session: &mut RytmMidiSession, directory: &Path) -> Hardwar
     Ok(summary)
 }
 
+pub fn inspect_work_buffer_state(session: &mut RytmMidiSession) -> HardwareResult<Value> {
+    let capture = read_work_buffer_state(session)?;
+    Ok(state_summary(&capture.project))
+}
+
 pub fn configure_midi(session: &mut RytmMidiSession, directory: &Path) -> HardwareResult<Value> {
     fs::create_dir_all(directory).map_err(error_string)?;
     let query = GlobalQuery::new_targeting_work_buffer();

@@ -10,6 +10,7 @@ import type {
   RytmTriggerTrackInput,
 } from "../domain/types.ts";
 import type { RytmAgentService } from "../service/RytmAgentService.ts";
+import type { RytmDaemonApi } from "../rpc/types.ts";
 
 export interface McpToolDescriptor {
   name: string;
@@ -26,13 +27,16 @@ const emptyInput = { type: "object" as const, additionalProperties: false };
 
 export class RytmMcpAdapter {
   private readonly service: RytmAgentService;
+  private readonly daemon?: RytmDaemonApi;
 
-  constructor(service: RytmAgentService) {
+  constructor(service: RytmAgentService, daemon?: RytmDaemonApi) {
     this.service = service;
+    this.daemon = daemon;
   }
 
   listTools(): McpToolDescriptor[] {
     return [
+      { name: "rytm_daemon_health", description: "Report Rust daemon connection, adapter, protocol, and implemented-method health.", inputSchema: emptyInput },
       { name: "rytm_inspect_device_state", description: "Return compact Rytm device, transport, queue, snapshot, and active-pattern state.", inputSchema: emptyInput },
       {
         name: "rytm_inspect_pattern",
@@ -173,10 +177,15 @@ export class RytmMcpAdapter {
 
   async callTool(name: string, args: unknown): Promise<unknown> {
     switch (name) {
+      case "rytm_daemon_health":
+        if (!this.daemon) throw new Error("Rust Rytm daemon is not configured");
+        return this.daemon.health();
       case "rytm_inspect_device_state":
-        return this.service.inspectDeviceState();
+        return this.daemon ? this.daemon.inspectDeviceState() : this.service.inspectDeviceState();
       case "rytm_inspect_pattern":
-        return this.service.inspectPattern((args as { pattern?: string }).pattern);
+        return this.daemon
+          ? this.daemon.inspectPattern((args as { pattern?: string }).pattern)
+          : this.service.inspectPattern((args as { pattern?: string }).pattern);
       case "rytm_propose_pattern_delta":
         return this.service.proposePatternDelta(args as RytmPatternDeltaInput);
       case "rytm_validate_operations":
@@ -222,4 +231,3 @@ function operationSetSchema(required: string[]): McpToolDescriptor["inputSchema"
     additionalProperties: false,
   };
 }
-

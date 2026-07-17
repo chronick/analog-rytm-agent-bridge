@@ -6,6 +6,7 @@ use analog_rytm_agent_daemon::{
         restore_midi_config, validate_realtime_controls, RytmMidiSession, DEFAULT_PORT_MATCH,
     },
     mock_description,
+    rpc::{serve_stdio, BackendMode},
 };
 use serde_json::Value;
 use std::path::Path;
@@ -23,6 +24,11 @@ fn run() -> Result<(), String> {
         Some("--describe") | None => {
             println!("{}", describe_as_json(&mock_description()));
             Ok(())
+        }
+        Some("serve") => {
+            let adapter = option_value(&args, "--adapter").unwrap_or("mock");
+            let port_match = option_value(&args, "--port-match").unwrap_or(DEFAULT_PORT_MATCH);
+            serve_stdio(BackendMode::parse(adapter)?, port_match)
         }
         Some("midi-list") => print_json(list_midi_ports()?),
         Some("identity") => {
@@ -93,6 +99,13 @@ fn run() -> Result<(), String> {
     }
 }
 
+fn option_value<'a>(args: &'a [String], option: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|argument| argument == option)
+        .and_then(|index| args.get(index + 1))
+        .map(String::as_str)
+}
+
 fn require_execute(args: &[String], usage: &str) -> Result<(), String> {
     if args.get(1).map(String::as_str) != Some("--execute") {
         return Err(format!(
@@ -117,5 +130,5 @@ fn print_json(value: Value) -> Result<(), String> {
 }
 
 fn usage() -> &'static str {
-    "commands: --describe, midi-list, identity, capture-state <dir>, inspect-pattern <slot>, configure-midi --execute <dir>, restore-midi --execute <dir>, validate-realtime --execute <dir>, create-demo-patterns --execute <dir>, restore-patterns --execute <dir>, play-demo-patterns --execute <baseline-dir>"
+    "commands: --describe, serve [--adapter mock|hardware] [--port-match <name>], midi-list, identity, capture-state <dir>, inspect-pattern <slot>, configure-midi --execute <dir>, restore-midi --execute <dir>, validate-realtime --execute <dir>, create-demo-patterns --execute <dir>, restore-patterns --execute <dir>, play-demo-patterns --execute <baseline-dir>"
 }

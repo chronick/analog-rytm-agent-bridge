@@ -13,12 +13,13 @@ This repo is intentionally separate from `pd-agent-bridge`. The two tools are me
 - Delta operations instead of whole-project regeneration.
 - Compact state summaries for agents.
 
-The repo contains two vertical slices:
+The repo contains three connected vertical slices:
 
 - a hardware-independent TypeScript control plane with a mock Rytm transport;
 - a Rust/CoreMIDI hardware harness for bidirectional SysEx inspection, realtime MIDI, declarative configuration, verified pattern writes, snapshots, and rollback.
+- a versioned JSON-lines process boundary that connects TypeScript health and compact inspection tools to a long-running Rust mock or hardware daemon.
 
-The hardware harness is intentionally a daemon-side CLI for now. The TypeScript facade does not dispatch to it yet.
+Persistent mutations and musical-boundary scheduling still run in the TypeScript mock service. They are declared in the daemon protocol but return `not_implemented` until their state ownership moves behind the Rust boundary.
 
 ## Commands
 
@@ -43,6 +44,20 @@ cargo run -- create-demo-patterns --execute ../hardware/runs/demo-patterns
 cargo run -- play-demo-patterns --execute ../hardware/runs/baseline
 ```
 
+Run the long-lived mock daemon directly with:
+
+```bash
+cargo run --manifest-path daemon/Cargo.toml -- serve --adapter mock
+```
+
+Run the hardware-backed daemon with its default CoreMIDI port match:
+
+```bash
+cargo run --manifest-path daemon/Cargo.toml -- serve --adapter hardware
+```
+
+Both modes use the same request/response protocol. The hardware adapter opens one long-lived MIDI session and the currently implemented RPC methods are read-only. See [docs/DAEMON_RPC.md](docs/DAEMON_RPC.md).
+
 See [docs/HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md) before running write tests.
 
 ## Current Slice
@@ -57,6 +72,9 @@ Implemented:
 - create snapshots and rollback with monotonic revisions;
 - send mock realtime MIDI operations;
 - expose a standalone MCP-style adapter surface;
+- start, monitor, and close a long-running Rust daemon from TypeScript;
+- route daemon health and compact state/pattern inspection through versioned JSON-lines RPC;
+- replay identical request IDs and reject conflicting ID reuse;
 - discover the Analog Rytm through CoreMIDI;
 - query and compactly summarize pattern, kit, global, and settings work buffers;
 - reconcile a minimal MIDI receive profile idempotently;
@@ -66,7 +84,7 @@ Implemented:
 
 Not implemented yet:
 
-- TypeScript-to-Rust IPC and MCP exposure of the hardware lane;
+- mutation, queue, snapshot, rollback, and event dispatch across TypeScript-to-Rust RPC;
 - device-derived musical-boundary scheduling for persistent hardware edits;
 - broad parameter and machine compatibility coverage;
 - Overbridge or DAW automation;

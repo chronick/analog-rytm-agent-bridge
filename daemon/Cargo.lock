@@ -39,6 +39,7 @@ version = "0.1.0"
 dependencies = [
  "midir",
  "rytm-rs",
+ "serde",
  "serde_json",
 ]
 
