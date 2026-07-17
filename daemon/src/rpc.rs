@@ -149,6 +149,13 @@ impl RpcServer {
                 force_next_verification_failure,
             )?)),
         };
+        // Events persisted before this process started were already delivered to
+        // their original client; replaying them on the push stream after a
+        // restart would double-process history.
+        let emitted_event_cursor = match &backend {
+            Backend::Mock(_) => 0,
+            Backend::Hardware(state) => state.last_event_cursor(),
+        };
         Ok(Self {
             backend,
             audio: AudioService::new(
@@ -169,7 +176,7 @@ impl RpcServer {
             ),
             replay_cache: HashMap::new(),
             replay_order: VecDeque::new(),
-            emitted_event_cursor: 0,
+            emitted_event_cursor,
         })
     }
 
@@ -656,17 +663,23 @@ impl RpcServer {
                     "schema": RPC_SCHEMA,
                     "eventId": format!("event-{}", entry.cursor),
                     "type": event_type,
+                    "cursor": entry.cursor,
                     "payload": entry,
                 })
             })
             .collect()
     }
 
-    pub fn poll_messages(&mut self) -> Result<Vec<Value>, String> {
+    pub fn poll_messages(&mut self) -> Vec<Value> {
         if let Backend::Hardware(state) = &mut self.backend {
-            state.poll()?;
+            // A poll failure (disconnect mid-clock, transient send error, or a
+            // persist failure) must not stop the serve loop: the reconnect
+            // machinery only runs if polling continues.
+            if let Err(error) = state.poll() {
+                eprintln!("analog-rytm-daemon: poll error (continuing): {error}");
+            }
         }
-        Ok(self.drain_rpc_events())
+        self.drain_rpc_events()
     }
 
     pub fn shutdown(&mut self) -> Result<(), String> {
@@ -718,16 +731,22 @@ pub fn serve_stdio(
     )?;
     loop {
         match receiver.recv_timeout(Duration::from_millis(2)) {
-            Ok(line) => {
-                let line = line?;
-                if !line.trim().is_empty() {
-                    write_messages(&mut stdout, server.handle_messages(&line))?;
+            Ok(line) => match line {
+                Ok(line) => {
+                    if !line.trim().is_empty() {
+                        write_messages(&mut stdout, server.handle_messages(&line))?;
+                    }
                 }
-            }
+                // One unreadable line (for example invalid UTF-8) must not end
+                // the daemon; skip it and keep serving pending requests.
+                Err(error) => {
+                    eprintln!("analog-rytm-daemon: dropped unreadable input line: {error}");
+                }
+            },
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
-        write_messages(&mut stdout, server.poll_messages()?)?;
+        write_messages(&mut stdout, server.poll_messages())?;
     }
     server.shutdown()?;
     Ok(())

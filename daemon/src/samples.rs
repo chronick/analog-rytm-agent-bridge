@@ -6,12 +6,17 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
+    io::Read,
     path::{Path, PathBuf},
-    process::Command,
-    time::{SystemTime, UNIX_EPOCH},
+    process::{Command, Output, Stdio},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const SAMPLE_SCHEMA: &str = "analog-rytm-samples.v1";
+// SysEx sample transfer is slow, so the bound is generous; without any bound a
+// wedged elektroid-cli blocks the RPC thread forever.
+const CLI_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_DEVICE_DIRECTORY: &str = "/agent-bridge";
 const RAM_SLOT_MIN: u8 = 1;
 const RAM_SLOT_MAX: u8 = 127;
@@ -538,6 +543,11 @@ impl SampleService {
         };
         self.registry.samples.insert(sample_id, managed.clone());
         self.persist()?;
+        // Verification succeeded, so the staged copy and downloaded readback
+        // are no longer evidence; leaving them accumulates one file pair per
+        // upload forever. Failed uploads intentionally keep theirs.
+        let _ = fs::remove_file(&staged_source);
+        let _ = fs::remove_dir_all(&verification_directory);
         Ok(upload_result(
             &managed,
             &source,
@@ -632,7 +642,9 @@ impl SampleService {
     }
 
     fn run_cli(&self, args: &[String]) -> Result<String, String> {
-        let output = Command::new(&self.cli_path).args(args).output().map_err(|error| {
+        let mut command = Command::new(&self.cli_path);
+        command.args(args);
+        let output = run_with_timeout(&mut command, CLI_TIMEOUT).map_err(|error| {
             format!(
                 "could not execute elektroid-cli at {:?}: {error}; build chronick/elektroid commit 681fa8c or set ANALOG_RYTM_ELEKTROID_CLI",
                 self.cli_path
@@ -724,6 +736,53 @@ impl SampleService {
         .map_err(error_string)?;
         fs::rename(&temporary, path).map_err(error_string)
     }
+}
+
+fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<Output, String> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    // Drain the pipes on their own threads so a chatty child cannot deadlock
+    // against a full pipe while this thread waits on it.
+    let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
+    let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stdout_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut bytes);
+        bytes
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut bytes);
+        bytes
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait().map_err(|error| error.to_string())? {
+            Some(status) => break status,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(format!(
+                    "timed out after {} seconds and was killed",
+                    timeout.as_secs()
+                ));
+            }
+            None => thread::sleep(Duration::from_millis(25)),
+        }
+    };
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 fn parse_device_line(line: &str) -> Option<(usize, String)> {

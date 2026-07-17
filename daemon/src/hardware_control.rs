@@ -7,8 +7,8 @@ use crate::{
         ChangedObjects, RawState, RytmMidiSession,
     },
     hardware_scheduler::{
-        timestamp, BoundaryTarget, ClockSource, DurableSnapshot, HardwareOperationSet,
-        HardwareOperationStatus, HardwareScheduler, HardwareTransportState,
+        acquire_state_lock, timestamp, BoundaryTarget, ClockSource, DurableSnapshot,
+        HardwareOperationSet, HardwareOperationStatus, HardwareScheduler, HardwareTransportState,
     },
     samples::SampleService,
     state::{
@@ -19,6 +19,7 @@ use crate::{
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
+    fs::File,
     path::Path,
     time::{Duration, Instant},
 };
@@ -47,6 +48,9 @@ pub struct HardwareBridgeState {
     force_next_verification_failure: bool,
     performance_amounts: BTreeMap<String, u8>,
     samples: SampleService,
+    // Held for the daemon lifetime so a second daemon cannot silently share
+    // and clobber the same durable state file.
+    _state_lock: File,
 }
 
 impl HardwareBridgeState {
@@ -56,6 +60,7 @@ impl HardwareBridgeState {
         clock_source: ClockSource,
         force_next_verification_failure: bool,
     ) -> Result<Self, String> {
+        let state_lock = acquire_state_lock(state_path)?;
         let mut state = Self {
             session: None,
             port_match: port_match.to_string(),
@@ -68,6 +73,7 @@ impl HardwareBridgeState {
             force_next_verification_failure,
             performance_amounts: BTreeMap::new(),
             samples: SampleService::hardware(state_path, port_match)?,
+            _state_lock: state_lock,
         };
         state.try_reconnect()?;
         Ok(state)
@@ -790,6 +796,14 @@ impl HardwareBridgeState {
             .collect()
     }
 
+    pub fn last_event_cursor(&self) -> u64 {
+        self.scheduler
+            .state
+            .events
+            .last()
+            .map_or(0, |entry| entry.cursor)
+    }
+
     pub fn poll(&mut self) -> Result<(), String> {
         self.try_reconnect()?;
         if self.session.is_none() {
@@ -1048,17 +1062,35 @@ impl HardwareBridgeState {
                         .input
                         .apply_at
                         .with_transport_epoch(epoch.clone());
-                    let target = self.scheduler.state.transport.resolve(&apply_at)?;
-                    let operation_set_id = self.scheduler.state.operation_sets[index]
-                        .operation_set_id
-                        .clone();
-                    self.scheduler.state.operation_sets[index].target = target.clone();
-                    self.scheduler.append_event(json!({
-                        "type": "operation_set.reconciled",
-                        "operationSetId": operation_set_id,
-                        "action": "rolled_forward",
-                        "resolvedBoundary": target,
-                    }));
+                    // A boundary that cannot be resolved against the new epoch
+                    // (for example a pattern-step target for a pattern that is
+                    // no longer active) rejects only this record. Propagating
+                    // the error would abort reconciliation on every reconnect
+                    // and transport start, and the durable record would poison
+                    // them forever.
+                    match self.scheduler.state.transport.resolve(&apply_at) {
+                        Ok(target) => {
+                            let operation_set_id = self.scheduler.state.operation_sets[index]
+                                .operation_set_id
+                                .clone();
+                            self.scheduler.state.operation_sets[index].target = target.clone();
+                            self.scheduler.append_event(json!({
+                                "type": "operation_set.reconciled",
+                                "operationSetId": operation_set_id,
+                                "action": "rolled_forward",
+                                "resolvedBoundary": target,
+                            }));
+                        }
+                        Err(error) => {
+                            self.reject_record(
+                                index,
+                                format!(
+                                    "boundary could not be rolled forward to epoch {epoch}: {error}"
+                                ),
+                                "not_applied",
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1068,7 +1100,8 @@ impl HardwareBridgeState {
     fn send_due_note_offs(&mut self) {
         let now = Instant::now();
         let pending = std::mem::take(&mut self.pending_note_offs);
-        for note_off in pending {
+        let mut remaining = pending.into_iter();
+        while let Some(note_off) = remaining.next() {
             if note_off.deadline > now {
                 self.pending_note_offs.push(note_off);
                 continue;
@@ -1076,6 +1109,10 @@ impl HardwareBridgeState {
             let result = self
                 .with_session(|session| session.send(&[0x80 | note_off.channel, note_off.note, 0]));
             if result.is_err() {
+                // Requeue the failed and remaining note-offs so a transient
+                // send failure cannot leave notes ringing on the device.
+                self.pending_note_offs.push(note_off);
+                self.pending_note_offs.extend(remaining);
                 break;
             }
         }

@@ -325,6 +325,34 @@ pub struct HardwareScheduler {
     pub state: DurableHardwareState,
 }
 
+pub fn acquire_state_lock(state_path: &Path) -> Result<File, String> {
+    let parent = state_path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "failed to create scheduler state directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    let lock_path = state_path.with_extension("json.lock");
+    let lock = File::create(&lock_path).map_err(|error| {
+        format!(
+            "failed to create scheduler state lock {}: {error}",
+            lock_path.display()
+        )
+    })?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(std::fs::TryLockError::WouldBlock) => Err(format!(
+            "another daemon already owns hardware state {}; refusing to run two instances against one store",
+            state_path.display()
+        )),
+        Err(std::fs::TryLockError::Error(error)) => Err(format!(
+            "failed to lock scheduler state {}: {error}",
+            lock_path.display()
+        )),
+    }
+}
+
 impl HardwareScheduler {
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, String> {
         let path = path.into();
@@ -359,7 +387,11 @@ impl HardwareScheduler {
                 parent.display()
             )
         })?;
-        let temporary = self.path.with_extension("json.tmp");
+        // Process-unique temp name: a fixed name would let two writers clobber
+        // each other's in-flight temp file and race the rename.
+        let temporary = self
+            .path
+            .with_extension(format!("json.tmp.{}", std::process::id()));
         let bytes = serde_json::to_vec_pretty(&self.state)
             .map_err(|error| format!("failed to encode scheduler state: {error}"))?;
         let mut file = File::create(&temporary).map_err(|error| {
@@ -381,7 +413,17 @@ impl HardwareScheduler {
                 "failed to replace scheduler state {}: {error}",
                 self.path.display()
             )
-        })
+        })?;
+        // The rename itself is only durable across power loss once the parent
+        // directory entry is synced.
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                format!(
+                    "failed to sync scheduler state directory {}: {error}",
+                    parent.display()
+                )
+            })
     }
 
     pub fn next_id(&mut self, prefix: &str) -> String {

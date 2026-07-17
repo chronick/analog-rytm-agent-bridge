@@ -2363,8 +2363,14 @@ pub fn state_summary(project: &RytmProject) -> Value {
             "notes": ["All queried work-buffer object sizes decoded successfully; the device did not expose its OS version through Universal Device Inquiry."]
         },
         "pattern": pattern_summary(project.work_buffer().pattern()),
+        // Device Song bytes that decode but fail row access (firmware
+        // variance) must not panic the daemon inside every inspect/poll.
         "song": song_summary(project.work_buffer().song(), &SongTarget::WorkBuffer)
-            .expect("typed work-buffer Song remains valid"),
+            .unwrap_or_else(|error| json!({
+                "target": "work_buffer",
+                "status": "decode_failed",
+                "error": error,
+            })),
         "kit": kit_summary(project.work_buffer().kit()),
         "settings": settings_summary(project.settings()),
         "global": global_summary(global),
@@ -2631,7 +2637,12 @@ fn settings_summary(settings: &Settings) -> Value {
     json!({
         "structureVersion": settings.structure_version(),
         "tempo": settings.bpm(),
-        "selectedTrack": TRACK_NAMES[settings.selected_track()],
+        // The selected-track index is decoded from device SysEx and can name
+        // the FX track (12) or an unexpected value; never index unchecked.
+        "selectedTrack": match settings.selected_track() {
+            12 => "FX",
+            index => TRACK_NAMES.get(index).copied().unwrap_or("unknown"),
+        },
         "selectedParameterMenuItem": serialize_value(&settings.selected_parameter_menu_item()),
         "selectedFxMenuItem": serialize_value(&settings.selected_fx_menu_item()),
         "selectedPage": settings.selected_page(),

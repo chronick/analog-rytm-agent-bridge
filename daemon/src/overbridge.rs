@@ -357,9 +357,14 @@ impl OverbridgeAudioService {
                 });
             }
         }
-        sample_sender
-            .send(Vec::new())
-            .map_err(|_| "Overbridge writer disconnected before finish marker".to_string())?;
+        // A failed finish-marker send means the writer already exited (for
+        // example on a disk-full write error); still join it so the writer's
+        // real error is surfaced instead of a generic disconnect message.
+        if sample_sender.send(Vec::new()).is_err() {
+            failure.get_or_insert_with(|| {
+                "Overbridge writer disconnected before finish marker".to_string()
+            });
+        }
         let writer_result = writer_thread
             .join()
             .map_err(|_| "Overbridge writer thread panicked".to_string())??;
@@ -492,34 +497,48 @@ impl OverbridgeAudioService {
     }
 }
 
-fn selected_device_summary(candidate: &Value) -> Option<Value> {
-    let configuration = candidate["configurations"]
-        .as_array()?
-        .iter()
-        .filter(|configuration| configuration["recorderSupported"] == true)
-        .max_by_key(|configuration| {
-            let preferred_rate = configuration["minSampleRate"]
-                .as_u64()
-                .is_some_and(|minimum| minimum <= u64::from(PREFERRED_SAMPLE_RATE))
-                && configuration["maxSampleRate"]
-                    .as_u64()
-                    .is_some_and(|maximum| maximum >= u64::from(PREFERRED_SAMPLE_RATE));
-            let preferred_format = configuration["sampleFormat"] == "f32";
-            let preferred_layout = matches!(configuration["channels"].as_u64(), Some(12 | 20));
-            u8::from(preferred_rate) * 4
-                + u8::from(preferred_format) * 2
-                + u8::from(preferred_layout)
-        })?;
-    let sample_rate = if configuration["minSampleRate"]
+fn configuration_supports_preferred_rate(configuration: &Value) -> bool {
+    configuration["minSampleRate"]
         .as_u64()
         .is_some_and(|minimum| minimum <= u64::from(PREFERRED_SAMPLE_RATE))
         && configuration["maxSampleRate"]
             .as_u64()
             .is_some_and(|maximum| maximum >= u64::from(PREFERRED_SAMPLE_RATE))
-    {
+}
+
+// Must stay in lockstep with the scoring in `select_overbridge_input`,
+// including its strict-greater (first wins on ties) selection, so the summary
+// reported to clients names the same configuration the capture path opens.
+fn configuration_score(configuration: &Value) -> u8 {
+    let preferred_rate = configuration_supports_preferred_rate(configuration);
+    let preferred_format = configuration["sampleFormat"] == "f32";
+    let preferred_layout = matches!(configuration["channels"].as_u64(), Some(12 | 20));
+    u8::from(preferred_rate) * 4 + u8::from(preferred_format) * 2 + u8::from(preferred_layout)
+}
+
+fn selected_device_summary(candidate: &Value) -> Option<Value> {
+    let mut best: Option<(u8, &Value)> = None;
+    for configuration in candidate["configurations"].as_array()? {
+        if configuration["recorderSupported"] != true {
+            continue;
+        }
+        let score = configuration_score(configuration);
+        if best
+            .as_ref()
+            .is_none_or(|(best_score, _)| score > *best_score)
+        {
+            best = Some((score, configuration));
+        }
+    }
+    let (_, configuration) = best?;
+    let sample_rate = if configuration_supports_preferred_rate(configuration) {
         u64::from(PREFERRED_SAMPLE_RATE)
     } else {
-        configuration["maxSampleRate"].as_u64()?
+        // An absent maxSampleRate must not null the whole summary while the
+        // provider still reports the device as available.
+        configuration["maxSampleRate"]
+            .as_u64()
+            .unwrap_or(u64::from(PREFERRED_SAMPLE_RATE))
     };
     Some(json!({
         "id": candidate["id"].clone(),
@@ -675,6 +694,9 @@ fn select_overbridge_input(name_match: &str) -> Result<HardwareSelection, String
                 range.max_sample_rate()
             };
             let config = range.with_sample_rate(sample_rate);
+            // Must stay in lockstep with `configuration_score`, including the
+            // strict-greater first-wins tie-break below, so the inspect
+            // summary names the configuration this path actually opens.
             let score = u8::from(sample_rate == PREFERRED_SAMPLE_RATE) * 4
                 + u8::from(config.sample_format() == SampleFormat::F32) * 2
                 + u8::from(matches!(config.channels(), 12 | 20));
@@ -1211,6 +1233,68 @@ mod tests {
         assert_eq!(selected["sampleRate"], 48_000);
         assert_eq!(selected["layout"].as_array().unwrap().len(), 10);
         assert!(selected.get("configurations").is_none());
+    }
+
+    #[test]
+    fn selected_summary_breaks_ties_like_the_capture_path() {
+        // Two configurations with identical scores: the capture path keeps the
+        // first (strict-greater comparison), so the summary must as well.
+        let candidate = json!({
+            "id": "coreaudio:rytm",
+            "name": "Analog Rytm",
+            "configurations": [
+                {
+                    "channels": 20,
+                    "minSampleRate": 48_000,
+                    "maxSampleRate": 48_000,
+                    "sampleFormat": "f32",
+                    "recorderSupported": true,
+                    "layout": stem_layout(20).unwrap(),
+                },
+                {
+                    "channels": 12,
+                    "minSampleRate": 48_000,
+                    "maxSampleRate": 48_000,
+                    "sampleFormat": "f32",
+                    "recorderSupported": true,
+                    "layout": stem_layout(12).unwrap(),
+                },
+            ]
+        });
+        let selected = selected_device_summary(&candidate).unwrap();
+        assert_eq!(selected["channels"], 20);
+    }
+
+    #[test]
+    fn selected_summary_survives_missing_max_sample_rate() {
+        let candidate = json!({
+            "id": "coreaudio:rytm",
+            "name": "Analog Rytm",
+            "configurations": [{
+                "channels": 12,
+                "sampleFormat": "f32",
+                "recorderSupported": true,
+                "layout": stem_layout(12).unwrap(),
+            }]
+        });
+        let selected = selected_device_summary(&candidate).unwrap();
+        assert_eq!(selected["sampleRate"], u64::from(PREFERRED_SAMPLE_RATE));
+    }
+
+    #[test]
+    fn selected_summary_is_none_without_recorder_support() {
+        let candidate = json!({
+            "id": "coreaudio:other",
+            "name": "Other Interface",
+            "configurations": [{
+                "channels": 2,
+                "minSampleRate": 48_000,
+                "maxSampleRate": 48_000,
+                "sampleFormat": "f32",
+                "recorderSupported": false,
+            }]
+        });
+        assert!(selected_device_summary(&candidate).is_none());
     }
 
     #[test]
