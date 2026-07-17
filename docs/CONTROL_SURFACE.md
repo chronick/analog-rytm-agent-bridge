@@ -31,9 +31,13 @@ The hardware daemon exposes track notes, start/stop/continue, program change, ge
 
 Persistent operation sets can be queued for next step, beat, measure, pattern, or a specific pattern step. Hardware callers must include the current transport epoch. The durable scheduler emits queued, applied, rejected, and reconciled events; reconnect either rejects or rolls stale work forward according to the declared late policy.
 
+## Audio Lane
+
+The bridge lists CoreAudio inputs and records the Rytm's class-compliant 48 kHz stereo stream through start/stop or bounded-capture tools. Final WAV files have authoritative state sidecars and signal/duration/disconnect analysis. This is one Main/selected stereo pair; individual Overbridge streams are not part of this lane.
+
 ## Capability Gaps
 
 - `sample.number` and `assign_sample_slot` are disabled until sample identity and inventory are reconciled; sample transfer is not implemented.
 - Scene definitions, Performance macro definitions, Songs, and their codecs remain disabled pending maintained-fork support.
-- Overbridge is not a control dependency. Audio and multitrack capture are separate milestones.
+- Overbridge is not a control dependency. Class-compliant stereo capture is implemented; Overbridge multitrack capture is a separate milestone.
 - The fork targets firmware 1.70. Successful connected-device round trips are recorded as compatibility evidence, not universal certification for later firmware.

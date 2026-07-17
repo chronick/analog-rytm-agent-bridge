@@ -1,6 +1,6 @@
 # Analog Rytm MKII Hardware Setup
 
-The Rust harness uses the Analog Rytm CoreMIDI port directly for realtime MIDI and SysEx. Overbridge may run alongside it for audio, but is not part of the state-control path.
+The Rust harness uses the Analog Rytm CoreMIDI port directly for realtime MIDI and SysEx. In USB AUDIO/MIDI mode it can also capture the class-compliant stereo USB stream. Overbridge is not part of the state-control path and its multitrack lane remains separate.
 
 ## Device Preparation
 
@@ -70,6 +70,25 @@ npm run hardware:control -- --execute
 
 The harness performs an emergency rollback in `finally` if any assertion fails. Keep the disposable project open and do not interrupt the process during SysEx writes.
 
+The verification modules are import-safe: importing them does not create a temporary store, start a daemon, or touch the device. They execute only through their CLI entrypoints.
+
+## Stereo Audio Certification
+
+Confirm the Rytm is in USB CONFIG `AUDIO/MIDI` and AUDIO ROUTING `USB OUT` is `MAIN OUT`. The dry run lists CoreAudio inputs and validates a stereo 48 kHz f32 configuration without writing device state or recording a file.
+
+```bash
+npm run hardware:audio
+```
+
+The execute form snapshots the active work buffers, applies a disposable declarative Pattern, starts a bounded recorder, sends direct track notes, writes a stereo f32 WAV plus JSON sidecar, checks signal and duration, then rolls back and verifies the original state.
+
+```bash
+npm run hardware:audio -- --execute
+npm run hardware:audio -- --execute --duration-ms=8000
+```
+
+The sidecar records device/input format, Pattern, Kit, revision, tempo, semantic routing, snapshot ID, timestamps, duration, peak/RMS, clipping, dropped blocks, and disconnect status. WAV and JSON files are written as `.partial` files and renamed only after their contents are finalized and synced. See [AUDIO_CAPTURE.md](AUDIO_CAPTURE.md).
+
 ## Scheduler And Reconnect Certification
 
 The scheduler harness uses an isolated durable state directory, generated 24 PPQN clock, and explicit transport epochs. It verifies next-step application, a queued edit surviving daemon shutdown/restart, stale-epoch reject and roll-forward policies, duplicate ID behavior, realtime RPC, no-op reconciliation, and multi-object raw rollback after an injected verification failure.
@@ -121,4 +140,11 @@ cargo run -- create-demo-patterns --execute ../hardware/runs/my-demo
 - Requested values are compared after a local SysEx encode/decode round trip. This makes codec quantization explicit; for example, a requested delay feedback value may converge to the nearest representable value.
 - Sound work-buffer readback did not provide a reliable proof for live filter CC validation. The harness verifies track level through the Kit work buffer instead.
 - Notes have no device-state acknowledgement. Confirm their audio separately when building closed-loop tests.
+- Class-compliant capture is one stereo pair at 48 kHz. Overbridge multitrack capture is a later, independent lane.
 - Scenes, performance macros, songs, sample transfer, and project-wide writes remain disabled or outside the current harness.
+
+## Power Cycle And Refresh
+
+The CLI certification scripts are not part of plugin refresh and never run on import. A long-lived hardware daemon owns the connection lifecycle. If the Rytm is power-cycled, in-flight MIDI/SysEx calls fail as retryable hardware errors; the daemon reconnects when the CoreMIDI ports return, re-queries owned work buffers, opens a new transport epoch, and reconciles durable queued work before accepting writes.
+
+An active audio callback reports a disconnect in the recording analysis. Stop or shut down the daemon to finalize that capture as failed; then start a new recording after CoreAudio exposes the device again. Declarative configuration can be replayed after reconnect: matching operation-set/request IDs replay their prior acknowledgement, while a new operation-set ID with the newly inspected revision converges current device state. Never assume a stale pre-power-cycle revision or transport epoch is valid.

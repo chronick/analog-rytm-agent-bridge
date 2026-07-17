@@ -17,6 +17,8 @@ cargo run --manifest-path daemon/Cargo.toml -- serve --adapter hardware --port-m
 
 Hardware runtime state defaults to `~/.analog-rytm-agent-bridge/hardware-state.json`. Use `--state-dir <directory>` for an isolated project or test store. `--clock-source observed` follows incoming MIDI realtime messages; `--clock-source generated` makes the daemon send 24 PPQN clock at the transport tempo.
 
+Audio output defaults to `~/.analog-rytm-agent-bridge/recordings`. Use `--audio-dir <directory>` to isolate recordings. This is the 48 kHz class-compliant stereo lane, not Overbridge multitrack audio.
+
 ## Envelopes
 
 Request:
@@ -63,6 +65,10 @@ Implemented for both mock and hardware adapters:
 - `snapshot.rollback`
 - `events.read`
 - `state.reconcile`
+- `audio.list_inputs`
+- `audio.start_recording`
+- `audio.stop_recording`
+- `audio.capture_pattern`
 
 Also implemented by both adapters:
 
@@ -73,6 +79,8 @@ Also implemented by both adapters:
 - `realtime.change_pattern`
 
 The mock adapter also has `test.advance_mock_transport` and `test.delay` methods for deterministic scheduler and disconnect tests. They are not MCP tools.
+
+`audio.start_recording` starts a nonblocking capture. An identical explicit `recordingId` and start declaration replays the original acknowledgement; conflicting start parameters reject. `audio.stop_recording` finalizes the WAV and sidecar and replays a completed result for the same ID. `audio.capture_pattern` performs a bounded blocking capture. The daemon supplies Pattern, Kit, revision, tempo, routing, timestamps, and snapshot context from authoritative state rather than accepting those fields from the caller.
 
 Hardware `operations.apply_now` and `operations.queue` support persistent Pattern, Sound, machine, Kit, FX, Global, routing, MIDI, sequencer, and Settings deltas. Realtime RPC supports track notes, transport, program change, and validated `track_level` through CC 95 or NRPN 1:100. Sample assignment remains capability-gated.
 
@@ -87,6 +95,7 @@ Hardware queue calls require `applyAt.transportEpoch`. Obtain it from `device.in
 - A TypeScript-side timeout returns `request_timeout` and is retryable.
 - A process exit or broken pipe returns `daemon_disconnected` and is retryable unless the client intentionally closed the daemon.
 - MIDI disconnects and SysEx timeouts return retryable `hardware_error` responses.
+- Audio callback failures and disconnects are recorded in the finalized sidecar; active captures finalize on explicit stop or daemon shutdown.
 - Stale revisions, stale epochs, invalid values, and conflicting operation-set IDs return non-retryable `validation_failed` responses.
 - A failed write whose raw baseline was restored reports `hardware_write_failed` with `acknowledgement: rollback_verified`.
 - Schema, envelope, and domain validation failures are not retryable without changing the request.
