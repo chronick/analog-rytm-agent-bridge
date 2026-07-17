@@ -90,7 +90,7 @@ async function applyBatch(
   }
   const state = (await client.inspectDeviceState()) as { revision: number };
   const applied = (await client.applyOperationsNow({
-    operationSetId,
+    operationSetId: `${operationSetId}-r${state.revision}`,
     expectedRevision: state.revision,
     operations,
   })) as { status?: string; acknowledgement?: string };
@@ -162,7 +162,7 @@ export async function runProjectBuild(): Promise<void> {
         const resolved = (await client.resolveSampleRam({ sampleId: uploaded.sampleId, slot: sample.slot })) as { slot: number };
         const state = (await client.inspectDeviceState()) as { revision: number };
         await client.applyOperationsNow({
-          operationSetId: `build-sample-${sample.track}-${sample.slot}`,
+          operationSetId: `build-sample-${sample.track}-${sample.slot}-r${state.revision}`,
           expectedRevision: state.revision,
           operations: [
             { type: "assign_sample_slot", track: sample.track, slot: resolved.slot, sampleId: uploaded.sampleId } as unknown as RytmPersistentOperation,
