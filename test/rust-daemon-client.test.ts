@@ -38,6 +38,8 @@ test("TypeScript client completes a real round trip through the Rust mock daemon
     assert.ok(health.methods.implemented.includes("snapshot.rollback"));
     assert.ok(health.methods.implemented.includes("sound.inspect"));
     assert.ok(health.methods.implemented.includes("audio.capture_pattern"));
+    assert.ok(health.methods.implemented.includes("audio.inspect_overbridge"));
+    assert.ok(health.methods.implemented.includes("audio.capture_multitrack"));
     assert.ok(health.methods.implemented.includes("samples.resolve_ram"));
     assert.ok(health.methods.implemented.includes("realtime.set_scene"));
     assert.ok(health.methods.implemented.includes("realtime.set_performance"));
@@ -173,6 +175,41 @@ test("TypeScript client completes a real round trip through the Rust mock daemon
     assert.equal(wavHeader.subarray(8, 12).toString("ascii"), "WAVE");
     const sidecar = JSON.parse(await readFile(bounded.audio.metadataPath, "utf8")) as { schema: string };
     assert.equal(sidecar.schema, "analog-rytm-recording.v1");
+
+    const overbridge = await facade.callTool("rytm_inspect_overbridge_audio", {}) as {
+      available: boolean;
+      deviceMode: string;
+      selectedDevice: { layout: unknown[] };
+      expectedBuses: unknown[];
+    };
+    assert.equal(overbridge.available, true);
+    assert.equal(overbridge.deviceMode, "mock");
+    assert.equal(overbridge.selectedDevice.layout.length, 10);
+    assert.equal(overbridge.expectedBuses.length, 10);
+
+    const multitrackInput = {
+      recordingId: "integration-overbridge",
+      durationMs: 125,
+      snapshotId: "before-pattern",
+    };
+    const multitrack = await facade.callTool("rytm_capture_multitrack_audio", multitrackInput) as {
+      status: string;
+      stems: Array<{ id: string; path: string; frames: number; analysis: { silence: boolean } }>;
+      synchronization: { framesPerStem: number; maxFrameDrift: number };
+      metadataPath: string;
+    };
+    assert.equal(multitrack.status, "completed");
+    assert.equal(multitrack.stems.length, 10);
+    assert.equal(multitrack.synchronization.framesPerStem, 6_000);
+    assert.equal(multitrack.synchronization.maxFrameDrift, 0);
+    assert.ok(multitrack.stems.every((stem) => stem.frames === 6_000 && !stem.analysis.silence));
+    assert.ok((await stat(multitrack.stems[0]!.path)).isFile());
+    const multitrackSidecar = JSON.parse(await readFile(multitrack.metadataPath, "utf8")) as { schema: string };
+    assert.equal(multitrackSidecar.schema, "analog-rytm-multitrack-recording.v1");
+    assert.deepEqual(
+      await facade.callTool("rytm_capture_multitrack_audio", multitrackInput),
+      multitrack,
+    );
 
     const samplePath = join(audioDirectory, "integration-sample.wav");
     await writeTestWav(samplePath);

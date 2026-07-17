@@ -7,7 +7,7 @@ import { RytmAgentService } from "../src/service/RytmAgentService.ts";
 test("exposes the initial Rytm MCP tool surface", () => {
   const adapter = new RytmMcpAdapter(new RytmAgentService());
   const tools = adapter.listTools();
-  assert.equal(tools.length, 29);
+  assert.equal(tools.length, 31);
   assert.ok(tools.some((tool) => tool.name === "rytm_daemon_health"));
   assert.ok(tools.some((tool) => tool.name === "rytm_inspect_track_sound"));
   assert.ok(tools.some((tool) => tool.name === "rytm_queue_operations"));
@@ -21,6 +21,8 @@ test("exposes the initial Rytm MCP tool surface", () => {
   assert.ok(tools.some((tool) => tool.name === "rytm_set_performance_macro"));
   assert.ok(tools.some((tool) => tool.name === "rytm_inspect_song"));
   assert.ok(tools.some((tool) => tool.name === "rytm_propose_song_delta"));
+  assert.ok(tools.some((tool) => tool.name === "rytm_inspect_overbridge_audio"));
+  assert.ok(tools.some((tool) => tool.name === "rytm_capture_multitrack_audio"));
 });
 
 test("routes health and compact inspection through an optional daemon boundary", async () => {
@@ -34,6 +36,8 @@ test("routes health and compact inspection through an optional daemon boundary",
     async inspectKit() { return { source: "rust-daemon", object: "kit" }; },
     async inspectSound(track: string) { return { source: "rust-daemon", object: "sound", track }; },
     async inspectGlobal() { return { source: "rust-daemon", object: "global" }; },
+    async inspectOverbridgeAudio() { return { source: "rust-daemon", object: "overbridge" }; },
+    async captureMultitrackAudio() { return { source: "rust-daemon", object: "multitrack" }; },
   } as RytmDaemonApi;
   const adapter = new RytmMcpAdapter(service, daemon);
 
@@ -46,6 +50,8 @@ test("routes health and compact inspection through an optional daemon boundary",
   assert.deepEqual(await adapter.callTool("rytm_inspect_kit", {}), { source: "rust-daemon", object: "kit" });
   assert.deepEqual(await adapter.callTool("rytm_inspect_track_sound", { track: "CH" }), { source: "rust-daemon", object: "sound", track: "CH" });
   assert.deepEqual(await adapter.callTool("rytm_inspect_global", {}), { source: "rust-daemon", object: "global" });
+  assert.deepEqual(await adapter.callTool("rytm_inspect_overbridge_audio", {}), { source: "rust-daemon", object: "overbridge" });
+  assert.deepEqual(await adapter.callTool("rytm_capture_multitrack_audio", { durationMs: 100 }), { source: "rust-daemon", object: "multitrack" });
 });
 
 test("dispatches MCP-style calls to the Rytm service", async () => {

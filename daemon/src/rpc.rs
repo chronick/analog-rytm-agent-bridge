@@ -9,6 +9,7 @@ use crate::{
     hardware_description,
     hardware_scheduler::ClockSource,
     mock_description,
+    overbridge::{CaptureMultitrackRequest, OverbridgeAudioService},
     state::MockBridgeState,
 };
 use serde::{Deserialize, Serialize};
@@ -27,7 +28,7 @@ const REPLAY_CACHE_LIMIT: usize = 1024;
 const TRACK_NAMES: [&str; 12] = [
     "BD", "SD", "RS", "CP", "BT", "LT", "MT", "HT", "CH", "OH", "CY", "CB",
 ];
-pub const DECLARED_METHODS: [&str; 30] = [
+pub const DECLARED_METHODS: [&str; 32] = [
     "daemon.health",
     "daemon.describe",
     "device.inspect_state",
@@ -58,11 +59,13 @@ pub const DECLARED_METHODS: [&str; 30] = [
     "audio.start_recording",
     "audio.stop_recording",
     "audio.capture_pattern",
+    "audio.inspect_overbridge",
+    "audio.capture_multitrack",
 ];
 
-pub const MOCK_IMPLEMENTED_METHODS: [&str; 30] = DECLARED_METHODS;
+pub const MOCK_IMPLEMENTED_METHODS: [&str; 32] = DECLARED_METHODS;
 
-pub const HARDWARE_IMPLEMENTED_METHODS: [&str; 30] = DECLARED_METHODS;
+pub const HARDWARE_IMPLEMENTED_METHODS: [&str; 32] = DECLARED_METHODS;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -122,6 +125,7 @@ struct CachedResponse {
 pub struct RpcServer {
     backend: Backend,
     audio: AudioService,
+    overbridge: OverbridgeAudioService,
     replay_cache: HashMap<String, CachedResponse>,
     replay_order: VecDeque<String>,
     emitted_event_cursor: u64,
@@ -148,6 +152,14 @@ impl RpcServer {
         Ok(Self {
             backend,
             audio: AudioService::new(
+                match mode {
+                    BackendMode::Mock => AudioMode::Mock,
+                    BackendMode::Hardware => AudioMode::Hardware,
+                },
+                audio_directory.to_path_buf(),
+                port_match.to_string(),
+            ),
+            overbridge: OverbridgeAudioService::new(
                 match mode {
                     BackendMode::Mock => AudioMode::Mock,
                     BackendMode::Hardware => AudioMode::Hardware,
@@ -511,6 +523,17 @@ impl RpcServer {
                     .capture_pattern_audio(input, context)
                     .map_err(RpcDispatchError::audio)
             }
+            "audio.inspect_overbridge" => self
+                .overbridge
+                .inspect_provider()
+                .map_err(RpcDispatchError::audio),
+            "audio.capture_multitrack" => {
+                let input = parse_params::<CaptureMultitrackRequest>(&request.params)?;
+                let context = self.recording_context()?;
+                self.overbridge
+                    .capture_multitrack(input, context)
+                    .map_err(RpcDispatchError::audio)
+            }
             "test.advance_mock_transport" => match &mut self.backend {
                 Backend::Mock(state) => state
                     .advance_transport(&request.params)
@@ -794,6 +817,7 @@ impl RpcDispatchError {
 
     fn audio(message: String) -> Self {
         let lower = message.to_ascii_lowercase();
+        let is_unavailable = lower.contains("overbridge multitrack unavailable");
         let is_validation = lower.contains("must be")
             || lower.contains("may contain only")
             || lower.contains("already active")
@@ -805,7 +829,9 @@ impl RpcDispatchError {
             || lower.contains("could not enumerate coreaudio")
             || lower.contains("timed out");
         Self {
-            code: if is_validation {
+            code: if is_unavailable {
+                "capability_unavailable"
+            } else if is_validation {
                 "validation_failed"
             } else if is_connection {
                 "audio_disconnected"
@@ -813,7 +839,7 @@ impl RpcDispatchError {
                 "audio_error"
             },
             message,
-            retryable: is_connection,
+            retryable: is_unavailable || is_connection,
             details: None,
         }
     }
@@ -1174,5 +1200,15 @@ mod tests {
             rollback.details.unwrap()["acknowledgement"],
             "rollback_verified"
         );
+    }
+
+    #[test]
+    fn classifies_overbridge_mode_as_a_retryable_optional_capability() {
+        let unavailable = RpcDispatchError::audio(
+            "Overbridge multitrack unavailable: the Rytm exposes only class-compliant stereo"
+                .to_string(),
+        );
+        assert_eq!(unavailable.code, "capability_unavailable");
+        assert!(unavailable.retryable);
     }
 }

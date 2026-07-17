@@ -4,6 +4,7 @@ import type {
   RytmAudioRecording,
   RytmBridgeState,
   RytmCapturePatternAudioInput,
+  RytmCaptureMultitrackAudioInput,
   RytmChangePatternInput,
   RytmClearSampleRamInput,
   RytmClearedSampleRam,
@@ -13,6 +14,8 @@ import type {
   RytmOperationSetInput,
   RytmPatternDeltaInput,
   RytmPatternSummary,
+  RytmMultitrackRecording,
+  RytmOverbridgeProviderInventory,
   RytmPersistentOperation,
   RytmResolveSampleRamInput,
   RytmResolvedSampleRam,
@@ -124,6 +127,8 @@ export interface RytmDaemonApi {
   startRecording(input?: RytmStartRecordingInput): Promise<RytmAudioRecording>;
   stopRecording(input: RytmStopRecordingInput): Promise<RytmAudioRecording>;
   capturePatternAudio(input: RytmCapturePatternAudioInput): Promise<RytmAudioRecording>;
+  inspectOverbridgeAudio(): Promise<RytmOverbridgeProviderInventory>;
+  captureMultitrackAudio(input: RytmCaptureMultitrackAudioInput): Promise<RytmMultitrackRecording>;
 }
 import type {
   QueuedRytmOperationSet,

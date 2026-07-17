@@ -74,6 +74,8 @@ Implemented for both mock and hardware adapters:
 - `audio.start_recording`
 - `audio.stop_recording`
 - `audio.capture_pattern`
+- `audio.inspect_overbridge`
+- `audio.capture_multitrack`
 
 Also implemented by both adapters:
 
@@ -88,6 +90,8 @@ Also implemented by both adapters:
 The mock adapter also has `test.advance_mock_transport` and `test.delay` methods for deterministic scheduler and disconnect tests. They are not MCP tools.
 
 `audio.start_recording` starts a nonblocking capture. An identical explicit `recordingId` and start declaration replays the original acknowledgement; conflicting start parameters reject. `audio.stop_recording` finalizes the WAV and sidecar and replays a completed result for the same ID. `audio.capture_pattern` performs a bounded blocking capture. The daemon supplies Pattern, Kit, revision, tempo, routing, timestamps, and snapshot context from authoritative state rather than accepting those fields from the caller.
+
+`audio.inspect_overbridge` always returns provider state and never requires Overbridge to be available. `audio.capture_multitrack` performs a bounded capture from one recognized 10/12/18/20-channel CoreAudio stream and emits synchronized per-bus WAVs plus shared metadata. A stereo-only device returns retryable `capability_unavailable`. See [OVERBRIDGE_AUDIO.md](OVERBRIDGE_AUDIO.md).
 
 Hardware `operations.apply_now` and `operations.queue` support persistent Pattern, Sound, machine, Kit, FX, Global, routing, MIDI, sequencer, Settings, Scene/Performance definitions, Song definitions, and identity-checked sample-assignment deltas. Realtime RPC supports track notes, transport, program change, validated `track_level` through CC 95 or NRPN 1:100, active Scene selection, and Performance amounts.
 

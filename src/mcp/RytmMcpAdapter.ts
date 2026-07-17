@@ -1,5 +1,6 @@
 import type {
   RytmCapturePatternAudioInput,
+  RytmCaptureMultitrackAudioInput,
   RytmChangePatternInput,
   RytmClearSampleRamInput,
   RytmInspectSongInput,
@@ -327,6 +328,16 @@ export class RytmMcpAdapter {
         inputSchema: recordingSchema(true),
       },
       {
+        name: "rytm_inspect_overbridge_audio",
+        description: "Inspect optional Overbridge installation, engine ownership, device mode, channel layout, and capture availability.",
+        inputSchema: emptyInput,
+      },
+      {
+        name: "rytm_capture_multitrack_audio",
+        description: "Capture synchronized Overbridge Main, voice-group, and available input stems with shared Rytm metadata.",
+        inputSchema: recordingSchema(true),
+      },
+      {
         name: "rytm_get_events",
         description: "Read the Rytm bridge event journal after an optional cursor.",
         inputSchema: {
@@ -438,6 +449,12 @@ export class RytmMcpAdapter {
       case "rytm_capture_pattern_audio":
         if (!this.daemon) throw new Error("Rust Rytm daemon is required for audio capture");
         return this.daemon.capturePatternAudio(args as RytmCapturePatternAudioInput);
+      case "rytm_inspect_overbridge_audio":
+        if (!this.daemon) throw new Error("Rust Rytm daemon is required for Overbridge discovery");
+        return this.daemon.inspectOverbridgeAudio();
+      case "rytm_capture_multitrack_audio":
+        if (!this.daemon) throw new Error("Rust Rytm daemon is required for Overbridge capture");
+        return this.daemon.captureMultitrackAudio(args as RytmCaptureMultitrackAudioInput);
       case "rytm_get_events": {
         const input = args as { afterCursor?: number; limit?: number };
         return this.daemon

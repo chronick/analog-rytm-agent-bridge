@@ -17,6 +17,7 @@ import type {
   RytmAudioRecording,
   RytmBridgeState,
   RytmCapturePatternAudioInput,
+  RytmCaptureMultitrackAudioInput,
   RytmChangePatternInput,
   RytmClearSampleRamInput,
   RytmClearedSampleRam,
@@ -26,6 +27,8 @@ import type {
   RytmOperationSetInput,
   RytmPatternDeltaInput,
   RytmPatternSummary,
+  RytmMultitrackRecording,
+  RytmOverbridgeProviderInventory,
   RytmPersistentOperation,
   RytmRollbackInput,
   RytmSampleInventory,
@@ -277,6 +280,14 @@ export class RustDaemonClient implements RytmDaemonApi {
 
   async capturePatternAudio(input: RytmCapturePatternAudioInput): Promise<RytmAudioRecording> {
     return this.request("audio.capture_pattern", input as unknown as Record<string, unknown>);
+  }
+
+  async inspectOverbridgeAudio(): Promise<RytmOverbridgeProviderInventory> {
+    return this.request("audio.inspect_overbridge");
+  }
+
+  async captureMultitrackAudio(input: RytmCaptureMultitrackAudioInput): Promise<RytmMultitrackRecording> {
+    return this.request("audio.capture_multitrack", input as unknown as Record<string, unknown>);
   }
 
   async advanceMockTransport(steps = 1): Promise<RytmTransportState> {

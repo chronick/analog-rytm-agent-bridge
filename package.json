@@ -11,6 +11,7 @@
     "demo": "node --experimental-transform-types src/bin/mock-demo.ts",
     "hardware:control": "node --experimental-transform-types src/bin/verify-hardware-control.ts",
     "hardware:macros": "node --experimental-transform-types src/bin/verify-hardware-macros.ts",
+    "hardware:overbridge": "node --experimental-transform-types src/bin/verify-hardware-overbridge.ts",
     "hardware:audio": "node --experimental-transform-types src/bin/verify-hardware-audio.ts",
     "hardware:samples": "node --experimental-transform-types src/bin/verify-hardware-samples.ts",
     "hardware:songs": "node --experimental-transform-types src/bin/verify-hardware-songs.ts",

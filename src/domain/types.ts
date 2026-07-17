@@ -614,6 +614,118 @@ export interface RytmCapturePatternAudioInput extends RytmStartRecordingInput {
   durationMs: number;
 }
 
+export interface RytmCaptureMultitrackAudioInput {
+  recordingId?: string;
+  deviceName?: string;
+  snapshotId?: RytmSnapshotId;
+  durationMs: number;
+}
+
+export interface RytmOverbridgeBus {
+  id: string;
+  name: string;
+  tracks: RytmTrackId[];
+  sourceChannelIndices: number[];
+  channels: number;
+}
+
+export interface RytmOverbridgeProviderInventory {
+  schema: "analog-rytm-overbridge-provider.v1";
+  provider: {
+    id: "elektron-overbridge-coreaudio";
+    name: "Elektron Overbridge";
+    kind: "coreaudio_hal";
+    optional: true;
+    controlDependency: false;
+  };
+  available: boolean;
+  deviceMode: "mock" | "overbridge" | "class_compliant" | "unavailable";
+  selectedDevice?: {
+    id: string;
+    name: string;
+    channels?: number;
+    sampleRate?: number;
+    sampleFormat?: string;
+    layout?: RytmOverbridgeBus[];
+  } | null;
+  installation: {
+    driverInstalled: boolean;
+    pluginInstalled: boolean;
+    engineInstalled: boolean;
+    engineRunning?: boolean | null;
+    version?: string | null;
+  };
+  expectedBuses: RytmOverbridgeBus[];
+  stalePartialFiles: string[];
+  outputDirectory: string;
+}
+
+export interface RytmMultitrackStem {
+  id: string;
+  name: string;
+  tracks: RytmTrackId[];
+  sourceChannelIndices: number[];
+  channels: number;
+  path: string;
+  frames: number;
+  durationMs: number;
+  bytes: number;
+  analysis: {
+    peak: number;
+    rms: number;
+    silence: boolean;
+    clipping: boolean;
+    clippedSamples: number;
+  };
+}
+
+export interface RytmMultitrackRecording {
+  schema: "analog-rytm-multitrack-recording.v1";
+  recordingId: string;
+  status: "completed" | "failed";
+  declaration: RytmCaptureMultitrackAudioInput;
+  device: {
+    model: string;
+    inputId: string;
+    inputName: string;
+    sourceChannels: number;
+    sampleRate: number;
+    sourceSampleFormat: string;
+  };
+  pattern: RytmPatternSlot;
+  kit: { index?: number; name?: string };
+  revision: RytmRevision;
+  tempo: number;
+  routing: unknown;
+  snapshotId?: RytmSnapshotId | null;
+  stems: RytmMultitrackStem[];
+  synchronization: {
+    clockDomain: "single_coreaudio_input_stream";
+    commonStartFrame: 0;
+    framesPerStem: number;
+    maxFrameDrift: 0;
+    callbackCount: number;
+    timestampGapCount: number;
+    maxTimestampGapMs: number;
+  };
+  latency: {
+    source: "coreaudio_callback_timestamp";
+    samples: number;
+    minimumMs?: number | null;
+    averageMs?: number | null;
+    maximumMs?: number | null;
+  };
+  analysis: {
+    expectedDurationMs: number;
+    durationMs: number;
+    durationWithinTolerance: boolean;
+    disconnected: boolean;
+    droppedBlocks: number;
+  };
+  metadataPath: string;
+  warnings: string[];
+}
+
 export interface RytmAudioRecording {
   schema: "analog-rytm-recording.v1";
   recordingId: string;

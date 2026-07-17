@@ -4,7 +4,7 @@
 
 The implemented audio lane records the Analog Rytm MKII class-compliant USB input as one 48 kHz stereo stream on macOS/CoreAudio. It is suitable for agent analysis, previews, and archival of the current main mix.
 
-This lane does not use Overbridge and does not expose individual tracks. Overbridge multitrack capture and optional plugin automation remain a separate capability so audio software cannot become a dependency of the state-control plane.
+This lane does not use Overbridge and does not expose individual tracks. The optional provider in [OVERBRIDGE_AUDIO.md](OVERBRIDGE_AUDIO.md) captures individual streams through separate RPC/MCP tools so audio software cannot become a dependency of the state-control plane.
 
 ## Device Setup
 

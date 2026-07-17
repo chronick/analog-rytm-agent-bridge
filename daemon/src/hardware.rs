@@ -433,7 +433,7 @@ fn resolve_song_references(
         .filter_map(|position| position["pattern"].as_str())
         .map(str::to_string)
         .collect::<BTreeSet<_>>();
-    let mut kit_names = BTreeMap::new();
+    let mut kit_names = BTreeMap::<u64, String>::new();
     let mut references = Vec::new();
     for slot in slots {
         let index = parse_pattern_slot(&slot)?;
@@ -441,24 +441,26 @@ fn resolve_song_references(
         let pattern = decode_stored_pattern_summary(&raw, index)?;
         let kit_number = pattern["kitNumber"].as_u64().unwrap_or(255);
         let kit_name = if kit_number < 128 {
-            if !kit_names.contains_key(&kit_number) {
-                let raw = query_object(
-                    session,
-                    &KitQuery::new(kit_number as usize).map_err(error_string)?,
-                )?;
-                let mut project = RytmProject::try_default().map_err(error_string)?;
-                project
-                    .update_from_sysex_response(&raw)
-                    .map_err(|error| firmware_decode_error("kit", error))?;
-                kit_names.insert(
-                    kit_number,
-                    project.kits()[kit_number as usize]
+            let name = match kit_names.entry(kit_number) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.get().clone(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    let raw = query_object(
+                        session,
+                        &KitQuery::new(kit_number as usize).map_err(error_string)?,
+                    )?;
+                    let mut project = RytmProject::try_default().map_err(error_string)?;
+                    project
+                        .update_from_sysex_response(&raw)
+                        .map_err(|error| firmware_decode_error("kit", error))?;
+                    let name = project.kits()[kit_number as usize]
                         .name()
                         .trim_end_matches('\0')
-                        .to_string(),
-                );
-            }
-            kit_names.get(&kit_number).cloned()
+                        .to_string();
+                    entry.insert(name.clone());
+                    name
+                }
+            };
+            Some(name)
         } else {
             None
         };

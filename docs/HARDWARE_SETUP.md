@@ -137,6 +137,25 @@ npm run hardware:audio -- --execute --duration-ms=8000
 
 The sidecar records device/input format, Pattern, Kit, revision, tempo, semantic routing, snapshot ID, timestamps, duration, peak/RMS, clipping, dropped blocks, and disconnect status. WAV and JSON files are written as `.partial` files and renamed only after their contents are finalized and synced. See [AUDIO_CAPTURE.md](AUDIO_CAPTURE.md).
 
+## Overbridge Multitrack Certification
+
+Overbridge capture is a separate optional provider. Install and start Elektron Overbridge, close DAWs and standalone/plugin hosts, and select `SETTINGS > SYSTEM > USB CONFIG > OVERBRIDGE` on the Rytm. The mode switch is a manual device workflow and is mutually exclusive with class-compliant `USB AUDIO/MIDI`.
+
+Readiness inspection does not write or record:
+
+```bash
+npm run hardware:overbridge
+```
+
+The execute form snapshots the device, applies a disposable Pattern that exercises all eight physical Rytm voices, records synchronized Main/voice-group/input stems, validates signal, timing, latency, dropout, and disconnect evidence, then restores the raw baseline:
+
+```bash
+npm run hardware:overbridge -- --execute
+npm run hardware:overbridge -- --execute --duration-ms=8000
+```
+
+Return the device to `USB AUDIO/MIDI` after certification when the standalone class-compliant stereo lane is desired. See [OVERBRIDGE_AUDIO.md](OVERBRIDGE_AUDIO.md).
+
 ## Sample Certification
 
 The default command reads +Drive, all RAM slots, and track assignments without writing:

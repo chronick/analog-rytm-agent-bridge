@@ -2,6 +2,7 @@ pub mod audio;
 pub mod hardware;
 pub mod hardware_control;
 pub mod hardware_scheduler;
+pub mod overbridge;
 pub mod rpc;
 pub mod samples;
 pub mod state;

@@ -39,7 +39,9 @@ Persistent operation sets can be queued for next step, beat, measure, pattern, o
 
 ## Audio Lane
 
-The bridge lists CoreAudio inputs and records the Rytm's class-compliant 48 kHz stereo stream through start/stop or bounded-capture tools. Final WAV files have authoritative state sidecars and signal/duration/disconnect analysis. This is one Main/selected stereo pair; individual Overbridge streams are not part of this lane.
+The bridge lists CoreAudio inputs and records the Rytm's class-compliant 48 kHz stereo stream through start/stop or bounded-capture tools. Final WAV files have authoritative state sidecars and signal/duration/disconnect analysis.
+
+The separate optional Overbridge provider reports installation, Engine ownership, current USB mode, channel layout, and availability without affecting bridge startup. Its bounded capture deinterleaves one multichannel CoreAudio stream into synchronized Main, eight physical voice-group, and optional external-input WAVs with shared state, latency, timestamp-gap, dropout, drift, and disconnect evidence. See [OVERBRIDGE_AUDIO.md](OVERBRIDGE_AUDIO.md).
 
 ## Sample Lane
 
@@ -51,6 +53,6 @@ Filesystem writes require stopped transport and are intended for preparation, no
 
 ## Capability Gaps
 
-- Overbridge is not a control dependency. Class-compliant stereo capture is implemented; Overbridge multitrack capture is a separate milestone.
+- Overbridge is not a control dependency. Its provider and mock capture are implemented; hardware certification requires the Rytm to be placed in mutually exclusive Overbridge USB mode.
 - Song tempo overrides, Pattern-length overrides, jumps, loops, row labels, explicit end markers, and Song activation are disabled because the maintained codec does not yet model them. Definition control is independent of transport and Pattern selection.
 - The fork targets firmware 1.70. Successful connected-device round trips are recorded as compatibility evidence, not universal certification for later firmware.

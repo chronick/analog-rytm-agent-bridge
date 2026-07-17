@@ -33,6 +33,8 @@ npm run hardware:control
 npm run hardware:control -- --execute
 npm run hardware:macros
 npm run hardware:macros -- --execute
+npm run hardware:overbridge
+npm run hardware:overbridge -- --execute
 npm run hardware:audio
 npm run hardware:audio -- --execute
 npm run hardware:samples
@@ -73,6 +75,7 @@ Both modes use the same request/response/event protocol. The hardware adapter re
 See [docs/HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md) before running write tests.
 See [docs/CONTROL_SURFACE.md](docs/CONTROL_SURFACE.md) for the current control matrix.
 See [docs/AUDIO_CAPTURE.md](docs/AUDIO_CAPTURE.md) for the stereo capture contract and its separation from Overbridge.
+See [docs/OVERBRIDGE_AUDIO.md](docs/OVERBRIDGE_AUDIO.md) for optional synchronized multitrack discovery and capture.
 See [docs/SAMPLE_MANAGEMENT.md](docs/SAMPLE_MANAGEMENT.md) for sample identity, transfer, RAM resolution, assignment, and rollback boundaries.
 
 ## Current Slice
