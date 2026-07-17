@@ -17,6 +17,7 @@ Pattern, Kit, Global, and Settings work-buffer messages all decoded successfully
 | Lane | Exercise | Verification |
 | --- | --- | --- |
 | Inspect | Pattern, Kit, Global, Settings queries | Compact summaries decoded from device SysEx |
+| Daemon RPC | Long-running `hardware` adapter health and `device.inspect_state` | TypeScript-facing protocol returned `ready` and a compact A01/Kit/Global/Settings summary over one CoreMIDI session |
 | Snapshot | Raw object capture | `.syx` baselines retained in ignored run directories |
 | MIDI config | Enable owned receive fields | Global re-query matched desired state |
 | Idempotency | Repeat identical config and pattern declarations | Reported `changed: false` with no write |
@@ -44,7 +45,7 @@ The final state capture showed A01 selected, 120 BPM, Kit 1 track levels restore
 - The bridge normalizes the `rytm-rs` microtiming enum offset and ignores empty parameter-lock bytes unless the associated parameter-lock flag is enabled.
 - Raw SysEx fingerprints can differ after a rollback/reapply cycle while compact semantic summaries are equal. Idempotency therefore compares owned semantic state, not opaque object bytes.
 - Machines, scenes, performance macros, songs, samples, Overbridge automation, and exhaustive parameter mappings were not exercised.
-- Persistent writes currently run through the Rust CLI immediately. Device-clock-derived boundary scheduling and TypeScript/MCP dispatch remain future work.
+- TypeScript/MCP health and compact inspection can now use the Rust daemon. Persistent writes still run through the Rust CLI immediately; daemon-backed mutation and device-clock-derived boundary scheduling remain future work.
 
 ## Evidence Directories
 
