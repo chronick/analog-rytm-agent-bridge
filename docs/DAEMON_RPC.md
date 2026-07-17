@@ -35,13 +35,13 @@ Failure:
 {"schema":"analog-rytm-rpc.v1","id":"request-1","ok":false,"error":{"code":"validation_failed","message":"pattern slot must be A01 through H16","retryable":false}}
 ```
 
-Reserved asynchronous event envelope:
+Asynchronous event envelope:
 
 ```json
 {"schema":"analog-rytm-rpc.v1","eventId":"event-1","type":"operation_set.applied","payload":{}}
 ```
 
-Events are part of the versioned contract but are not emitted in the current read-only slice.
+After a successful state-changing response, the daemon emits the resulting acknowledgement and state events as separate envelopes. The TypeScript client exposes these through `onEvent`; `events.read` provides cursor-based catch-up in mock mode.
 
 ## Method Registry
 
@@ -51,10 +51,11 @@ Implemented for both mock and hardware adapters:
 - `daemon.describe`
 - `device.inspect_state`
 - `pattern.inspect`
-
-Declared for subsequent process-boundary patches:
-
 - `operations.validate`
+- `state.reconcile`
+
+Also implemented by the mock adapter:
+
 - `operations.propose`
 - `operations.queue`
 - `operations.apply_now`
@@ -65,9 +66,10 @@ Declared for subsequent process-boundary patches:
 - `snapshot.create`
 - `snapshot.rollback`
 - `events.read`
-- `state.reconcile`
 
-Declared methods return `not_implemented` until they have a tested daemon implementation. `daemon.health` reports both lists so callers do not infer support from schema presence.
+The mock adapter also has `test.advance_mock_transport` and `test.delay` methods for deterministic scheduler and disconnect tests. They are not MCP tools.
+
+Hardware mutation methods return `capability_unavailable` until they have verified snapshot, write, readback, and rollback behavior. `daemon.health` reports adapter-specific implemented methods so callers do not infer hardware support from protocol presence.
 
 ## Idempotency And Failure
 
@@ -79,7 +81,14 @@ Declared methods return `not_implemented` until they have a tested daemon implem
 - A process exit or broken pipe returns `daemon_disconnected` and is retryable unless the client intentionally closed the daemon.
 - Hardware query failures return `hardware_error` and are retryable.
 - Schema, envelope, and domain validation failures are not retryable without changing the request.
+- Replaying a state-changing request does not emit duplicate events.
+
+## Restart And Reconciliation
+
+The TypeScript client can start a new process after an unexpected disconnect. Mock queue, snapshot, event, and revision state is currently in memory and starts fresh with the new process. Hardware `state.reconcile` re-queries Pattern, Kit, Global, and Settings from the connected device.
+
+Durable daemon-owned queue and snapshot recovery is intentionally not claimed yet. Callers must inspect/reconcile after a restart before submitting revision-checked writes.
 
 ## Safety
 
-The RPC hardware methods in this slice only query device state. Existing state-changing harness commands remain separate and still require their explicit `--execute` flag. Mutation methods will not be marked implemented until they preserve snapshots, readback verification, revision checks, and rollback behavior across this boundary.
+The implemented RPC hardware methods only query or validate device state. Existing state-changing harness commands remain separate and still require their explicit `--execute` flag. Mutation methods will not be marked implemented until they preserve snapshots, readback verification, revision checks, and rollback behavior across this boundary.

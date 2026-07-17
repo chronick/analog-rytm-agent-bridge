@@ -17,9 +17,9 @@ The repo contains three connected vertical slices:
 
 - a hardware-independent TypeScript control plane with a mock Rytm transport;
 - a Rust/CoreMIDI hardware harness for bidirectional SysEx inspection, realtime MIDI, declarative configuration, verified pattern writes, snapshots, and rollback.
-- a versioned JSON-lines process boundary that connects TypeScript health and compact inspection tools to a long-running Rust mock or hardware daemon.
+- a versioned JSON-lines process boundary that connects every TypeScript semantic tool to a long-running Rust mock or hardware daemon.
 
-Persistent mutations and musical-boundary scheduling still run in the TypeScript mock service. They are declared in the daemon protocol but return `not_implemented` until their state ownership moves behind the Rust boundary.
+The Rust mock daemon owns revisioned deltas, dry runs, queue scheduling, snapshots, rollback, realtime state, reconciliation, and event acknowledgements. The original TypeScript mock service remains as a daemon-free fallback and parity reference. Hardware mutation methods use the same RPC names but return `capability_unavailable` until their write, readback, snapshot, and rollback paths are verified.
 
 ## Commands
 
@@ -56,7 +56,7 @@ Run the hardware-backed daemon with its default CoreMIDI port match:
 cargo run --manifest-path daemon/Cargo.toml -- serve --adapter hardware
 ```
 
-Both modes use the same request/response protocol. The hardware adapter opens one long-lived MIDI session and the currently implemented RPC methods are read-only. See [docs/DAEMON_RPC.md](docs/DAEMON_RPC.md).
+Both modes use the same request/response/event protocol. The hardware adapter opens one long-lived MIDI session; its implemented RPC methods are read-only inspection, validation, and reconciliation. See [docs/DAEMON_RPC.md](docs/DAEMON_RPC.md).
 
 See [docs/HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md) before running write tests.
 
@@ -74,6 +74,9 @@ Implemented:
 - expose a standalone MCP-style adapter surface;
 - start, monitor, and close a long-running Rust daemon from TypeScript;
 - route daemon health and compact state/pattern inspection through versioned JSON-lines RPC;
+- route validation, deltas, queues, realtime gestures, snapshots, rollback, reconciliation, and event reads through Rust in mock mode;
+- emit asynchronous acknowledgement/state events with monotonic cursors;
+- reject in-flight work on daemon disconnect and support a clean process restart;
 - replay identical request IDs and reject conflicting ID reuse;
 - discover the Analog Rytm through CoreMIDI;
 - query and compactly summarize pattern, kit, global, and settings work buffers;
@@ -84,7 +87,8 @@ Implemented:
 
 Not implemented yet:
 
-- mutation, queue, snapshot, rollback, and event dispatch across TypeScript-to-Rust RPC;
+- hardware mutation, queue, snapshot, rollback, and event dispatch across TypeScript-to-Rust RPC;
+- durable daemon queue/snapshot recovery after a process restart;
 - device-derived musical-boundary scheduling for persistent hardware edits;
 - broad parameter and machine compatibility coverage;
 - Overbridge or DAW automation;
