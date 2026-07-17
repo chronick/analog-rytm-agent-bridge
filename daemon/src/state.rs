@@ -69,7 +69,25 @@ pub enum PersistentOperation {
         #[serde(default)]
         track: Option<String>,
         parameter: String,
-        value: f64,
+        value: Value,
+    },
+    SetSoundParameter {
+        track: String,
+        page: String,
+        parameter: String,
+        value: Value,
+    },
+    SetFxParameter {
+        effect: String,
+        parameter: String,
+        value: Value,
+    },
+    SetGlobalParameter {
+        section: String,
+        parameter: String,
+        #[serde(default)]
+        track: Option<String>,
+        value: Value,
     },
     AssignSampleSlot {
         #[serde(default)]
@@ -208,7 +226,7 @@ struct Pattern {
     track_lengths: BTreeMap<String, u8>,
     machines: BTreeMap<String, String>,
     sample_slots: BTreeMap<String, SampleSlot>,
-    kit_parameters: BTreeMap<String, f64>,
+    kit_parameters: BTreeMap<String, Value>,
     trigs: HashMap<String, Trig>,
 }
 
@@ -299,6 +317,67 @@ impl MockBridgeState {
                 .cloned()
                 .unwrap_or_else(|| empty_pattern(slot)),
         ))
+    }
+
+    pub fn inspect_kit(&self) -> Value {
+        json!({
+            "index": 0,
+            "name": "MOCK KIT",
+            "structureVersion": 5,
+            "trackLevels": vec![100; 12],
+            "retrig": TRACK_NAMES.iter().map(|track| json!({
+                "track": track,
+                "parameters": { "rate": "R1_16", "length": 0, "velocityCurve": 0, "alwaysOn": false },
+            })).collect::<Vec<_>>(),
+            "sounds": TRACK_NAMES.iter().enumerate().map(|(index, _)| self.inspect_sound(index)).collect::<Vec<_>>(),
+            "fx": {
+                "delay": {}, "reverb": {}, "distortion": {}, "compressor": {}, "lfo": {},
+            },
+            "controlInputs": { "input1": [], "input2": [] },
+        })
+    }
+
+    pub fn inspect_sound(&self, track_index: usize) -> Value {
+        json!({
+            "track": TRACK_NAMES[track_index],
+            "name": format!("MOCK {}", TRACK_NAMES[track_index]),
+            "structureVersion": 5,
+            "machine": if track_index == 0 { "bdhard" } else { "unset" },
+            "machineParameters": {},
+            "accentLevel": 32,
+            "sample": {},
+            "filter": {},
+            "amp": {},
+            "lfo": {},
+            "settings": {},
+        })
+    }
+
+    pub fn inspect_global(&self) -> Value {
+        json!({
+            "global": {
+                "index": 0,
+                "structureVersion": 5,
+                "metronome": {},
+                "midi": {},
+                "sequencer": {},
+                "routing": {
+                    "routeToMainFlags": 4095,
+                    "tracksRoutedToMain": TRACK_NAMES,
+                    "sendToFxFlags": 4095,
+                    "tracksSentToFx": TRACK_NAMES,
+                    "usbIn": "Stereo",
+                    "usbOut": "Stereo",
+                    "usbToMainDb": "Zero",
+                },
+            },
+            "settings": {
+                "structureVersion": 5,
+                "tempo": self.transport.tempo,
+                "selectedTrack": TRACK_NAMES[0],
+                "fixedVelocity": { "enabled": false, "amount": 100 },
+            },
+        })
     }
 
     pub fn validate(&self, params: &Value) -> Result<Value, String> {
@@ -776,7 +855,7 @@ pub fn validation_result(raw: &Value) -> Value {
     json!({ "valid": errors.is_empty(), "errors": errors, "warnings": [] })
 }
 
-fn parse_operation_set(params: &Value) -> Result<OperationSetInput, String> {
+pub fn parse_operation_set(params: &Value) -> Result<OperationSetInput, String> {
     let input: OperationSetInput = serde_json::from_value(params.clone())
         .map_err(|error| format!("invalid operation set: {error}"))?;
     if input.operations.is_empty() {
@@ -792,7 +871,7 @@ fn parse_operation_set(params: &Value) -> Result<OperationSetInput, String> {
     Ok(input)
 }
 
-fn parse_operations(raw: &Value) -> Result<Vec<PersistentOperation>, String> {
+pub fn parse_operations(raw: &Value) -> Result<Vec<PersistentOperation>, String> {
     let validation = validation_result(raw);
     if validation["valid"] != Value::Bool(true) {
         return Err(validation["errors"]
@@ -911,7 +990,56 @@ fn validate_operation(operation: &PersistentOperation) -> Result<(), String> {
                 validate_track(track)?;
             }
             validate_safe_id(parameter, "parameter")?;
-            validate_finite_range(*value, "value", 0.0, 127.0)?;
+            validate_control_value(value, "value")?;
+        }
+        PersistentOperation::SetSoundParameter {
+            track,
+            page,
+            parameter,
+            value,
+        } => {
+            validate_track(track)?;
+            if !["machine", "sample", "filter", "amp", "lfo", "settings"].contains(&page.as_str()) {
+                return Err("unsupported Sound page".to_string());
+            }
+            validate_safe_id(parameter, "parameter")?;
+            validate_control_value(value, "value")?;
+        }
+        PersistentOperation::SetFxParameter {
+            effect,
+            parameter,
+            value,
+        } => {
+            if !["delay", "reverb", "distortion", "compressor", "lfo"].contains(&effect.as_str()) {
+                return Err("unsupported Kit FX effect".to_string());
+            }
+            validate_safe_id(parameter, "parameter")?;
+            validate_control_value(value, "value")?;
+        }
+        PersistentOperation::SetGlobalParameter {
+            section,
+            parameter,
+            track,
+            value,
+        } => {
+            if ![
+                "routing",
+                "metronome",
+                "midi_sync",
+                "midi_port",
+                "midi_channels",
+                "sequencer",
+                "settings",
+            ]
+            .contains(&section.as_str())
+            {
+                return Err("unsupported Global section".to_string());
+            }
+            if let Some(track) = track {
+                validate_track(track)?;
+            }
+            validate_safe_id(parameter, "parameter")?;
+            validate_control_value(value, "value")?;
         }
         PersistentOperation::AssignSampleSlot { .. } => {
             return Err("device capability is not enabled: sampleSlotAssignment".to_string());
@@ -1040,7 +1168,42 @@ fn apply_operations(
                     .map_or_else(|| parameter.clone(), |track| format!("{track}.{parameter}"));
                 ensure_pattern(patterns, active_pattern)
                     .kit_parameters
-                    .insert(key, *value);
+                    .insert(key, value.clone());
+            }
+            PersistentOperation::SetSoundParameter {
+                track,
+                page,
+                parameter,
+                value,
+            } => {
+                ensure_pattern(patterns, active_pattern)
+                    .kit_parameters
+                    .insert(format!("sound.{track}.{page}.{parameter}"), value.clone());
+            }
+            PersistentOperation::SetFxParameter {
+                effect,
+                parameter,
+                value,
+            } => {
+                ensure_pattern(patterns, active_pattern)
+                    .kit_parameters
+                    .insert(format!("fx.{effect}.{parameter}"), value.clone());
+            }
+            PersistentOperation::SetGlobalParameter {
+                section,
+                parameter,
+                track,
+                value,
+            } => {
+                let track = track
+                    .as_deref()
+                    .map_or(String::new(), |track| format!(".{track}"));
+                ensure_pattern(patterns, active_pattern)
+                    .kit_parameters
+                    .insert(
+                        format!("global.{section}{track}.{parameter}"),
+                        value.clone(),
+                    );
             }
             PersistentOperation::AssignSampleSlot {
                 pattern,
@@ -1183,6 +1346,17 @@ fn validate_safe_atom(value: &str, label: &str) -> Result<(), String> {
         return Err(format!("{label} cannot contain whitespace or semicolons"));
     }
     Ok(())
+}
+
+fn validate_control_value(value: &Value, label: &str) -> Result<(), String> {
+    match value {
+        Value::Number(number) if number.as_f64().is_some_and(f64::is_finite) => Ok(()),
+        Value::String(value) => validate_safe_atom(value, label),
+        Value::Bool(_) => Ok(()),
+        _ => Err(format!(
+            "{label} must be a finite number, boolean, or enum string"
+        )),
+    }
 }
 
 fn validate_u64_range(value: u64, label: &str, minimum: u64, maximum: u64) -> Result<u64, String> {

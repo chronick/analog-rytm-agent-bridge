@@ -1,8 +1,16 @@
+use crate::state::PersistentOperation;
 use midir::{Ignore, MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 use rytm_rs::{
-    object::{global::Global, pattern::Pattern},
+    object::{
+        global::Global,
+        kit::Kit,
+        pattern::Pattern,
+        settings::Settings,
+        sound::{machine::MachineParameterValue, Sound},
+    },
     prelude::*,
 };
+use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -34,6 +42,42 @@ pub struct StateCapture {
     pub kit_raw: Vec<u8>,
     pub global_raw: Vec<u8>,
     pub settings_raw: Vec<u8>,
+}
+
+#[derive(Clone)]
+pub struct RawState {
+    pub pattern_raw: Vec<u8>,
+    pub kit_raw: Vec<u8>,
+    pub global_raw: Vec<u8>,
+    pub settings_raw: Vec<u8>,
+    pub summary: Value,
+}
+
+impl RawState {
+    pub fn from_capture(capture: &StateCapture) -> Self {
+        Self {
+            pattern_raw: capture.pattern_raw.clone(),
+            kit_raw: capture.kit_raw.clone(),
+            global_raw: capture.global_raw.clone(),
+            settings_raw: capture.settings_raw.clone(),
+            summary: state_summary(&capture.project),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangedObjects {
+    pub pattern: bool,
+    pub kit: bool,
+    pub global: bool,
+    pub settings: bool,
+}
+
+impl ChangedObjects {
+    pub fn any(self) -> bool {
+        self.pattern || self.kit || self.global || self.settings
+    }
 }
 
 impl RytmMidiSession {
@@ -217,6 +261,965 @@ pub fn capture_state(session: &mut RytmMidiSession, directory: &Path) -> Hardwar
 pub fn inspect_work_buffer_state(session: &mut RytmMidiSession) -> HardwareResult<Value> {
     let capture = read_work_buffer_state(session)?;
     Ok(state_summary(&capture.project))
+}
+
+pub fn apply_persistent_operations(
+    capture: &mut StateCapture,
+    operations: &[PersistentOperation],
+) -> HardwareResult<ChangedObjects> {
+    let before = canonical_state_summary(&capture.project)?;
+    for operation in operations {
+        apply_persistent_operation(&mut capture.project, operation)?;
+    }
+    let after = canonical_state_summary(&capture.project)?;
+    Ok(ChangedObjects {
+        pattern: before["pattern"] != after["pattern"],
+        kit: before["kit"] != after["kit"],
+        global: before["global"] != after["global"],
+        settings: before["settings"] != after["settings"],
+    })
+}
+
+pub fn write_capture_delta(
+    session: &mut RytmMidiSession,
+    capture: &StateCapture,
+    baseline: &RawState,
+    changed: ChangedObjects,
+) -> HardwareResult<Value> {
+    let expected = canonical_state_summary(&capture.project)?;
+    if !changed.any() {
+        return Ok(json!({
+            "status": "already-converged",
+            "changed": changed,
+            "state": expected,
+        }));
+    }
+
+    let write_result: HardwareResult<Value> = (|| {
+        send_changed_project(session, &capture.project, changed)?;
+        let observed = inspect_work_buffer_state(session)?;
+        verify_changed_sections(&expected, &observed, changed)?;
+        Ok(observed)
+    })();
+
+    match write_result {
+        Ok(observed) => Ok(json!({
+            "status": "applied-and-verified",
+            "changed": changed,
+            "state": observed,
+        })),
+        Err(write_error) => match restore_raw_state(session, baseline, changed) {
+            Ok(_) => Err(format!(
+                "hardware write failed and baseline was restored: {write_error}"
+            )),
+            Err(rollback_error) => Err(format!(
+                "hardware write failed: {write_error}; automatic rollback also failed: {rollback_error}"
+            )),
+        },
+    }
+}
+
+pub fn restore_raw_state(
+    session: &mut RytmMidiSession,
+    raw: &RawState,
+    changed: ChangedObjects,
+) -> HardwareResult<Value> {
+    if changed.pattern {
+        session.send(&raw.pattern_raw)?;
+        thread::sleep(Duration::from_millis(450));
+    }
+    if changed.kit {
+        session.send(&raw.kit_raw)?;
+        thread::sleep(Duration::from_millis(450));
+    }
+    if changed.global {
+        session.send(&raw.global_raw)?;
+        thread::sleep(Duration::from_millis(450));
+    }
+    if changed.settings {
+        session.send(&raw.settings_raw)?;
+        thread::sleep(Duration::from_millis(450));
+    }
+    let observed = inspect_work_buffer_state(session)?;
+    verify_changed_sections(&raw.summary, &observed, changed)?;
+    Ok(observed)
+}
+
+fn send_changed_project(
+    session: &mut RytmMidiSession,
+    project: &RytmProject,
+    changed: ChangedObjects,
+) -> HardwareResult<()> {
+    if changed.pattern {
+        session.send(
+            &project
+                .work_buffer()
+                .pattern()
+                .as_sysex()
+                .map_err(error_string)?,
+        )?;
+        thread::sleep(Duration::from_millis(450));
+    }
+    if changed.kit {
+        session.send(
+            &project
+                .work_buffer()
+                .kit()
+                .as_sysex()
+                .map_err(error_string)?,
+        )?;
+        thread::sleep(Duration::from_millis(450));
+    }
+    if changed.global {
+        session.send(
+            &project
+                .work_buffer()
+                .global()
+                .as_sysex()
+                .map_err(error_string)?,
+        )?;
+        thread::sleep(Duration::from_millis(450));
+    }
+    if changed.settings {
+        session.send(&project.settings().as_sysex().map_err(error_string)?)?;
+        thread::sleep(Duration::from_millis(450));
+    }
+    Ok(())
+}
+
+fn verify_changed_sections(
+    expected: &Value,
+    observed: &Value,
+    changed: ChangedObjects,
+) -> HardwareResult<()> {
+    for (name, should_compare) in [
+        ("pattern", changed.pattern),
+        ("kit", changed.kit),
+        ("global", changed.global),
+        ("settings", changed.settings),
+    ] {
+        if should_compare && expected[name] != observed[name] {
+            let mut differences = Vec::new();
+            collect_value_differences(name, &expected[name], &observed[name], &mut differences, 12);
+            return Err(format!(
+                "{name} readback did not match the requested state: {}",
+                differences.join("; ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn collect_value_differences(
+    path: &str,
+    expected: &Value,
+    observed: &Value,
+    differences: &mut Vec<String>,
+    limit: usize,
+) {
+    if differences.len() >= limit || expected == observed {
+        return;
+    }
+    match (expected, observed) {
+        (Value::Object(expected), Value::Object(observed)) => {
+            let mut keys = expected.keys().chain(observed.keys()).collect::<Vec<_>>();
+            keys.sort();
+            keys.dedup();
+            for key in keys {
+                collect_value_differences(
+                    &format!("{path}.{key}"),
+                    expected.get(key).unwrap_or(&Value::Null),
+                    observed.get(key).unwrap_or(&Value::Null),
+                    differences,
+                    limit,
+                );
+                if differences.len() >= limit {
+                    break;
+                }
+            }
+        }
+        (Value::Array(expected), Value::Array(observed)) => {
+            for index in 0..expected.len().max(observed.len()) {
+                collect_value_differences(
+                    &format!("{path}[{index}]"),
+                    expected.get(index).unwrap_or(&Value::Null),
+                    observed.get(index).unwrap_or(&Value::Null),
+                    differences,
+                    limit,
+                );
+                if differences.len() >= limit {
+                    break;
+                }
+            }
+        }
+        _ => differences.push(format!("{path}: expected {expected}, observed {observed}")),
+    }
+}
+
+fn apply_persistent_operation(
+    project: &mut RytmProject,
+    operation: &PersistentOperation,
+) -> HardwareResult<()> {
+    match operation {
+        PersistentOperation::SetTrackMachine { track, machine, .. } => {
+            let track_index = parse_track_index(track)?;
+            let machine = MachineType::try_from(machine.as_str()).map_err(error_string)?;
+            let sound = &mut project.work_buffer_mut().kit_mut().sounds_mut()[track_index];
+            if sound.machine_type() == machine {
+                return Ok(());
+            }
+            sound.set_machine_type(machine).map_err(error_string)
+        }
+        PersistentOperation::SetKitParameter {
+            track,
+            parameter,
+            value,
+        } => apply_kit_parameter(project.work_buffer_mut().kit_mut(), track, parameter, value),
+        PersistentOperation::SetSoundParameter {
+            track,
+            page,
+            parameter,
+            value,
+        } => {
+            let track_index = parse_track_index(track)?;
+            let sound = &mut project.work_buffer_mut().kit_mut().sounds_mut()[track_index];
+            apply_sound_parameter(sound, page, parameter, value)
+        }
+        PersistentOperation::SetFxParameter {
+            effect,
+            parameter,
+            value,
+        } => apply_fx_parameter(
+            project.work_buffer_mut().kit_mut(),
+            effect,
+            parameter,
+            value,
+        ),
+        PersistentOperation::SetGlobalParameter {
+            section,
+            parameter,
+            track,
+            value,
+        } => apply_global_parameter(project, section, parameter, track, value),
+        PersistentOperation::SetTrig { .. }
+        | PersistentOperation::ClearTrig { .. }
+        | PersistentOperation::SetParameterLock { .. }
+        | PersistentOperation::ClearParameterLock { .. }
+        | PersistentOperation::SetTrackLength { .. }
+        | PersistentOperation::CopyPattern { .. } => {
+            Err("hardware pattern delta writes are staged for the scheduler milestone".to_string())
+        }
+        PersistentOperation::AssignSampleSlot { .. } => Err(
+            "sample-slot assignment is disabled until sample identity reconciliation is available"
+                .to_string(),
+        ),
+    }
+}
+
+fn apply_kit_parameter(
+    kit: &mut Kit,
+    track: &Option<String>,
+    parameter: &str,
+    value: &Value,
+) -> HardwareResult<()> {
+    match parameter {
+        "name" => kit
+            .set_name(control_string(value, "value")?)
+            .map_err(error_string),
+        "track_level" => {
+            let track_index = required_track_index(track, parameter)?;
+            kit.set_track_level(track_index, control_usize(value, "value")?)
+                .map_err(error_string)
+        }
+        "fx_track_level" => kit
+            .set_track_level(12, control_usize(value, "value")?)
+            .map_err(error_string),
+        "retrig.rate" => {
+            let track_index = required_track_index(track, parameter)?;
+            let parsed = parse_enum(value, "value")?;
+            kit.track_retrig_settings_mut(track_index)
+                .map_err(error_string)?
+                .set_rate(parsed);
+            Ok(())
+        }
+        "retrig.length" => {
+            let track_index = required_track_index(track, parameter)?;
+            let parsed = parse_enum(value, "value")?;
+            kit.track_retrig_settings_mut(track_index)
+                .map_err(error_string)?
+                .set_length(parsed);
+            Ok(())
+        }
+        "retrig.velocity_curve" => {
+            let track_index = required_track_index(track, parameter)?;
+            kit.track_retrig_settings_mut(track_index)
+                .map_err(error_string)?
+                .set_velocity_curve(control_isize(value, "value")?)
+                .map_err(error_string)
+        }
+        "retrig.always_on" => {
+            let track_index = required_track_index(track, parameter)?;
+            kit.track_retrig_settings_mut(track_index)
+                .map_err(error_string)?
+                .set_always_on(control_bool(value, "value")?);
+            Ok(())
+        }
+        _ => Err(format!("unsupported Kit parameter {parameter:?}")),
+    }
+}
+
+fn apply_sound_parameter(
+    sound: &mut Sound,
+    page: &str,
+    parameter: &str,
+    value: &Value,
+) -> HardwareResult<()> {
+    match page {
+        "machine" => match parameter {
+            "type" => sound
+                .set_machine_type(
+                    MachineType::try_from(control_string(value, "value")?).map_err(error_string)?,
+                )
+                .map_err(error_string),
+            _ => {
+                let value = match value {
+                    Value::Number(number) => MachineParameterValue::Number(
+                        number
+                            .as_f64()
+                            .ok_or_else(|| "value must be a finite number".to_string())?,
+                    ),
+                    Value::String(symbol) => MachineParameterValue::Symbol(symbol),
+                    _ => return Err("value must be a number or symbolic string".to_string()),
+                };
+                sound
+                    .machine_parameters_mut()
+                    .set_parameter(parameter, value)
+                    .map_err(error_string)
+            }
+        },
+        "sample" => {
+            let page = sound.sample_mut();
+            match parameter {
+                "tune" => page
+                    .set_tune(control_isize(value, "value")?)
+                    .map_err(error_string),
+                "fine_tune" => page
+                    .set_fine_tune(control_isize(value, "value")?)
+                    .map_err(error_string),
+                "number" => Err("sample.number is controlled by assign_sample_slot".to_string()),
+                "bit_reduction" => page
+                    .set_bit_reduction(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "start" => page
+                    .set_start(control_f32(value, "value")?)
+                    .map_err(error_string),
+                "end" => page
+                    .set_end(control_f32(value, "value")?)
+                    .map_err(error_string),
+                "loop_flag" => {
+                    page.set_loop_flag(control_bool(value, "value")?);
+                    Ok(())
+                }
+                "volume" => page
+                    .set_volume(control_usize(value, "value")?)
+                    .map_err(error_string),
+                _ => Err(format!("unsupported sample parameter {parameter:?}")),
+            }
+        }
+        "filter" => {
+            let page = sound.filter_mut();
+            match parameter {
+                "attack" => page
+                    .set_attack(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "sustain" => page
+                    .set_sustain(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "decay" => page
+                    .set_decay(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "release" => page
+                    .set_release(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "cutoff" => page
+                    .set_cutoff(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "resonance" => page
+                    .set_resonance(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "filter_type" => {
+                    page.set_filter_type(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                "envelope_amount" => page
+                    .set_envelope_amount(control_isize(value, "value")?)
+                    .map_err(error_string),
+                _ => Err(format!("unsupported filter parameter {parameter:?}")),
+            }
+        }
+        "amp" => {
+            let page = sound.amplitude_mut();
+            match parameter {
+                "attack" => page
+                    .set_attack(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "hold" => page
+                    .set_hold(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "decay" => page
+                    .set_decay(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "overdrive" => page
+                    .set_overdrive(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "delay_send" => page
+                    .set_delay_send(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "reverb_send" => page
+                    .set_reverb_send(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "pan" => page
+                    .set_pan(control_isize(value, "value")?)
+                    .map_err(error_string),
+                "volume" => page
+                    .set_volume(control_usize(value, "value")?)
+                    .map_err(error_string),
+                _ => Err(format!("unsupported amp parameter {parameter:?}")),
+            }
+        }
+        "lfo" => apply_sound_lfo_parameter(sound, parameter, value),
+        "settings" => apply_sound_settings_parameter(sound, parameter, value),
+        _ => Err(format!("unsupported Sound page {page:?}")),
+    }
+}
+
+fn apply_sound_lfo_parameter(
+    sound: &mut Sound,
+    parameter: &str,
+    value: &Value,
+) -> HardwareResult<()> {
+    let page = sound.lfo_mut();
+    match parameter {
+        "speed" => page
+            .set_speed(control_isize(value, "value")?)
+            .map_err(error_string),
+        "multiplier" => {
+            page.set_multiplier(parse_enum(value, "value")?);
+            Ok(())
+        }
+        "fade" => page
+            .set_fade(control_isize(value, "value")?)
+            .map_err(error_string),
+        "destination" => {
+            page.set_destination(parse_enum(value, "value")?);
+            Ok(())
+        }
+        "waveform" => {
+            page.set_waveform(parse_enum(value, "value")?);
+            Ok(())
+        }
+        "depth" => page
+            .set_depth(control_f32(value, "value")?)
+            .map_err(error_string),
+        "start_phase_or_slew" => page
+            .set_start_phase(control_usize(value, "value")?)
+            .map_err(error_string),
+        "mode" => {
+            page.set_mode(parse_enum(value, "value")?);
+            Ok(())
+        }
+        _ => Err(format!("unsupported LFO parameter {parameter:?}")),
+    }
+}
+
+fn apply_sound_settings_parameter(
+    sound: &mut Sound,
+    parameter: &str,
+    value: &Value,
+) -> HardwareResult<()> {
+    match parameter {
+        "name" => sound
+            .set_name(control_string(value, "value")?)
+            .map_err(error_string),
+        "accent_level" => sound
+            .set_accent_level(control_usize(value, "value")?)
+            .map_err(error_string),
+        _ => {
+            let settings = sound.settings_mut();
+            match parameter {
+                "chromatic_mode" => {
+                    settings.set_chromatic_mode(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                "env_reset_filter" => {
+                    settings.set_env_reset_filter(control_bool(value, "value")?);
+                    Ok(())
+                }
+                "velocity_to_volume" => {
+                    settings.set_velocity_to_volume(control_bool(value, "value")?);
+                    Ok(())
+                }
+                "legacy_fx_send" => {
+                    settings.set_legacy_fx_send(control_bool(value, "value")?);
+                    Ok(())
+                }
+                "velocity_modulation_amt_1" => settings
+                    .set_velocity_modulation_amt_1(control_isize(value, "value")?)
+                    .map_err(error_string),
+                "velocity_modulation_amt_2" => settings
+                    .set_velocity_modulation_amt_2(control_isize(value, "value")?)
+                    .map_err(error_string),
+                "velocity_modulation_amt_3" => settings
+                    .set_velocity_modulation_amt_3(control_isize(value, "value")?)
+                    .map_err(error_string),
+                "velocity_modulation_amt_4" => settings
+                    .set_velocity_modulation_amt_4(control_isize(value, "value")?)
+                    .map_err(error_string),
+                "velocity_modulation_target_1" => {
+                    settings.set_velocity_modulation_target_1(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                "velocity_modulation_target_2" => {
+                    settings.set_velocity_modulation_target_2(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                "velocity_modulation_target_3" => {
+                    settings.set_velocity_modulation_target_3(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                "velocity_modulation_target_4" => {
+                    settings.set_velocity_modulation_target_4(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                "after_touch_modulation_amt_1" => settings
+                    .set_after_touch_modulation_amt_1(control_isize(value, "value")?)
+                    .map_err(error_string),
+                "after_touch_modulation_amt_2" => settings
+                    .set_after_touch_modulation_amt_2(control_isize(value, "value")?)
+                    .map_err(error_string),
+                "after_touch_modulation_amt_3" => settings
+                    .set_after_touch_modulation_amt_3(control_isize(value, "value")?)
+                    .map_err(error_string),
+                "after_touch_modulation_amt_4" => settings
+                    .set_after_touch_modulation_amt_4(control_isize(value, "value")?)
+                    .map_err(error_string),
+                "after_touch_modulation_target_1" => {
+                    settings.set_after_touch_modulation_target_1(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                "after_touch_modulation_target_2" => {
+                    settings.set_after_touch_modulation_target_2(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                "after_touch_modulation_target_3" => {
+                    settings.set_after_touch_modulation_target_3(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                "after_touch_modulation_target_4" => {
+                    settings.set_after_touch_modulation_target_4(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                _ => Err(format!(
+                    "unsupported Sound settings parameter {parameter:?}"
+                )),
+            }
+        }
+    }
+}
+
+fn apply_fx_parameter(
+    kit: &mut Kit,
+    effect: &str,
+    parameter: &str,
+    value: &Value,
+) -> HardwareResult<()> {
+    match effect {
+        "delay" => {
+            let fx = kit.fx_delay_mut();
+            match parameter {
+                "time" => fx
+                    .set_time(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "time_on_grid" => {
+                    fx.set_time_on_grid(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                "ping_pong" => {
+                    fx.set_ping_pong(control_bool(value, "value")?);
+                    Ok(())
+                }
+                "stereo_width" => fx
+                    .set_stereo_width(control_isize(value, "value")?)
+                    .map_err(error_string),
+                "feedback" => fx
+                    .set_feedback(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "hpf" => fx
+                    .set_hpf(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "lpf" => fx
+                    .set_lpf(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "reverb_send" => fx
+                    .set_reverb_send(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "volume" => fx
+                    .set_volume(control_usize(value, "value")?)
+                    .map_err(error_string),
+                _ => Err(format!("unsupported delay parameter {parameter:?}")),
+            }
+        }
+        "reverb" => {
+            let fx = kit.fx_reverb_mut();
+            match parameter {
+                "pre_delay" => fx
+                    .set_pre_delay(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "decay" => fx
+                    .set_decay(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "freq" => fx
+                    .set_freq(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "gain" => fx
+                    .set_gain(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "hpf" => fx
+                    .set_hpf(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "lpf" => fx
+                    .set_lpf(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "volume" => fx
+                    .set_volume(control_usize(value, "value")?)
+                    .map_err(error_string),
+                _ => Err(format!("unsupported reverb parameter {parameter:?}")),
+            }
+        }
+        "distortion" => {
+            let fx = kit.fx_distortion_mut();
+            match parameter {
+                "delay_overdrive" => fx
+                    .set_delay_overdrive(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "reverb_post" => {
+                    fx.set_reverb_post(control_bool(value, "value")?);
+                    Ok(())
+                }
+                "delay_post" => {
+                    fx.set_delay_post(control_bool(value, "value")?);
+                    Ok(())
+                }
+                "amount" => fx
+                    .set_amount(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "symmetry" => fx
+                    .set_symmetry(control_isize(value, "value")?)
+                    .map_err(error_string),
+                _ => Err(format!("unsupported distortion parameter {parameter:?}")),
+            }
+        }
+        "compressor" => {
+            let fx = kit.fx_compressor_mut();
+            match parameter {
+                "threshold" => fx
+                    .set_threshold(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "attack" => {
+                    fx.set_attack(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                "release" => {
+                    fx.set_release(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                "ratio" => {
+                    fx.set_ratio(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                "side_chain_eq" | "seq" => {
+                    fx.set_side_chain_eq(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                "gain" => fx
+                    .set_gain(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "mix" => fx
+                    .set_mix(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "volume" => fx
+                    .set_volume(control_usize(value, "value")?)
+                    .map_err(error_string),
+                _ => Err(format!("unsupported compressor parameter {parameter:?}")),
+            }
+        }
+        "lfo" => {
+            let fx = kit.fx_lfo_mut();
+            match parameter {
+                "speed" => fx
+                    .set_speed(control_isize(value, "value")?)
+                    .map_err(error_string),
+                "multiplier" => {
+                    fx.set_multiplier(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                "fade" => fx
+                    .set_fade(control_isize(value, "value")?)
+                    .map_err(error_string),
+                "destination" => {
+                    fx.set_destination(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                "waveform" => {
+                    fx.set_waveform(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                "start_phase_or_slew" => fx
+                    .set_start_phase(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "depth" => fx
+                    .set_depth(control_f32(value, "value")?)
+                    .map_err(error_string),
+                "mode" => {
+                    fx.set_mode(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                _ => Err(format!("unsupported FX LFO parameter {parameter:?}")),
+            }
+        }
+        _ => Err(format!("unsupported Kit FX effect {effect:?}")),
+    }
+}
+
+fn apply_global_parameter(
+    project: &mut RytmProject,
+    section: &str,
+    parameter: &str,
+    track: &Option<String>,
+    value: &Value,
+) -> HardwareResult<()> {
+    if section == "settings" {
+        return apply_settings_parameter(project.settings_mut(), parameter, track, value);
+    }
+    let global = project.work_buffer_mut().global_mut();
+    match section {
+        "routing" => {
+            let routing = global.routing_mut();
+            match parameter {
+                "route_to_main" => {
+                    let track_index = required_track_index(track, parameter)?;
+                    let flags = set_track_flag(
+                        routing.raw_route_to_main_flags(),
+                        track_index,
+                        control_bool(value, "value")?,
+                    );
+                    routing.set_route_to_main_flags(flags).map_err(error_string)
+                }
+                "send_to_fx" => {
+                    let track_index = required_track_index(track, parameter)?;
+                    let flags = set_track_flag(
+                        routing.raw_send_to_fx_flags(),
+                        track_index,
+                        control_bool(value, "value")?,
+                    );
+                    routing.set_send_to_fx_flags(flags).map_err(error_string)
+                }
+                "route_to_main_flags" => routing
+                    .set_route_to_main_flags(control_u16(value, "value")?)
+                    .map_err(error_string),
+                "send_to_fx_flags" => routing
+                    .set_send_to_fx_flags(control_u16(value, "value")?)
+                    .map_err(error_string),
+                "usb_in" => {
+                    routing.set_usb_in(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                "usb_out" => {
+                    routing.set_usb_out(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                "usb_to_main_db" => {
+                    routing.set_usb_to_main_db(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                _ => Err(format!("unsupported routing parameter {parameter:?}")),
+            }
+        }
+        "metronome" => {
+            let metronome = global.metronome_settings_mut();
+            match parameter {
+                "active" => {
+                    metronome.set_active(control_bool(value, "value")?);
+                    Ok(())
+                }
+                "time_signature" => {
+                    metronome.set_time_signature(parse_enum(value, "value")?);
+                    Ok(())
+                }
+                "pre_roll_bars" => metronome
+                    .set_pre_roll_bars(control_usize(value, "value")?)
+                    .map_err(error_string),
+                "volume" => metronome
+                    .set_volume(control_usize(value, "value")?)
+                    .map_err(error_string),
+                _ => Err(format!("unsupported metronome parameter {parameter:?}")),
+            }
+        }
+        "midi_sync" => {
+            let sync = global.midi_config_mut().sync_mut();
+            let enabled = control_bool(value, "value")?;
+            match parameter {
+                "clock_receive" => sync.set_clock_receive(enabled),
+                "clock_send" => sync.set_clock_send(enabled),
+                "transport_receive" => sync.set_transport_receive(enabled),
+                "transport_send" => sync.set_transport_send(enabled),
+                "program_change_receive" => sync.set_program_change_receive(enabled),
+                "program_change_send" => sync.set_program_change_send(enabled),
+                _ => return Err(format!("unsupported MIDI sync parameter {parameter:?}")),
+            }
+            Ok(())
+        }
+        "midi_port" => {
+            let port = global.midi_config_mut().port_config_mut();
+            match parameter {
+                "output_port_function" => {
+                    port.set_output_port_function(parse_enum(value, "value")?)
+                }
+                "thru_port_function" => port.set_thru_port_function(parse_enum(value, "value")?),
+                "input_transport" => port.set_input_transport(parse_enum(value, "value")?),
+                "output_transport" => port.set_output_transport(parse_enum(value, "value")?),
+                "parameter_output_type" => {
+                    port.set_parameter_output_type(parse_enum(value, "value")?)
+                }
+                "receive_notes" => port.set_receive_notes(control_bool(value, "value")?),
+                "receive_cc_nrpn" => port.set_receive_cc_nrpn(control_bool(value, "value")?),
+                "pad_parameter_destination" => {
+                    port.set_pad_parameter_destination(parse_enum(value, "value")?)
+                }
+                "pressure_parameter_destination" => {
+                    port.set_pressure_parameter_destination(parse_enum(value, "value")?)
+                }
+                "encoder_parameter_destination" => {
+                    port.set_encoder_parameter_destination(parse_enum(value, "value")?)
+                }
+                "mute_parameter_destination" => {
+                    port.set_mute_parameter_destination(parse_enum(value, "value")?)
+                }
+                "ports_output_channel" => {
+                    port.set_ports_output_channel(parse_enum(value, "value")?)
+                }
+                _ => return Err(format!("unsupported MIDI port parameter {parameter:?}")),
+            }
+            Ok(())
+        }
+        "midi_channels" => {
+            let channels = global.midi_config_mut().channels_mut();
+            let channel = parse_midi_channel(value)?;
+            match parameter {
+                "auto_channel" => channels.set_auto_channel(channel).map_err(error_string),
+                "track_channel" => channels
+                    .set_track_channel(required_track_index(track, parameter)?, channel)
+                    .map_err(error_string),
+                "track_fx_channel" => channels.set_track_fx_channel(channel).map_err(error_string),
+                "program_change_in_channel" => channels
+                    .set_program_change_in_channel(channel)
+                    .map_err(error_string),
+                "program_change_out_channel" => channels
+                    .set_program_change_out_channel(channel)
+                    .map_err(error_string),
+                "performance_channel" => channels
+                    .set_performance_channel(channel)
+                    .map_err(error_string),
+                _ => Err(format!("unsupported MIDI channel parameter {parameter:?}")),
+            }
+        }
+        "sequencer" => {
+            let sequencer = global.sequencer_config_mut();
+            let enabled = control_bool(value, "value")?;
+            match parameter {
+                "kit_reload_on_chg" => sequencer.set_kit_reload_on_chg(enabled),
+                "quantize_live_rec" => sequencer.set_quantize_live_rec(enabled),
+                "auto_trk_switch" => sequencer.set_auto_trk_switch(enabled),
+                _ => return Err(format!("unsupported sequencer parameter {parameter:?}")),
+            }
+            Ok(())
+        }
+        _ => Err(format!("unsupported Global section {section:?}")),
+    }
+}
+
+fn apply_settings_parameter(
+    settings: &mut Settings,
+    parameter: &str,
+    track: &Option<String>,
+    value: &Value,
+) -> HardwareResult<()> {
+    match parameter {
+        "tempo" => settings
+            .set_bpm(control_f32(value, "value")?)
+            .map_err(error_string),
+        "selected_track" => {
+            let index = track
+                .as_ref()
+                .map(|track| parse_track_index(track))
+                .transpose()?
+                .unwrap_or(parse_track_index(control_string(value, "value")?)?);
+            settings.set_selected_track(index).map_err(error_string)
+        }
+        "selected_parameter_menu_item" => {
+            settings.set_selected_parameter_menu_item(parse_enum(value, "value")?);
+            Ok(())
+        }
+        "selected_fx_menu_item" => {
+            settings.set_selected_fx_menu_item(parse_enum(value, "value")?);
+            Ok(())
+        }
+        "selected_page" => settings
+            .set_selected_page(control_usize(value, "value")?)
+            .map_err(error_string),
+        "selected_mode" => {
+            settings.set_selected_mode(parse_enum(value, "value")?);
+            Ok(())
+        }
+        "selected_pattern_mode" => {
+            settings.set_selected_pattern_mode(parse_enum(value, "value")?);
+            Ok(())
+        }
+        "mute_flags" => settings
+            .set_mute_flags(control_u16(value, "value")?)
+            .map_err(error_string),
+        "muted" => {
+            let track_index = required_track_index(track, parameter)?;
+            if control_bool(value, "value")? {
+                settings.mute_sound(track_index).map_err(error_string)
+            } else {
+                settings.unmute_sound(track_index).map_err(error_string)
+            }
+        }
+        "fixed_velocity_enabled" => {
+            settings.set_fixed_velocity_enable(control_bool(value, "value")?);
+            Ok(())
+        }
+        "fixed_velocity_amount" => settings
+            .set_fixed_velocity_amount(control_usize(value, "value")?)
+            .map_err(error_string),
+        "sample_recorder_source" => {
+            settings.set_sample_recorder_source(parse_enum(value, "value")?);
+            Ok(())
+        }
+        "sample_recorder_threshold" => settings
+            .set_sample_recorder_threshold(control_usize(value, "value")?)
+            .map_err(error_string),
+        "sample_recorder_monitor_enabled" => {
+            settings.set_sample_recorder_monitor_enable(control_bool(value, "value")?);
+            Ok(())
+        }
+        "sample_recorder_recording_length" => {
+            settings.set_sample_recorder_recording_length(parse_enum(value, "value")?);
+            Ok(())
+        }
+        _ => Err(format!("unsupported Settings parameter {parameter:?}")),
+    }
 }
 
 pub fn configure_midi(session: &mut RytmMidiSession, directory: &Path) -> HardwareResult<Value> {
@@ -558,7 +1561,7 @@ fn query_object(
     session.request(&query.as_sysex().map_err(error_string)?)
 }
 
-fn state_summary(project: &RytmProject) -> Value {
+pub fn state_summary(project: &RytmProject) -> Value {
     let global = project.work_buffer().global();
     let midi = global.midi_config();
     let channels = midi.channels();
@@ -576,21 +1579,9 @@ fn state_summary(project: &RytmProject) -> Value {
             "notes": ["All queried work-buffer object sizes decoded successfully; the device did not expose its OS version through Universal Device Inquiry."]
         },
         "pattern": pattern_summary(project.work_buffer().pattern()),
-        "kit": {
-            "index": project.work_buffer().kit().index(),
-            "name": project.work_buffer().kit().name().trim_end_matches('\0'),
-            "structureVersion": project.work_buffer().kit().structure_version(),
-            "trackLevels": project.work_buffer().kit().track_levels()
-        },
-        "settings": {
-            "structureVersion": project.settings().structure_version(),
-            "tempo": project.settings().bpm(),
-            "selectedTrack": TRACK_NAMES[project.settings().selected_track()],
-            "mutedTracks": project.settings().muted_sound_indexes()
-                .into_iter()
-                .filter_map(|index| TRACK_NAMES.get(index).copied())
-                .collect::<Vec<_>>()
-        },
+        "kit": kit_summary(project.work_buffer().kit()),
+        "settings": settings_summary(project.settings()),
+        "global": global_summary(global),
         "midi": {
             "clockReceive": midi.sync().clock_receive(),
             "clockSend": midi.sync().clock_send(),
@@ -607,6 +1598,168 @@ fn state_summary(project: &RytmProject) -> Value {
             "trackChannels": track_channels
         }
     })
+}
+
+pub fn canonical_state_summary(project: &RytmProject) -> HardwareResult<Value> {
+    let mut canonical = RytmProject::try_default().map_err(error_string)?;
+    for (name, bytes) in [
+        (
+            "pattern",
+            project
+                .work_buffer()
+                .pattern()
+                .as_sysex()
+                .map_err(error_string)?,
+        ),
+        (
+            "kit",
+            project
+                .work_buffer()
+                .kit()
+                .as_sysex()
+                .map_err(error_string)?,
+        ),
+        (
+            "global",
+            project
+                .work_buffer()
+                .global()
+                .as_sysex()
+                .map_err(error_string)?,
+        ),
+        (
+            "settings",
+            project.settings().as_sysex().map_err(error_string)?,
+        ),
+    ] {
+        canonical
+            .update_from_sysex_response(&bytes)
+            .map_err(|error| firmware_decode_error(name, error))?;
+    }
+    Ok(state_summary(&canonical))
+}
+
+fn kit_summary(kit: &Kit) -> Value {
+    let retrig = (0..12)
+        .filter_map(|track_index| {
+            kit.track_retrig_settings(track_index).ok().map(|settings| {
+                json!({
+                    "track": TRACK_NAMES[track_index],
+                    "parameters": serialize_value(settings),
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let sounds = kit
+        .sounds()
+        .iter()
+        .enumerate()
+        .map(|(track_index, sound)| sound_summary(sound, track_index))
+        .collect::<Vec<_>>();
+    json!({
+        "index": kit.index(),
+        "name": kit.name().trim_end_matches('\0'),
+        "structureVersion": kit.structure_version(),
+        "trackLevels": kit.track_levels(),
+        "retrig": retrig,
+        "sounds": sounds,
+        "fx": {
+            "delay": serialize_value(kit.fx_delay()),
+            "reverb": serialize_value(kit.fx_reverb()),
+            "distortion": serialize_value(kit.fx_distortion()),
+            "compressor": serialize_value(kit.fx_compressor()),
+            "lfo": serialize_value(kit.fx_lfo()),
+        },
+        "controlInputs": {
+            "input1": [
+                control_input_slot(kit.control_in_1_mod_target_1(), kit.control_in_1_mod_amt_1()),
+                control_input_slot(kit.control_in_1_mod_target_2(), kit.control_in_1_mod_amt_2()),
+                control_input_slot(kit.control_in_1_mod_target_3(), kit.control_in_1_mod_amt_3()),
+                control_input_slot(kit.control_in_1_mod_target_4(), kit.control_in_1_mod_amt_4()),
+            ],
+            "input2": [
+                control_input_slot(kit.control_in_2_mod_target_1(), kit.control_in_2_mod_amt_1()),
+                control_input_slot(kit.control_in_2_mod_target_2(), kit.control_in_2_mod_amt_2()),
+                control_input_slot(kit.control_in_2_mod_target_3(), kit.control_in_2_mod_amt_3()),
+                control_input_slot(kit.control_in_2_mod_target_4(), kit.control_in_2_mod_amt_4()),
+            ],
+        },
+    })
+}
+
+fn sound_summary(sound: &Sound, track_index: usize) -> Value {
+    let machine: &str = sound.machine_type().into();
+    json!({
+        "track": TRACK_NAMES[track_index],
+        "name": sound.name().trim_end_matches('\0'),
+        "structureVersion": sound.structure_version(),
+        "machine": machine,
+        "machineParameters": serialize_value(sound.machine_parameters()),
+        "accentLevel": sound.accent_level(),
+        "sample": serialize_value(sound.sample()),
+        "filter": serialize_value(sound.filter()),
+        "amp": serialize_value(sound.amplitude()),
+        "lfo": serialize_value(sound.lfo()),
+        "settings": serialize_value(sound.settings()),
+    })
+}
+
+fn settings_summary(settings: &Settings) -> Value {
+    json!({
+        "structureVersion": settings.structure_version(),
+        "tempo": settings.bpm(),
+        "selectedTrack": TRACK_NAMES[settings.selected_track()],
+        "selectedParameterMenuItem": serialize_value(&settings.selected_parameter_menu_item()),
+        "selectedFxMenuItem": serialize_value(&settings.selected_fx_menu_item()),
+        "selectedPage": settings.selected_page(),
+        "selectedMode": serialize_value(&settings.selected_mode()),
+        "selectedPatternMode": serialize_value(&settings.selected_pattern_mode()),
+        "muteFlags": settings.raw_mute_flags(),
+        "mutedTracks": settings.muted_sound_indexes()
+            .into_iter()
+            .filter_map(|index| TRACK_NAMES.get(index).copied())
+            .collect::<Vec<_>>(),
+        "fixedVelocity": {
+            "enabled": settings.fixed_velocity_enabled(),
+            "amount": settings.fixed_velocity_amount(),
+        },
+        "sampleRecorder": {
+            "source": serialize_value(&settings.sample_recorder_source()),
+            "threshold": settings.sample_recorder_threshold(),
+            "monitorEnabled": settings.sample_recorder_monitor_enabled(),
+            "recordingLength": serialize_value(&settings.sample_recorder_recording_length()),
+        },
+    })
+}
+
+fn global_summary(global: &Global) -> Value {
+    json!({
+        "index": global.index(),
+        "structureVersion": global.structure_version(),
+        "metronome": serialize_value(global.metronome_settings()),
+        "midi": serialize_value(global.midi_config()),
+        "sequencer": serialize_value(global.sequencer_config()),
+        "routing": {
+            "routeToMainFlags": global.routing().raw_route_to_main_flags(),
+            "tracksRoutedToMain": global.routing().track_indexes_routed_to_main()
+                .into_iter().filter_map(|index| TRACK_NAMES.get(index).copied()).collect::<Vec<_>>(),
+            "sendToFxFlags": global.routing().raw_send_to_fx_flags(),
+            "tracksSentToFx": global.routing().track_indexes_sent_to_fx()
+                .into_iter().filter_map(|index| TRACK_NAMES.get(index).copied()).collect::<Vec<_>>(),
+            "usbIn": serialize_value(&global.routing().usb_in()),
+            "usbOut": serialize_value(&global.routing().usb_out()),
+            "usbToMainDb": serialize_value(&global.routing().usb_to_main_db()),
+        },
+    })
+}
+
+fn control_input_slot(target: impl Serialize, amount: isize) -> Value {
+    json!({ "target": serialize_value(&target), "amount": amount })
+}
+
+fn serialize_value(value: &impl Serialize) -> Value {
+    serde_json::to_value(value)
+        .unwrap_or_else(|error| json!({ "serializationError": error.to_string() }))
 }
 
 fn pattern_summary(pattern: &Pattern) -> Value {
@@ -1005,6 +2158,92 @@ fn error_string(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
+fn parse_track_index(track: &str) -> HardwareResult<usize> {
+    TRACK_NAMES
+        .iter()
+        .position(|candidate| candidate.eq_ignore_ascii_case(track))
+        .ok_or_else(|| format!("track must be one of {}", TRACK_NAMES.join(", ")))
+}
+
+fn required_track_index(track: &Option<String>, parameter: &str) -> HardwareResult<usize> {
+    track
+        .as_deref()
+        .ok_or_else(|| format!("track is required for {parameter:?}"))
+        .and_then(parse_track_index)
+}
+
+fn control_string<'a>(value: &'a Value, label: &str) -> HardwareResult<&'a str> {
+    value
+        .as_str()
+        .ok_or_else(|| format!("{label} must be a string"))
+}
+
+fn control_bool(value: &Value, label: &str) -> HardwareResult<bool> {
+    value
+        .as_bool()
+        .ok_or_else(|| format!("{label} must be a boolean"))
+}
+
+fn control_usize(value: &Value, label: &str) -> HardwareResult<usize> {
+    value
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| format!("{label} must be a non-negative integer"))
+}
+
+fn control_u16(value: &Value, label: &str) -> HardwareResult<u16> {
+    value
+        .as_u64()
+        .and_then(|value| u16::try_from(value).ok())
+        .ok_or_else(|| format!("{label} must be an integer between 0 and 65535"))
+}
+
+fn control_isize(value: &Value, label: &str) -> HardwareResult<isize> {
+    value
+        .as_i64()
+        .and_then(|value| isize::try_from(value).ok())
+        .ok_or_else(|| format!("{label} must be an integer"))
+}
+
+fn control_f32(value: &Value, label: &str) -> HardwareResult<f32> {
+    let value = value
+        .as_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| format!("{label} must be a finite number"))?;
+    if value < f64::from(f32::MIN) || value > f64::from(f32::MAX) {
+        return Err(format!("{label} is outside the supported numeric range"));
+    }
+    Ok(value as f32)
+}
+
+fn parse_enum<T: DeserializeOwned>(value: &Value, label: &str) -> HardwareResult<T> {
+    serde_json::from_value(value.clone())
+        .map_err(|error| format!("{label} is not a supported enum value: {error}"))
+}
+
+fn parse_midi_channel(value: &Value) -> HardwareResult<MidiChannel> {
+    if let Some(value) = value.as_str() {
+        return match value.to_ascii_lowercase().as_str() {
+            "auto" => Ok(MidiChannel::Auto),
+            "off" => Ok(MidiChannel::Off),
+            _ => Err("MIDI channel must be auto, off, or an integer from 1 through 16".to_string()),
+        };
+    }
+    let channel = control_usize(value, "value")?;
+    if !(1..=16).contains(&channel) {
+        return Err("MIDI channel must be auto, off, or an integer from 1 through 16".to_string());
+    }
+    Ok(MidiChannel::Channel(channel - 1))
+}
+
+fn set_track_flag(flags: u16, track_index: usize, enabled: bool) -> u16 {
+    if enabled {
+        flags | (1 << track_index)
+    } else {
+        flags & !(1 << track_index)
+    }
+}
+
 fn firmware_decode_error(object: &str, error: impl std::fmt::Display) -> String {
     format!(
         "failed to decode {object} SysEx with the firmware 1.70 adapter; current hardware compatibility remains unverified: {error}"
@@ -1063,5 +2302,84 @@ mod tests {
         let first = midi_config_summary(global);
         apply_desired_midi_config(global);
         assert_eq!(midi_config_summary(global), first);
+    }
+
+    #[test]
+    fn declarative_object_operations_cover_every_supported_page_family() {
+        let operations: Vec<PersistentOperation> = serde_json::from_value(json!([
+            { "type": "set_track_machine", "track": "BD", "machine": "bdclassic" },
+            { "type": "set_sound_parameter", "track": "BD", "page": "machine", "parameter": "lev", "value": 91 },
+            { "type": "set_kit_parameter", "track": "BD", "parameter": "track_level", "value": 90 },
+            { "type": "set_kit_parameter", "track": "BD", "parameter": "retrig.velocity_curve", "value": 5 },
+            { "type": "set_kit_parameter", "track": "BD", "parameter": "retrig.always_on", "value": true },
+            { "type": "set_sound_parameter", "track": "BD", "page": "sample", "parameter": "tune", "value": -12 },
+            { "type": "set_sound_parameter", "track": "BD", "page": "filter", "parameter": "cutoff", "value": 90 },
+            { "type": "set_sound_parameter", "track": "BD", "page": "amp", "parameter": "pan", "value": -10 },
+            { "type": "set_sound_parameter", "track": "BD", "page": "lfo", "parameter": "speed", "value": 12 },
+            { "type": "set_sound_parameter", "track": "BD", "page": "settings", "parameter": "env_reset_filter", "value": false },
+            { "type": "set_fx_parameter", "effect": "delay", "parameter": "feedback", "value": 33 },
+            { "type": "set_fx_parameter", "effect": "reverb", "parameter": "decay", "value": 44 },
+            { "type": "set_fx_parameter", "effect": "distortion", "parameter": "amount", "value": 11 },
+            { "type": "set_fx_parameter", "effect": "compressor", "parameter": "threshold", "value": 80 },
+            { "type": "set_fx_parameter", "effect": "lfo", "parameter": "speed", "value": -5 },
+            { "type": "set_global_parameter", "section": "routing", "parameter": "route_to_main", "track": "BD", "value": false },
+            { "type": "set_global_parameter", "section": "metronome", "parameter": "active", "value": true },
+            { "type": "set_global_parameter", "section": "midi_sync", "parameter": "clock_send", "value": true },
+            { "type": "set_global_parameter", "section": "midi_port", "parameter": "receive_notes", "value": false },
+            { "type": "set_global_parameter", "section": "midi_channels", "parameter": "auto_channel", "value": 16 },
+            { "type": "set_global_parameter", "section": "sequencer", "parameter": "quantize_live_rec", "value": true },
+            { "type": "set_global_parameter", "section": "settings", "parameter": "tempo", "value": 131.0 }
+        ]))
+        .unwrap();
+        let mut capture = StateCapture {
+            project: RytmProject::try_default().unwrap(),
+            pattern_raw: Vec::new(),
+            kit_raw: Vec::new(),
+            global_raw: Vec::new(),
+            settings_raw: Vec::new(),
+        };
+
+        let changed = apply_persistent_operations(&mut capture, &operations).unwrap();
+        assert!(changed.kit);
+        assert!(changed.global);
+        assert!(changed.settings);
+        let summary = state_summary(&capture.project);
+        assert_eq!(summary["kit"]["trackLevels"][0], 90);
+        assert_eq!(
+            summary["kit"]["retrig"][0]["parameters"]["velocity_curve"],
+            5
+        );
+        assert_eq!(summary["kit"]["sounds"][0]["machine"], "bdclassic");
+        assert_eq!(
+            summary["kit"]["sounds"][0]["machineParameters"]["BdClassic"]["lev"],
+            91
+        );
+        assert_eq!(summary["kit"]["sounds"][0]["sample"]["tune"], -12);
+        assert_eq!(summary["kit"]["sounds"][0]["filter"]["cutoff"], 90);
+        assert_eq!(summary["kit"]["sounds"][0]["amp"]["pan"], -10);
+        assert_eq!(summary["kit"]["sounds"][0]["lfo"]["speed"], 12);
+        assert_eq!(summary["kit"]["fx"]["delay"]["feedback"], 33);
+        assert_eq!(summary["global"]["routing"]["routeToMainFlags"], 4094);
+        assert_eq!(summary["global"]["metronome"]["active"], true);
+        assert_eq!(summary["settings"]["tempo"], 131.0);
+
+        let second = apply_persistent_operations(&mut capture, &operations).unwrap();
+        assert!(!second.any());
+    }
+
+    #[test]
+    fn sample_identity_cannot_be_bypassed_through_sound_page_mutation() {
+        let operation: PersistentOperation = serde_json::from_value(json!({
+            "type": "set_sound_parameter",
+            "track": "BD",
+            "page": "sample",
+            "parameter": "number",
+            "value": 12
+        }))
+        .unwrap();
+        let mut project = RytmProject::try_default().unwrap();
+        assert!(apply_persistent_operation(&mut project, &operation)
+            .unwrap_err()
+            .contains("assign_sample_slot"));
     }
 }

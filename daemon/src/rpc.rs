@@ -1,11 +1,9 @@
 use crate::{
     describe_as_json,
-    hardware::{
-        inspect_work_buffer_state, parse_pattern_slot, query_pattern_summary, RytmMidiSession,
-        DEFAULT_PORT_MATCH,
-    },
+    hardware::{parse_pattern_slot, query_pattern_summary, DEFAULT_PORT_MATCH},
+    hardware_control::HardwareBridgeState,
     hardware_description, mock_description,
-    state::{validation_result, MockBridgeState},
+    state::MockBridgeState,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -18,11 +16,17 @@ use std::{
 
 pub const RPC_SCHEMA: &str = "analog-rytm-rpc.v1";
 const REPLAY_CACHE_LIMIT: usize = 1024;
-pub const DECLARED_METHODS: [&str; 16] = [
+const TRACK_NAMES: [&str; 12] = [
+    "BD", "SD", "RS", "CP", "BT", "LT", "MT", "HT", "CH", "OH", "CY", "CB",
+];
+pub const DECLARED_METHODS: [&str; 19] = [
     "daemon.health",
     "daemon.describe",
     "device.inspect_state",
     "pattern.inspect",
+    "kit.inspect",
+    "sound.inspect",
+    "global.inspect",
     "operations.validate",
     "operations.propose",
     "operations.queue",
@@ -37,14 +41,22 @@ pub const DECLARED_METHODS: [&str; 16] = [
     "state.reconcile",
 ];
 
-pub const MOCK_IMPLEMENTED_METHODS: [&str; 16] = DECLARED_METHODS;
+pub const MOCK_IMPLEMENTED_METHODS: [&str; 19] = DECLARED_METHODS;
 
-pub const HARDWARE_IMPLEMENTED_METHODS: [&str; 6] = [
+pub const HARDWARE_IMPLEMENTED_METHODS: [&str; 14] = [
     "daemon.health",
     "daemon.describe",
     "device.inspect_state",
     "pattern.inspect",
+    "kit.inspect",
+    "sound.inspect",
+    "global.inspect",
     "operations.validate",
+    "operations.propose",
+    "operations.apply_now",
+    "snapshot.create",
+    "snapshot.rollback",
+    "events.read",
     "state.reconcile",
 ];
 
@@ -95,7 +107,7 @@ impl BackendMode {
 
 enum Backend {
     Mock(MockBridgeState),
-    Hardware(RytmMidiSession),
+    Hardware(HardwareBridgeState),
 }
 
 struct CachedResponse {
@@ -114,7 +126,7 @@ impl RpcServer {
     pub fn new(mode: BackendMode, port_match: &str) -> Result<Self, String> {
         let backend = match mode {
             BackendMode::Mock => Backend::Mock(MockBridgeState::default()),
-            BackendMode::Hardware => Backend::Hardware(RytmMidiSession::open(port_match)?),
+            BackendMode::Hardware => Backend::Hardware(HardwareBridgeState::open(port_match)?),
         };
         Ok(Self {
             backend,
@@ -239,9 +251,17 @@ impl RpcServer {
             }
             "device.inspect_state" => match &mut self.backend {
                 Backend::Mock(state) => Ok(state.inspect_state()),
-                Backend::Hardware(session) => inspect_work_buffer_state(session)
-                    .map(hardware_state)
-                    .map_err(RpcDispatchError::hardware),
+                Backend::Hardware(state) => {
+                    let summary = state
+                        .inspect_summary()
+                        .map_err(RpcDispatchError::hardware)?;
+                    Ok(hardware_state(
+                        summary,
+                        state.revision(),
+                        state.operation_sets(),
+                        state.snapshot_summaries(),
+                    ))
+                }
             },
             "pattern.inspect" => {
                 let slot = optional_string(&request.params, "pattern")?.unwrap_or("A01");
@@ -251,24 +271,47 @@ impl RpcServer {
                     Backend::Mock(state) => state
                         .inspect_pattern(&slot.to_ascii_uppercase())
                         .map_err(RpcDispatchError::validation),
-                    Backend::Hardware(session) => query_pattern_summary(session, pattern_index)
-                        .map(|summary| hardware_pattern_summary(&summary))
+                    Backend::Hardware(state) => {
+                        query_pattern_summary(state.session_mut(), pattern_index)
+                            .map(|summary| hardware_pattern_summary(&summary))
+                            .map_err(RpcDispatchError::hardware)
+                    }
+                }
+            }
+            "kit.inspect" => match &mut self.backend {
+                Backend::Mock(state) => Ok(state.inspect_kit()),
+                Backend::Hardware(state) => state.inspect_kit().map_err(RpcDispatchError::hardware),
+            },
+            "sound.inspect" => {
+                let track_index = required_track_index(&request.params)?;
+                match &mut self.backend {
+                    Backend::Mock(state) => Ok(state.inspect_sound(track_index)),
+                    Backend::Hardware(state) => state
+                        .inspect_sound(track_index)
                         .map_err(RpcDispatchError::hardware),
                 }
             }
-            "operations.validate" => match &self.backend {
+            "global.inspect" => match &mut self.backend {
+                Backend::Mock(state) => Ok(state.inspect_global()),
+                Backend::Hardware(state) => {
+                    state.inspect_global().map_err(RpcDispatchError::hardware)
+                }
+            },
+            "operations.validate" => match &mut self.backend {
                 Backend::Mock(state) => state
                     .validate(&request.params)
                     .map_err(RpcDispatchError::validation),
-                Backend::Hardware(_) => Ok(validation_result(
-                    request.params.get("operations").unwrap_or(&Value::Null),
-                )),
+                Backend::Hardware(state) => state
+                    .validate(&request.params)
+                    .map_err(RpcDispatchError::hardware),
             },
-            "operations.propose" => match &self.backend {
+            "operations.propose" => match &mut self.backend {
                 Backend::Mock(state) => state
                     .propose(&request.params)
                     .map_err(RpcDispatchError::validation),
-                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+                Backend::Hardware(state) => state
+                    .propose(&request.params)
+                    .map_err(RpcDispatchError::hardware),
             },
             "operations.queue" => match &mut self.backend {
                 Backend::Mock(state) => state
@@ -280,7 +323,9 @@ impl RpcServer {
                 Backend::Mock(state) => state
                     .apply_now(&request.params)
                     .map_err(RpcDispatchError::validation),
-                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+                Backend::Hardware(state) => state
+                    .apply_now(&request.params)
+                    .map_err(RpcDispatchError::hardware),
             },
             "realtime.set_parameter" => match &mut self.backend {
                 Backend::Mock(state) => state
@@ -310,25 +355,29 @@ impl RpcServer {
                 Backend::Mock(state) => state
                     .create_snapshot(&request.params)
                     .map_err(RpcDispatchError::validation),
-                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+                Backend::Hardware(state) => state
+                    .create_snapshot(&request.params)
+                    .map_err(RpcDispatchError::hardware),
             },
             "snapshot.rollback" => match &mut self.backend {
                 Backend::Mock(state) => state
                     .rollback_snapshot(&request.params)
                     .map_err(RpcDispatchError::validation),
-                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+                Backend::Hardware(state) => state
+                    .rollback_snapshot(&request.params)
+                    .map_err(RpcDispatchError::hardware),
             },
             "events.read" => match &self.backend {
                 Backend::Mock(state) => state
                     .read_events(&request.params)
                     .map_err(RpcDispatchError::validation),
-                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+                Backend::Hardware(state) => state
+                    .read_events(&request.params)
+                    .map_err(RpcDispatchError::hardware),
             },
             "state.reconcile" => match &mut self.backend {
                 Backend::Mock(state) => Ok(state.reconcile()),
-                Backend::Hardware(session) => inspect_work_buffer_state(session)
-                    .map(|summary| json!({ "status": "observed", "changed": false, "state": hardware_state(summary) }))
-                    .map_err(RpcDispatchError::hardware),
+                Backend::Hardware(state) => state.reconcile().map_err(RpcDispatchError::hardware),
             },
             "test.advance_mock_transport" => match &mut self.backend {
                 Backend::Mock(state) => state
@@ -343,10 +392,10 @@ impl RpcServer {
                         .get("milliseconds")
                         .and_then(Value::as_u64)
                         .ok_or_else(|| {
-                            RpcDispatchError::validation(
-                                "params.milliseconds must be a non-negative integer".to_string(),
-                            )
-                        })?;
+                        RpcDispatchError::validation(
+                            "params.milliseconds must be a non-negative integer".to_string(),
+                        )
+                    })?;
                     if milliseconds > 10_000 {
                         return Err(RpcDispatchError::validation(
                             "params.milliseconds must be at most 10000".to_string(),
@@ -384,10 +433,10 @@ impl RpcServer {
     }
 
     fn drain_rpc_events(&mut self) -> Vec<Value> {
-        let Backend::Mock(state) = &self.backend else {
-            return Vec::new();
+        let events = match &self.backend {
+            Backend::Mock(state) => state.events_after(self.emitted_event_cursor),
+            Backend::Hardware(state) => state.events_after(self.emitted_event_cursor),
         };
-        let events = state.events_after(self.emitted_event_cursor);
         if let Some(last) = events.last() {
             self.emitted_event_cursor = last.cursor;
         }
@@ -500,6 +549,20 @@ fn optional_string<'a>(params: &'a Value, key: &str) -> Result<Option<&'a str>, 
     }
 }
 
+fn required_track_index(params: &Value) -> Result<usize, RpcDispatchError> {
+    let track = optional_string(params, "track")?
+        .ok_or_else(|| RpcDispatchError::validation("params.track is required".to_string()))?;
+    TRACK_NAMES
+        .iter()
+        .position(|candidate| candidate.eq_ignore_ascii_case(track))
+        .ok_or_else(|| {
+            RpcDispatchError::validation(format!(
+                "params.track must be one of {}",
+                TRACK_NAMES.join(", ")
+            ))
+        })
+}
+
 fn empty_object() -> Value {
     json!({})
 }
@@ -526,12 +589,17 @@ fn error_response(
     json!({ "schema": RPC_SCHEMA, "id": id, "ok": false, "error": error })
 }
 
-fn hardware_state(summary: Value) -> Value {
+fn hardware_state(
+    summary: Value,
+    revision: u64,
+    operation_sets: Vec<Value>,
+    snapshots: Vec<Value>,
+) -> Value {
     let pattern = hardware_pattern_summary(&summary["pattern"]);
     let active_pattern = pattern["pattern"].clone();
     let tempo = summary["settings"]["tempo"].clone();
     json!({
-        "revision": null,
+        "revision": revision,
         "device": {
             "model": "Analog Rytm MKII",
             "connected": true,
@@ -568,11 +636,12 @@ fn hardware_state(summary: Value) -> Value {
             "tempo": tempo,
         },
         "activePattern": pattern,
-        "operationSets": [],
-        "snapshots": [],
+        "operationSets": operation_sets,
+        "snapshots": snapshots,
         "evidence": {
             "kit": summary["kit"].clone(),
             "settings": summary["settings"].clone(),
+            "global": summary["global"].clone(),
             "midi": summary["midi"].clone(),
         },
     })

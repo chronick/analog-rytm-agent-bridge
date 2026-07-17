@@ -1,4 +1,5 @@
 pub mod hardware;
+pub mod hardware_control;
 pub mod rpc;
 pub mod state;
 
