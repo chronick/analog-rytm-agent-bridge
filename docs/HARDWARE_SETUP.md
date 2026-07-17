@@ -12,12 +12,10 @@ The Rust harness uses the Analog Rytm CoreMIDI port directly for realtime MIDI a
 
 ## Build And Discover
 
-Clone the maintained fork as a sibling of this repository. The daemon uses a path dependency so fork fixes and bridge behavior are tested together.
-
-```text
-~/git/analog-rytm-agent-bridge
-~/git/rytm-rs
-```
+The daemon pins the maintained `chronick/rytm-rs` fork by immutable Git revision. A sibling fork
+checkout is optional and is used only while developing codec changes. Update the `rev` in
+`daemon/Cargo.toml` only after the fork commit has passed its deterministic and connected-device
+fixture tests and has been pushed to `origin`.
 
 ```bash
 cd daemon

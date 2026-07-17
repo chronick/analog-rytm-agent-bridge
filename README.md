@@ -93,7 +93,7 @@ Implemented:
 - apply idempotent Sound, machine, Kit, FX, routing, Global, and Settings deltas immediately;
 - canonicalize codec-quantized values before desired-vs-observed comparisons;
 - snapshot raw Pattern, Kit, Global, and Settings objects and restore them with semantic verification;
-- use the maintained sibling `rytm-rs` fork for validated machine parameters and retrig round trips.
+- use an immutable maintained-fork `rytm-rs` revision for validated codecs and firmware fixtures;
 - persist hardware queues, snapshots, revisions, observations, and events across daemon restart;
 - resolve `next_step`, `next_beat`, `next_measure`, `next_pattern`, and pattern-step targets against an explicit transport epoch;
 - generate 24 PPQN clock or follow observed MIDI realtime input without wall-clock boundary guesses;
