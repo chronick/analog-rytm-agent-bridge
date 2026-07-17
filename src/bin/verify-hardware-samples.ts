@@ -228,7 +228,8 @@ export async function runHardwareSampleVerification(): Promise<void> {
   }
 }
 
-if (import.meta.main) await runHardwareSampleVerification();
+// import.meta.main is unavailable before Node 22.18/24, where it silently no-ops.
+if (import.meta.url === `file://${process.argv[1]}`) await runHardwareSampleVerification();
 
 function verifyInventory(inventory: RytmSampleInventory): void {
   assert.equal(inventory.adapter, "elektroid");

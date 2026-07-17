@@ -52,7 +52,7 @@ export async function runHardwareSongVerification(): Promise<void> {
     assert.equal((allSongs.songs as unknown[]).length, 17);
     process.stderr.write("work-buffer and all stored Songs inspected\n");
 
-    const appliedName = baselineSong.name === "BRIDGE CERT" ? "BRIDGE ALT" : "BRIDGE CERT";
+    const appliedName: string = baselineSong.name === "BRIDGE CERT" ? "BRIDGE ALT" : "BRIDGE CERT";
     const queuedName = appliedName === "QUEUE CERT" ? "QUEUE ALT" : "QUEUE CERT";
     const operations = certificationOperations(appliedName);
     const validation = await client.validateOperations(operations);
@@ -186,7 +186,8 @@ export async function runHardwareSongVerification(): Promise<void> {
   }
 }
 
-if (import.meta.main) await runHardwareSongVerification();
+// import.meta.main is unavailable before Node 22.18/24, where it silently no-ops.
+if (import.meta.url === `file://${process.argv[1]}`) await runHardwareSongVerification();
 
 function certificationOperations(name: string): RytmPersistentOperation[] {
   return [
@@ -316,7 +317,7 @@ function asSong(value: unknown): RytmSongSummary {
 }
 
 function requiredNumber(value: unknown, label: string): number {
-  assert.equal(typeof value, "number", `${label} must be numeric`);
+  assert.ok(typeof value === "number", `${label} must be numeric`);
   return value;
 }
 

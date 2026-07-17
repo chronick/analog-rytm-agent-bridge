@@ -75,6 +75,8 @@ export interface RytmRpcEvent<T = unknown> {
   schema: typeof RYTM_RPC_SCHEMA;
   eventId: string;
   type: string;
+  /** Durable journal cursor; use with events.read to dedupe/gap-fill pushed events. */
+  cursor?: number;
   payload: T;
 }
 
@@ -132,26 +134,3 @@ export interface RytmDaemonApi {
   inspectOverbridgeAudio(): Promise<RytmOverbridgeProviderInventory>;
   captureMultitrackAudio(input: RytmCaptureMultitrackAudioInput): Promise<RytmMultitrackRecording>;
 }
-import type {
-  QueuedRytmOperationSet,
-  RytmAudioInputInventory,
-  RytmAudioRecording,
-  RytmBridgeState,
-  RytmCapturePatternAudioInput,
-  RytmChangePatternInput,
-  RytmLiveParameterInput,
-  RytmOperationSetDryRun,
-  RytmOperationSetInput,
-  RytmPatternDeltaInput,
-  RytmPatternSummary,
-  RytmPersistentOperation,
-  RytmRollbackInput,
-  RytmSetTransportInput,
-  RytmSnapshotInput,
-  RytmStartRecordingInput,
-  RytmStateSnapshot,
-  RytmStopRecordingInput,
-  RytmTransportState,
-  RytmTriggerTrackInput,
-  RytmValidationResult,
-} from "../domain/types.ts";

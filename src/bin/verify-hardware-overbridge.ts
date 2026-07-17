@@ -145,7 +145,8 @@ export async function runHardwareOverbridgeVerification(): Promise<void> {
   }
 }
 
-if (import.meta.main) await runHardwareOverbridgeVerification();
+// import.meta.main is unavailable before Node 22.18/24, where it silently no-ops.
+if (import.meta.url === `file://${process.argv[1]}`) await runHardwareOverbridgeVerification();
 
 function patternOperations(pattern: RytmPatternSlot): RytmPersistentOperation[] {
   const operations: RytmPersistentOperation[] = [];
@@ -214,7 +215,7 @@ function verifyRecording(
 }
 
 function requiredNumber(value: unknown, label: string): number {
-  assert.equal(typeof value, "number", `${label} must be numeric`);
+  assert.ok(typeof value === "number", `${label} must be numeric`);
   return value;
 }
 

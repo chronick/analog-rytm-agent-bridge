@@ -283,7 +283,8 @@ export async function runHardwareControlVerification(): Promise<void> {
   }
 }
 
-if (import.meta.main) await runHardwareControlVerification();
+// import.meta.main is unavailable before Node 22.18/24, where it silently no-ops.
+if (import.meta.url === `file://${process.argv[1]}`) await runHardwareControlVerification();
 
 function certificationFields(
   state: Record<string, unknown>,

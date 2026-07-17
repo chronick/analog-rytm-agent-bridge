@@ -251,7 +251,8 @@ export async function runHardwareAudioVerification(): Promise<void> {
   }
 }
 
-if (import.meta.main) await runHardwareAudioVerification();
+// import.meta.main is unavailable before Node 22.18/24, where it silently no-ops.
+if (import.meta.url === `file://${process.argv[1]}`) await runHardwareAudioVerification();
 
 function verifyRecording(
   recording: RytmAudioRecording,
@@ -260,7 +261,7 @@ function verifyRecording(
   expectedRevision: number,
   expectedSnapshotId: string,
 ): void {
-  assert.equal(recording.status, "completed", recording.warnings?.join("; "));
+  assert.equal(recording.status, "completed", recording.warnings?.join("; ") ?? "recording did not complete");
   assert.equal(recording.pattern, expectedPattern);
   assert.equal(recording.revision, expectedRevision);
   assert.equal(recording.snapshotId, expectedSnapshotId);

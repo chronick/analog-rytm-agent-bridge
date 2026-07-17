@@ -128,6 +128,14 @@ export class RustDaemonClient implements RytmDaemonApi {
         this.rejectAll(this.disconnectError(`failed to start Rust daemon: ${error.message}`));
         reject(this.disconnectError(`failed to start Rust daemon: ${error.message}`));
       });
+      // Unhandled stream "error" events crash the Node process; an async EPIPE
+      // while the daemon dies mid-write must degrade to a disconnect instead.
+      child.stdin.on("error", (error: Error) => {
+        this.rejectAll(this.disconnectError(`Rust daemon stdin failed: ${error.message}`));
+      });
+      child.stdout.on("error", (error: Error) => {
+        this.rejectAll(this.disconnectError(`Rust daemon stdout failed: ${error.message}`));
+      });
       child.once("close", (code, signal) => {
         this.stdout?.close();
         this.stdout = undefined;
@@ -311,16 +319,23 @@ export class RustDaemonClient implements RytmDaemonApi {
       }
       child.once("close", () => resolve());
       child.stdin.end();
-      const timeout = setTimeout(() => child.kill("SIGTERM"), 2_000);
-      timeout.unref();
-      child.once("close", () => clearTimeout(timeout));
+      const terminate = setTimeout(() => child.kill("SIGTERM"), 2_000);
+      terminate.unref();
+      // A daemon wedged in a syscall can ignore SIGTERM; without escalation
+      // this promise would never settle.
+      const kill = setTimeout(() => child.kill("SIGKILL"), 7_000);
+      kill.unref();
+      child.once("close", () => {
+        clearTimeout(terminate);
+        clearTimeout(kill);
+      });
     });
   }
 
   private requestWithoutStart<T>(
     method: string,
     params: Record<string, unknown>,
-    requestId = randomUUID(),
+    requestId: string = randomUUID(),
   ): Promise<T> {
     const child = this.child;
     if (!child || child.exitCode !== null || child.stdin.destroyed) {
@@ -367,11 +382,10 @@ export class RustDaemonClient implements RytmDaemonApi {
     try {
       message = JSON.parse(line) as RytmRpcResponse | RytmRpcEvent;
     } catch {
-      this.rejectAll(new RytmDaemonRpcError({
-        code: "invalid_daemon_response",
-        message: `Rust daemon emitted non-JSON output: ${line}`,
-        retryable: false,
-      }));
+      // A stray non-protocol line (library log, panic backtrace) must not fail
+      // in-flight requests while the daemon is still alive; pending requests
+      // are rejected only on stream close/error.
+      console.error(`RustDaemonClient: ignoring non-JSON daemon output: ${line}`);
       return;
     }
     if (message.schema === RYTM_RPC_SCHEMA && "eventId" in message && typeof message.eventId === "string") {
@@ -379,7 +393,18 @@ export class RustDaemonClient implements RytmDaemonApi {
       return;
     }
     const response = message as RytmRpcResponse;
-    if (response.schema !== RYTM_RPC_SCHEMA || typeof response.id !== "string") return;
+    if (response.schema !== RYTM_RPC_SCHEMA) return;
+    if (response.id === null) {
+      // Protocol-level failures not tied to one request would otherwise be
+      // silently discarded.
+      if (!response.ok) {
+        console.error(
+          `RustDaemonClient: daemon reported a global error: ${response.error.code}: ${response.error.message}`,
+        );
+      }
+      return;
+    }
+    if (typeof response.id !== "string") return;
     const pending = this.pending.get(response.id);
     if (!pending) return;
     clearTimeout(pending.timeout);

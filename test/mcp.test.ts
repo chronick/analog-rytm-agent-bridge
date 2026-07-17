@@ -40,7 +40,7 @@ test("routes health and compact inspection through an optional daemon boundary",
     async inspectGlobal() { return { source: "rust-daemon", object: "global" }; },
     async inspectOverbridgeAudio() { return { source: "rust-daemon", object: "overbridge" }; },
     async captureMultitrackAudio() { return { source: "rust-daemon", object: "multitrack" }; },
-  } as RytmDaemonApi;
+  } as unknown as RytmDaemonApi;
   const adapter = new RytmMcpAdapter(service, daemon);
 
   const health = await adapter.callTool("rytm_daemon_health", {}) as { status: string };

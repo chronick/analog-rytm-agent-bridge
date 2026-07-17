@@ -328,6 +328,7 @@ test("TypeScript client completes a real round trip through the Rust mock daemon
       }],
     };
     const songApplied = await client.applyOperationsNow(songInput);
+    assert.ok("resultingRevision" in songApplied, "apply was not a dry run");
     assert.equal(songApplied.resultingRevision, 6);
     assert.deepEqual(await client.applyOperationsNow(songInput), songApplied);
     const storedSong = await facade.callTool("rytm_inspect_song", {

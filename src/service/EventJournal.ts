@@ -21,10 +21,16 @@ export class EventJournal<TEvent> {
     if (!this.journalPath) return;
     try {
       const contents = await readFile(this.journalPath, "utf8");
-      const entries = contents
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => parseEntry<TEvent>(line));
+      const entries: JournalEntry<TEvent>[] = [];
+      for (const line of contents.split("\n").filter(Boolean)) {
+        try {
+          entries.push(parseEntry<TEvent>(line));
+        } catch {
+          // A crash mid-append leaves a torn trailing line; recovery must
+          // skip it instead of refusing to start forever.
+          console.error(`EventJournal: skipping malformed journal line: ${line}`);
+        }
+      }
       entries.sort((a, b) => a.cursor - b.cursor);
       this.entries = entries;
       this.nextCursor = (entries.at(-1)?.cursor ?? 0) + 1;

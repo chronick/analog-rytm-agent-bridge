@@ -183,7 +183,8 @@ export async function runHardwareMacroVerification(): Promise<void> {
   }
 }
 
-if (import.meta.main) await runHardwareMacroVerification();
+// import.meta.main is unavailable before Node 22.18/24, where it silently no-ops.
+if (import.meta.url === `file://${process.argv[1]}`) await runHardwareMacroVerification();
 
 function macroDefinitions(kit: Record<string, unknown>): Record<string, unknown> {
   const macros = asRecord(kit.macros);
@@ -231,7 +232,7 @@ function assertExpectedDefinitions(macros: Record<string, unknown>): void {
 }
 
 function requiredNumber(value: unknown, label: string): number {
-  assert.equal(typeof value, "number", `${label} must be numeric`);
+  assert.ok(typeof value === "number", `${label} must be numeric`);
   return value;
 }
 

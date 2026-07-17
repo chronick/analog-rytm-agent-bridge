@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { appendFile, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -195,6 +195,16 @@ test("event journal resumes cursors after restart", async () => {
   await first.service.snapshotState({ snapshotId: "snap-1" });
   const second = await createService(first.directory);
   assert.equal(second.service.getEvents()[0].cursor, 1);
+  await second.service.snapshotState({ snapshotId: "snap-2" });
+  assert.deepEqual(second.service.getEvents().map((entry) => entry.cursor), [1, 2]);
+});
+
+test("event journal recovers past a torn trailing line", async () => {
+  const first = await createService();
+  await first.service.snapshotState({ snapshotId: "snap-1" });
+  await appendFile(join(first.directory, "journal", "events.jsonl"), '{"cursor":2,"receivedAt"', "utf8");
+  const second = await createService(first.directory);
+  assert.deepEqual(second.service.getEvents().map((entry) => entry.cursor), [1]);
   await second.service.snapshotState({ snapshotId: "snap-2" });
   assert.deepEqual(second.service.getEvents().map((entry) => entry.cursor), [1, 2]);
 });
