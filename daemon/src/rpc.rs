@@ -5,20 +5,19 @@ use crate::{
         DEFAULT_PORT_MATCH,
     },
     hardware_description, mock_description,
+    state::{validation_result, MockBridgeState},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, VecDeque},
     io::{self, BufRead, Write},
+    thread,
+    time::Duration,
 };
 
 pub const RPC_SCHEMA: &str = "analog-rytm-rpc.v1";
 const REPLAY_CACHE_LIMIT: usize = 1024;
-const TRACK_NAMES: [&str; 12] = [
-    "BD", "SD", "RS", "CP", "BT", "LT", "MT", "HT", "CH", "OH", "CY", "CB",
-];
-
 pub const DECLARED_METHODS: [&str; 16] = [
     "daemon.health",
     "daemon.describe",
@@ -38,11 +37,15 @@ pub const DECLARED_METHODS: [&str; 16] = [
     "state.reconcile",
 ];
 
-pub const IMPLEMENTED_METHODS: [&str; 4] = [
+pub const MOCK_IMPLEMENTED_METHODS: [&str; 16] = DECLARED_METHODS;
+
+pub const HARDWARE_IMPLEMENTED_METHODS: [&str; 6] = [
     "daemon.health",
     "daemon.describe",
     "device.inspect_state",
     "pattern.inspect",
+    "operations.validate",
+    "state.reconcile",
 ];
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -91,7 +94,7 @@ impl BackendMode {
 }
 
 enum Backend {
-    Mock,
+    Mock(MockBridgeState),
     Hardware(RytmMidiSession),
 }
 
@@ -104,18 +107,20 @@ pub struct RpcServer {
     backend: Backend,
     replay_cache: HashMap<String, CachedResponse>,
     replay_order: VecDeque<String>,
+    emitted_event_cursor: u64,
 }
 
 impl RpcServer {
     pub fn new(mode: BackendMode, port_match: &str) -> Result<Self, String> {
         let backend = match mode {
-            BackendMode::Mock => Backend::Mock,
+            BackendMode::Mock => Backend::Mock(MockBridgeState::default()),
             BackendMode::Hardware => Backend::Hardware(RytmMidiSession::open(port_match)?),
         };
         Ok(Self {
             backend,
             replay_cache: HashMap::new(),
             replay_order: VecDeque::new(),
+            emitted_event_cursor: 0,
         })
     }
 
@@ -124,6 +129,20 @@ impl RpcServer {
     }
 
     pub fn handle_line(&mut self, line: &str) -> Value {
+        self.handle_messages(line)
+            .into_iter()
+            .next()
+            .expect("every request produces a response")
+    }
+
+    pub fn handle_messages(&mut self, line: &str) -> Vec<Value> {
+        let response = self.handle_request(line);
+        let mut messages = vec![response];
+        messages.extend(self.drain_rpc_events());
+        messages
+    }
+
+    fn handle_request(&mut self, line: &str) -> Value {
         let raw = match serde_json::from_str::<Value>(line) {
             Ok(raw) => raw,
             Err(error) => {
@@ -204,12 +223,12 @@ impl RpcServer {
                 "processId": std::process::id(),
                 "methods": {
                     "declared": DECLARED_METHODS,
-                    "implemented": IMPLEMENTED_METHODS,
+                    "implemented": self.implemented_methods(),
                 }
             })),
             "daemon.describe" => {
                 let description = match self.backend {
-                    Backend::Mock => mock_description(),
+                    Backend::Mock(_) => mock_description(),
                     Backend::Hardware(_) => hardware_description(),
                 };
                 serde_json::from_str(&describe_as_json(&description)).map_err(|error| {
@@ -219,7 +238,7 @@ impl RpcServer {
                 })
             }
             "device.inspect_state" => match &mut self.backend {
-                Backend::Mock => Ok(mock_state()),
+                Backend::Mock(state) => Ok(state.inspect_state()),
                 Backend::Hardware(session) => inspect_work_buffer_state(session)
                     .map(hardware_state)
                     .map_err(RpcDispatchError::hardware),
@@ -229,19 +248,118 @@ impl RpcServer {
                 let pattern_index =
                     parse_pattern_slot(slot).map_err(RpcDispatchError::validation)?;
                 match &mut self.backend {
-                    Backend::Mock => Ok(mock_pattern(slot.to_ascii_uppercase(), pattern_index)),
+                    Backend::Mock(state) => state
+                        .inspect_pattern(&slot.to_ascii_uppercase())
+                        .map_err(RpcDispatchError::validation),
                     Backend::Hardware(session) => query_pattern_summary(session, pattern_index)
+                        .map(|summary| hardware_pattern_summary(&summary))
                         .map_err(RpcDispatchError::hardware),
                 }
             }
-            method if DECLARED_METHODS.contains(&method) => Err(RpcDispatchError {
-                code: "not_implemented",
-                message: format!(
-                    "RPC method {method:?} is declared but not implemented in this milestone"
-                ),
-                retryable: false,
-                details: Some(json!({ "implementedMethods": IMPLEMENTED_METHODS })),
-            }),
+            "operations.validate" => match &self.backend {
+                Backend::Mock(state) => state
+                    .validate(&request.params)
+                    .map_err(RpcDispatchError::validation),
+                Backend::Hardware(_) => Ok(validation_result(
+                    request.params.get("operations").unwrap_or(&Value::Null),
+                )),
+            },
+            "operations.propose" => match &self.backend {
+                Backend::Mock(state) => state
+                    .propose(&request.params)
+                    .map_err(RpcDispatchError::validation),
+                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+            },
+            "operations.queue" => match &mut self.backend {
+                Backend::Mock(state) => state
+                    .queue(&request.params)
+                    .map_err(RpcDispatchError::validation),
+                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+            },
+            "operations.apply_now" => match &mut self.backend {
+                Backend::Mock(state) => state
+                    .apply_now(&request.params)
+                    .map_err(RpcDispatchError::validation),
+                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+            },
+            "realtime.set_parameter" => match &mut self.backend {
+                Backend::Mock(state) => state
+                    .set_live_parameter(&request.params)
+                    .map_err(RpcDispatchError::validation),
+                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+            },
+            "realtime.trigger_track" => match &mut self.backend {
+                Backend::Mock(state) => state
+                    .trigger_track(&request.params)
+                    .map_err(RpcDispatchError::validation),
+                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+            },
+            "realtime.set_transport" => match &mut self.backend {
+                Backend::Mock(state) => state
+                    .set_transport(&request.params)
+                    .map_err(RpcDispatchError::validation),
+                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+            },
+            "realtime.change_pattern" => match &mut self.backend {
+                Backend::Mock(state) => state
+                    .change_pattern(&request.params)
+                    .map_err(RpcDispatchError::validation),
+                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+            },
+            "snapshot.create" => match &mut self.backend {
+                Backend::Mock(state) => state
+                    .create_snapshot(&request.params)
+                    .map_err(RpcDispatchError::validation),
+                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+            },
+            "snapshot.rollback" => match &mut self.backend {
+                Backend::Mock(state) => state
+                    .rollback_snapshot(&request.params)
+                    .map_err(RpcDispatchError::validation),
+                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+            },
+            "events.read" => match &self.backend {
+                Backend::Mock(state) => state
+                    .read_events(&request.params)
+                    .map_err(RpcDispatchError::validation),
+                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+            },
+            "state.reconcile" => match &mut self.backend {
+                Backend::Mock(state) => Ok(state.reconcile()),
+                Backend::Hardware(session) => inspect_work_buffer_state(session)
+                    .map(|summary| json!({ "status": "observed", "changed": false, "state": hardware_state(summary) }))
+                    .map_err(RpcDispatchError::hardware),
+            },
+            "test.advance_mock_transport" => match &mut self.backend {
+                Backend::Mock(state) => state
+                    .advance_transport(&request.params)
+                    .map_err(RpcDispatchError::validation),
+                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+            },
+            "test.delay" => match &self.backend {
+                Backend::Mock(_) => {
+                    let milliseconds = request
+                        .params
+                        .get("milliseconds")
+                        .and_then(Value::as_u64)
+                        .ok_or_else(|| {
+                            RpcDispatchError::validation(
+                                "params.milliseconds must be a non-negative integer".to_string(),
+                            )
+                        })?;
+                    if milliseconds > 10_000 {
+                        return Err(RpcDispatchError::validation(
+                            "params.milliseconds must be at most 10000".to_string(),
+                        ));
+                    }
+                    thread::sleep(Duration::from_millis(milliseconds));
+                    Ok(json!({ "delayedMs": milliseconds }))
+                }
+                Backend::Hardware(_) => Err(hardware_capability_unavailable(&request.method)),
+            },
+            method if DECLARED_METHODS.contains(&method) => {
+                Err(hardware_capability_unavailable(method))
+            }
             method => Err(RpcDispatchError {
                 code: "method_not_found",
                 message: format!("unknown RPC method {method:?}"),
@@ -253,9 +371,38 @@ impl RpcServer {
 
     fn backend_mode(&self) -> BackendMode {
         match self.backend {
-            Backend::Mock => BackendMode::Mock,
+            Backend::Mock(_) => BackendMode::Mock,
             Backend::Hardware(_) => BackendMode::Hardware,
         }
+    }
+
+    fn implemented_methods(&self) -> &'static [&'static str] {
+        match self.backend {
+            Backend::Mock(_) => &MOCK_IMPLEMENTED_METHODS,
+            Backend::Hardware(_) => &HARDWARE_IMPLEMENTED_METHODS,
+        }
+    }
+
+    fn drain_rpc_events(&mut self) -> Vec<Value> {
+        let Backend::Mock(state) = &self.backend else {
+            return Vec::new();
+        };
+        let events = state.events_after(self.emitted_event_cursor);
+        if let Some(last) = events.last() {
+            self.emitted_event_cursor = last.cursor;
+        }
+        events
+            .into_iter()
+            .map(|entry| {
+                let event_type = entry.event["type"].as_str().unwrap_or("unknown");
+                json!({
+                    "schema": RPC_SCHEMA,
+                    "eventId": format!("event-{}", entry.cursor),
+                    "type": event_type,
+                    "payload": entry,
+                })
+            })
+            .collect()
     }
 
     fn cache_response(&mut self, id: String, request: Value, response: Value) {
@@ -279,17 +426,29 @@ pub fn serve_stdio(mode: BackendMode, port_match: &str) -> Result<(), String> {
         if line.trim().is_empty() {
             continue;
         }
-        let response = server.handle_line(&line);
-        serde_json::to_writer(&mut stdout, &response)
-            .map_err(|error| format!("failed to encode RPC response: {error}"))?;
-        stdout
-            .write_all(b"\n")
-            .map_err(|error| format!("failed to write RPC response: {error}"))?;
+        for message in server.handle_messages(&line) {
+            serde_json::to_writer(&mut stdout, &message)
+                .map_err(|error| format!("failed to encode RPC response: {error}"))?;
+            stdout
+                .write_all(b"\n")
+                .map_err(|error| format!("failed to write RPC response: {error}"))?;
+        }
         stdout
             .flush()
             .map_err(|error| format!("failed to flush RPC response: {error}"))?;
     }
     Ok(())
+}
+
+fn hardware_capability_unavailable(method: &str) -> RpcDispatchError {
+    RpcDispatchError {
+        code: "capability_unavailable",
+        message: format!(
+            "hardware RPC method {method:?} is disabled until its snapshot, readback, and rollback path is verified"
+        ),
+        retryable: false,
+        details: Some(json!({ "implementedMethods": HARDWARE_IMPLEMENTED_METHODS })),
+    }
 }
 
 struct RpcDispatchError {
@@ -367,84 +526,114 @@ fn error_response(
     json!({ "schema": RPC_SCHEMA, "id": id, "ok": false, "error": error })
 }
 
-fn mock_state() -> Value {
-    let pattern = mock_pattern("A01".to_string(), 0);
-    json!({
-        "revision": 0,
-        "device": {
-            "model": "Analog Rytm MKII",
-            "connected": true,
-            "adapter": "mock",
-            "activePattern": "A01",
-            "compatibility": {
-                "adapter": "mock",
-                "adapterTargetFirmware": null,
-                "observedFirmware": null,
-                "status": "mock",
-                "notes": ["Mock daemon. No MIDI or SysEx transport is open."],
-            },
-        },
-        "transport": {
-            "playing": false,
-            "pattern": "A01",
-            "step": 0,
-            "beat": 0,
-            "measure": 0,
-            "tempo": 120.0,
-        },
-        "activePattern": pattern,
-        "kit": { "index": 0, "name": "MOCK", "trackLevels": vec![100; 12] },
-        "settings": { "tempo": 120.0, "selectedTrack": "BD", "mutedTracks": [] },
-        "midi": {},
-        "queue": { "supported": false, "pending": 0 },
-        "snapshots": { "supported": false, "count": 0 },
-    })
-}
-
 fn hardware_state(summary: Value) -> Value {
-    let pattern = summary["pattern"].clone();
-    let active_pattern = pattern["slot"].clone();
+    let pattern = hardware_pattern_summary(&summary["pattern"]);
+    let active_pattern = pattern["pattern"].clone();
     let tempo = summary["settings"]["tempo"].clone();
     json!({
         "revision": null,
         "device": {
             "model": "Analog Rytm MKII",
             "connected": true,
-            "adapter": "hardware",
             "activePattern": active_pattern,
-            "compatibility": summary["compatibility"].clone(),
+            "firmware": {
+                "adapter": "rytm-rs",
+                "adapterTargetFirmware": summary["compatibility"]["adapterTargetFirmware"].clone(),
+                "observedFirmware": summary["compatibility"]["observedFirmware"].clone(),
+                "compatibility": "unverified",
+                "notes": summary["compatibility"]["notes"].clone(),
+            },
+            "capabilities": {
+                "realtimeMidi": true,
+                "sysExState": true,
+                "patternEdit": true,
+                "kitEdit": true,
+                "machineEdit": true,
+                "sampleSlotAssignment": false,
+                "sampleTransfer": false,
+                "sceneMacros": false,
+                "performanceMacros": false,
+                "songs": false,
+            },
         },
         "transport": {
+            "epoch": "hardware-observed",
             "playing": null,
-            "pattern": pattern["slot"].clone(),
+            "pattern": pattern["pattern"].clone(),
             "step": null,
             "beat": null,
             "measure": null,
+            "stepsPerBeat": 4,
+            "beatsPerMeasure": 4,
             "tempo": tempo,
         },
         "activePattern": pattern,
-        "kit": summary["kit"].clone(),
-        "settings": summary["settings"].clone(),
-        "midi": summary["midi"].clone(),
-        "queue": { "supported": false, "pending": 0 },
-        "snapshots": { "supported": false, "count": 0 },
+        "operationSets": [],
+        "snapshots": [],
+        "evidence": {
+            "kit": summary["kit"].clone(),
+            "settings": summary["settings"].clone(),
+            "midi": summary["midi"].clone(),
+        },
     })
 }
 
-fn mock_pattern(slot: String, index: usize) -> Value {
+fn hardware_pattern_summary(summary: &Value) -> Value {
+    let mut track_lengths = serde_json::Map::new();
+    let mut trigs = Vec::new();
+    for track in summary["tracks"].as_array().into_iter().flatten() {
+        let Some(track_name) = track["track"].as_str() else {
+            continue;
+        };
+        track_lengths.insert(track_name.to_string(), track["length"].clone());
+        for trig in track["trigs"].as_array().into_iter().flatten() {
+            let mut locks = serde_json::Map::new();
+            if !trig["filterCutoffLock"].is_null() {
+                locks.insert(
+                    "filter_frequency".to_string(),
+                    trig["filterCutoffLock"].clone(),
+                );
+            }
+            let mut normalized = json!({
+                "track": track_name,
+                "step": trig["step"].clone(),
+                "velocity": trig["velocity"].clone(),
+                "locks": locks,
+            });
+            if !trig["microTiming"].is_null() {
+                normalized["microTiming"] = trig["microTiming"].clone();
+            }
+            if trig["condition"]
+                .as_str()
+                .is_some_and(|condition| condition != "unset")
+            {
+                normalized["condition"] = trig["condition"].clone();
+            }
+            trigs.push(normalized);
+        }
+    }
+    trigs.sort_by(|left, right| {
+        left["step"]
+            .as_u64()
+            .cmp(&right["step"].as_u64())
+            .then(left["track"].as_str().cmp(&right["track"].as_str()))
+    });
     json!({
-        "index": index,
-        "slot": slot,
-        "structureVersion": "mock",
-        "kitNumber": 0,
-        "masterLength": 16,
-        "swing": 50,
-        "tempo": 120.0,
-        "tracks": TRACK_NAMES.iter().map(|track| json!({
-            "track": track,
-            "length": 16,
-            "trigs": [],
-        })).collect::<Vec<_>>(),
+        "pattern": summary["slot"].clone(),
+        "length": summary["masterLength"].clone(),
+        "trackLengths": track_lengths,
+        "machines": {},
+        "sampleSlots": {},
+        "kitParameters": {},
+        "trigCount": trigs.len(),
+        "trigs": trigs,
+        "evidence": {
+            "structureVersion": summary["structureVersion"].clone(),
+            "kitNumber": summary["kitNumber"].clone(),
+            "timeMode": summary["timeMode"].clone(),
+            "swing": summary["swing"].clone(),
+            "tempo": summary["tempo"].clone(),
+        },
     })
 }
 
@@ -479,6 +668,17 @@ mod tests {
         let conflict = server.handle_line(&request("same-id", "daemon.health", json!({})));
         assert_eq!(conflict["ok"], false);
         assert_eq!(conflict["error"]["code"], "request_id_conflict");
+
+        let mutation = request(
+            "snapshot-replay",
+            "snapshot.create",
+            json!({ "snapshotId": "once" }),
+        );
+        let first_messages = server.handle_messages(&mutation);
+        let replay_messages = server.handle_messages(&mutation);
+        assert_eq!(first_messages.len(), 2);
+        assert_eq!(replay_messages.len(), 1);
+        assert_eq!(first_messages[0], replay_messages[0]);
     }
 
     #[test]
@@ -494,12 +694,12 @@ mod tests {
         ));
         assert_eq!(invalid_pattern["error"]["code"], "validation_failed");
 
-        let pending = server.handle_line(&request(
+        let invalid_set = server.handle_line(&request(
             "queue-1",
             "operations.queue",
             json!({ "operations": [] }),
         ));
-        assert_eq!(pending["error"]["code"], "not_implemented");
+        assert_eq!(invalid_set["error"]["code"], "validation_failed");
     }
 
     #[test]
@@ -513,7 +713,50 @@ mod tests {
             "pattern.inspect",
             json!({ "pattern": "H16" }),
         ));
-        assert_eq!(pattern["result"]["index"], 127);
-        assert_eq!(pattern["result"]["tracks"].as_array().unwrap().len(), 12);
+        assert_eq!(pattern["result"]["pattern"], "H16");
+        assert_eq!(pattern["result"]["trigCount"], 0);
+    }
+
+    #[test]
+    fn emits_event_envelopes_after_mutating_responses() {
+        let mut server = RpcServer::new_mock();
+        let messages = server.handle_messages(&request(
+            "snapshot-1",
+            "snapshot.create",
+            json!({ "snapshotId": "before" }),
+        ));
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["ok"], true);
+        assert_eq!(messages[1]["type"], "snapshot.created");
+        assert_eq!(messages[1]["payload"]["cursor"], 1);
+    }
+
+    #[test]
+    fn normalizes_hardware_patterns_to_the_agent_delta_schema() {
+        let normalized = hardware_pattern_summary(&json!({
+            "slot": "A01",
+            "masterLength": 16,
+            "structureVersion": 5,
+            "kitNumber": 0,
+            "timeMode": "Normal",
+            "swing": 54,
+            "tempo": 120.0,
+            "tracks": [{
+                "track": "BD",
+                "length": 16,
+                "trigs": [{
+                    "step": 0,
+                    "velocity": 108,
+                    "microTiming": 0,
+                    "condition": "unset",
+                    "filterCutoffLock": 92,
+                }],
+            }],
+        }));
+        assert_eq!(normalized["pattern"], "A01");
+        assert_eq!(normalized["trigCount"], 1);
+        assert_eq!(normalized["trigs"][0]["track"], "BD");
+        assert_eq!(normalized["trigs"][0]["locks"]["filter_frequency"], 92);
+        assert!(normalized["trigs"][0].get("condition").is_none());
     }
 }

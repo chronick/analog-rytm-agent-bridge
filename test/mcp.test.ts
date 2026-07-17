@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { RytmMcpAdapter } from "../src/mcp/RytmMcpAdapter.ts";
+import type { RytmDaemonApi } from "../src/rpc/types.ts";
 import { RytmAgentService } from "../src/service/RytmAgentService.ts";
 
 test("exposes the initial Rytm MCP tool surface", () => {
@@ -18,7 +19,7 @@ test("routes health and compact inspection through an optional daemon boundary",
     async health() { return { status: "ready" as const, connected: true, adapter: "mock" as const, protocolSchema: "analog-rytm-rpc.v1" as const, daemonSchema: "analog-rytm-daemon.v1" as const, processId: 1, methods: { declared: [], implemented: [] } }; },
     async inspectDeviceState() { return { source: "rust-daemon" }; },
     async inspectPattern(pattern?: string) { return { source: "rust-daemon", pattern }; },
-  };
+  } as RytmDaemonApi;
   const adapter = new RytmMcpAdapter(service, daemon);
 
   const health = await adapter.callTool("rytm_daemon_health", {}) as { status: string };

@@ -187,28 +187,50 @@ export class RytmMcpAdapter {
           ? this.daemon.inspectPattern((args as { pattern?: string }).pattern)
           : this.service.inspectPattern((args as { pattern?: string }).pattern);
       case "rytm_propose_pattern_delta":
-        return this.service.proposePatternDelta(args as RytmPatternDeltaInput);
+        return this.daemon
+          ? this.daemon.proposePatternDelta(args as RytmPatternDeltaInput)
+          : this.service.proposePatternDelta(args as RytmPatternDeltaInput);
       case "rytm_validate_operations":
-        return this.service.validateOperations((args as { operations: RytmPersistentOperation[] }).operations);
+        return this.daemon
+          ? this.daemon.validateOperations((args as { operations: RytmPersistentOperation[] }).operations)
+          : this.service.validateOperations((args as { operations: RytmPersistentOperation[] }).operations);
       case "rytm_queue_operations":
-        return this.service.queueOperations(args as RytmOperationSetInput);
+        return this.daemon
+          ? this.daemon.queueOperations(args as RytmOperationSetInput)
+          : this.service.queueOperations(args as RytmOperationSetInput);
       case "rytm_apply_operations_now":
-        return this.service.applyOperationsNow(args as Omit<RytmOperationSetInput, "applyAt" | "latePolicy">);
+        return this.daemon
+          ? this.daemon.applyOperationsNow(args as Omit<RytmOperationSetInput, "applyAt" | "latePolicy">)
+          : this.service.applyOperationsNow(args as Omit<RytmOperationSetInput, "applyAt" | "latePolicy">);
       case "rytm_set_live_parameter":
-        return this.service.setLiveParameter(args as RytmLiveParameterInput);
+        return this.daemon
+          ? this.daemon.setLiveParameter(args as RytmLiveParameterInput)
+          : this.service.setLiveParameter(args as RytmLiveParameterInput);
       case "rytm_trigger_track":
-        return this.service.triggerTrack(args as RytmTriggerTrackInput);
+        return this.daemon
+          ? this.daemon.triggerTrack(args as RytmTriggerTrackInput)
+          : this.service.triggerTrack(args as RytmTriggerTrackInput);
       case "rytm_set_transport":
-        return this.service.setTransport(args as RytmSetTransportInput);
+        return this.daemon
+          ? this.daemon.setTransport(args as RytmSetTransportInput)
+          : this.service.setTransport(args as RytmSetTransportInput);
       case "rytm_change_pattern":
-        return this.service.changePattern(args as RytmChangePatternInput);
+        return this.daemon
+          ? this.daemon.changePattern(args as RytmChangePatternInput)
+          : this.service.changePattern(args as RytmChangePatternInput);
       case "rytm_snapshot_state":
-        return this.service.snapshotState(args as RytmSnapshotInput);
+        return this.daemon
+          ? this.daemon.snapshotState(args as RytmSnapshotInput)
+          : this.service.snapshotState(args as RytmSnapshotInput);
       case "rytm_rollback_snapshot":
-        return this.service.rollbackSnapshot(args as RytmRollbackInput);
+        return this.daemon
+          ? this.daemon.rollbackSnapshot(args as RytmRollbackInput)
+          : this.service.rollbackSnapshot(args as RytmRollbackInput);
       case "rytm_get_events": {
         const input = args as { afterCursor?: number; limit?: number };
-        return this.service.getEvents(input.afterCursor ?? 0, input.limit ?? 100);
+        return this.daemon
+          ? this.daemon.getEvents(input.afterCursor ?? 0, input.limit ?? 100)
+          : this.service.getEvents(input.afterCursor ?? 0, input.limit ?? 100);
       }
       default:
         throw new Error(`unknown Rytm MCP tool: ${name}`);

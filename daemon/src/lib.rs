@@ -1,5 +1,6 @@
 pub mod hardware;
 pub mod rpc;
+pub mod state;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AdapterMode {

@@ -54,4 +54,40 @@ export interface RytmDaemonApi {
   health(): Promise<RytmDaemonHealth>;
   inspectDeviceState(): Promise<unknown>;
   inspectPattern(pattern?: string): Promise<unknown>;
+  validateOperations(operations: RytmPersistentOperation[]): Promise<RytmValidationResult>;
+  proposePatternDelta(input: RytmPatternDeltaInput): Promise<{
+    validation: RytmValidationResult;
+    basePattern: RytmPatternSummary;
+    projectedPattern?: RytmPatternSummary;
+  }>;
+  queueOperations(input: RytmOperationSetInput): Promise<QueuedRytmOperationSet | RytmOperationSetDryRun>;
+  applyOperationsNow(
+    input: Omit<RytmOperationSetInput, "applyAt" | "latePolicy"> & Partial<Pick<RytmOperationSetInput, "applyAt" | "latePolicy">>,
+  ): Promise<QueuedRytmOperationSet | RytmOperationSetDryRun>;
+  setLiveParameter(input: RytmLiveParameterInput): Promise<RytmLiveParameterInput>;
+  triggerTrack(input: RytmTriggerTrackInput): Promise<RytmTriggerTrackInput>;
+  setTransport(input: RytmSetTransportInput): Promise<RytmTransportState>;
+  changePattern(input: RytmChangePatternInput): Promise<RytmTransportState>;
+  snapshotState(input?: RytmSnapshotInput): Promise<RytmStateSnapshot>;
+  rollbackSnapshot(input: RytmRollbackInput): Promise<RytmBridgeState>;
+  getEvents(afterCursor?: number, limit?: number): Promise<Array<{ cursor: number; receivedAt: string; event: unknown }>>;
+  reconcileState(): Promise<unknown>;
 }
+import type {
+  QueuedRytmOperationSet,
+  RytmBridgeState,
+  RytmChangePatternInput,
+  RytmLiveParameterInput,
+  RytmOperationSetDryRun,
+  RytmOperationSetInput,
+  RytmPatternDeltaInput,
+  RytmPatternSummary,
+  RytmPersistentOperation,
+  RytmRollbackInput,
+  RytmSetTransportInput,
+  RytmSnapshotInput,
+  RytmStateSnapshot,
+  RytmTransportState,
+  RytmTriggerTrackInput,
+  RytmValidationResult,
+} from "../domain/types.ts";

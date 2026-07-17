@@ -7,9 +7,28 @@ import {
   type RytmDaemonApi,
   type RytmDaemonHealth,
   type RytmRpcErrorBody,
+  type RytmRpcEvent,
   type RytmRpcRequest,
   type RytmRpcResponse,
 } from "./types.ts";
+import type {
+  QueuedRytmOperationSet,
+  RytmBridgeState,
+  RytmChangePatternInput,
+  RytmLiveParameterInput,
+  RytmOperationSetDryRun,
+  RytmOperationSetInput,
+  RytmPatternDeltaInput,
+  RytmPatternSummary,
+  RytmPersistentOperation,
+  RytmRollbackInput,
+  RytmSetTransportInput,
+  RytmSnapshotInput,
+  RytmStateSnapshot,
+  RytmTransportState,
+  RytmTriggerTrackInput,
+  RytmValidationResult,
+} from "../domain/types.ts";
 
 export interface RustDaemonClientOptions {
   command?: string;
@@ -43,6 +62,7 @@ export class RustDaemonClient implements RytmDaemonApi {
   private readonly options: Required<Pick<RustDaemonClientOptions, "command" | "args" | "requestTimeoutMs">> &
     Omit<RustDaemonClientOptions, "command" | "args" | "requestTimeoutMs">;
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly eventListeners = new Set<(event: RytmRpcEvent) => void>();
   private child?: ChildProcessWithoutNullStreams;
   private stdout?: ReadLineInterface;
   private stderr = "";
@@ -127,6 +147,69 @@ export class RustDaemonClient implements RytmDaemonApi {
     return this.request("pattern.inspect", pattern === undefined ? {} : { pattern });
   }
 
+  async validateOperations(operations: RytmPersistentOperation[]): Promise<RytmValidationResult> {
+    return this.request("operations.validate", { operations });
+  }
+
+  async proposePatternDelta(input: RytmPatternDeltaInput): Promise<{
+    validation: RytmValidationResult;
+    basePattern: RytmPatternSummary;
+    projectedPattern?: RytmPatternSummary;
+  }> {
+    return this.request("operations.propose", input as unknown as Record<string, unknown>);
+  }
+
+  async queueOperations(input: RytmOperationSetInput): Promise<QueuedRytmOperationSet | RytmOperationSetDryRun> {
+    return this.request("operations.queue", input as unknown as Record<string, unknown>);
+  }
+
+  async applyOperationsNow(
+    input: Omit<RytmOperationSetInput, "applyAt" | "latePolicy"> & Partial<Pick<RytmOperationSetInput, "applyAt" | "latePolicy">>,
+  ): Promise<QueuedRytmOperationSet | RytmOperationSetDryRun> {
+    return this.request("operations.apply_now", input as unknown as Record<string, unknown>);
+  }
+
+  async setLiveParameter(input: RytmLiveParameterInput): Promise<RytmLiveParameterInput> {
+    return this.request("realtime.set_parameter", input as unknown as Record<string, unknown>);
+  }
+
+  async triggerTrack(input: RytmTriggerTrackInput): Promise<RytmTriggerTrackInput> {
+    return this.request("realtime.trigger_track", input as unknown as Record<string, unknown>);
+  }
+
+  async setTransport(input: RytmSetTransportInput): Promise<RytmTransportState> {
+    return this.request("realtime.set_transport", input as unknown as Record<string, unknown>);
+  }
+
+  async changePattern(input: RytmChangePatternInput): Promise<RytmTransportState> {
+    return this.request("realtime.change_pattern", input as unknown as Record<string, unknown>);
+  }
+
+  async snapshotState(input: RytmSnapshotInput = {}): Promise<RytmStateSnapshot> {
+    return this.request("snapshot.create", input as unknown as Record<string, unknown>);
+  }
+
+  async rollbackSnapshot(input: RytmRollbackInput): Promise<RytmBridgeState> {
+    return this.request("snapshot.rollback", input as unknown as Record<string, unknown>);
+  }
+
+  async getEvents(afterCursor = 0, limit = 100): Promise<Array<{ cursor: number; receivedAt: string; event: unknown }>> {
+    return this.request("events.read", { afterCursor, limit });
+  }
+
+  async reconcileState(): Promise<unknown> {
+    return this.request("state.reconcile");
+  }
+
+  async advanceMockTransport(steps = 1): Promise<RytmTransportState> {
+    return this.request("test.advance_mock_transport", { steps });
+  }
+
+  onEvent(listener: (event: RytmRpcEvent) => void): () => void {
+    this.eventListeners.add(listener);
+    return () => this.eventListeners.delete(listener);
+  }
+
   async close(): Promise<void> {
     this.intentionalClose = true;
     const child = this.child;
@@ -190,9 +273,9 @@ export class RustDaemonClient implements RytmDaemonApi {
   }
 
   private handleLine(line: string): void {
-    let response: RytmRpcResponse;
+    let message: RytmRpcResponse | RytmRpcEvent;
     try {
-      response = JSON.parse(line) as RytmRpcResponse;
+      message = JSON.parse(line) as RytmRpcResponse | RytmRpcEvent;
     } catch {
       this.rejectAll(new RytmDaemonRpcError({
         code: "invalid_daemon_response",
@@ -201,6 +284,11 @@ export class RustDaemonClient implements RytmDaemonApi {
       }));
       return;
     }
+    if (message.schema === RYTM_RPC_SCHEMA && "eventId" in message && typeof message.eventId === "string") {
+      for (const listener of this.eventListeners) listener(message);
+      return;
+    }
+    const response = message as RytmRpcResponse;
     if (response.schema !== RYTM_RPC_SCHEMA || typeof response.id !== "string") return;
     const pending = this.pending.get(response.id);
     if (!pending) return;
