@@ -7,8 +7,9 @@ import { RytmAgentService } from "../src/service/RytmAgentService.ts";
 test("exposes the initial Rytm MCP tool surface", () => {
   const adapter = new RytmMcpAdapter(new RytmAgentService());
   const tools = adapter.listTools();
-  assert.equal(tools.length, 14);
+  assert.equal(tools.length, 17);
   assert.ok(tools.some((tool) => tool.name === "rytm_daemon_health"));
+  assert.ok(tools.some((tool) => tool.name === "rytm_inspect_track_sound"));
   assert.ok(tools.some((tool) => tool.name === "rytm_queue_operations"));
   assert.ok(tools.some((tool) => tool.name === "rytm_rollback_snapshot"));
 });
@@ -19,6 +20,9 @@ test("routes health and compact inspection through an optional daemon boundary",
     async health() { return { status: "ready" as const, connected: true, adapter: "mock" as const, protocolSchema: "analog-rytm-rpc.v1" as const, daemonSchema: "analog-rytm-daemon.v1" as const, processId: 1, methods: { declared: [], implemented: [] } }; },
     async inspectDeviceState() { return { source: "rust-daemon" }; },
     async inspectPattern(pattern?: string) { return { source: "rust-daemon", pattern }; },
+    async inspectKit() { return { source: "rust-daemon", object: "kit" }; },
+    async inspectSound(track: string) { return { source: "rust-daemon", object: "sound", track }; },
+    async inspectGlobal() { return { source: "rust-daemon", object: "global" }; },
   } as RytmDaemonApi;
   const adapter = new RytmMcpAdapter(service, daemon);
 
@@ -26,6 +30,9 @@ test("routes health and compact inspection through an optional daemon boundary",
   assert.equal(health.status, "ready");
   assert.deepEqual(await adapter.callTool("rytm_inspect_device_state", {}), { source: "rust-daemon" });
   assert.deepEqual(await adapter.callTool("rytm_inspect_pattern", { pattern: "B02" }), { source: "rust-daemon", pattern: "B02" });
+  assert.deepEqual(await adapter.callTool("rytm_inspect_kit", {}), { source: "rust-daemon", object: "kit" });
+  assert.deepEqual(await adapter.callTool("rytm_inspect_track_sound", { track: "CH" }), { source: "rust-daemon", object: "sound", track: "CH" });
+  assert.deepEqual(await adapter.callTool("rytm_inspect_global", {}), { source: "rust-daemon", object: "global" });
 });
 
 test("dispatches MCP-style calls to the Rytm service", async () => {
@@ -48,6 +55,10 @@ test("dispatches MCP-style calls to the Rytm service", async () => {
 
   const pattern = await adapter.callTool("rytm_inspect_pattern", { pattern: "A01" }) as { trigCount: number };
   assert.equal(pattern.trigCount, 1);
+
+  const sound = await adapter.callTool("rytm_inspect_track_sound", { track: "BD" }) as { track: string; machine: string };
+  assert.equal(sound.track, "BD");
+  assert.equal(sound.machine, "bdhard");
 
   await assert.rejects(adapter.callTool("not_a_tool", {}), /unknown Rytm MCP tool/);
 });

@@ -147,6 +147,18 @@ export class RustDaemonClient implements RytmDaemonApi {
     return this.request("pattern.inspect", pattern === undefined ? {} : { pattern });
   }
 
+  async inspectKit(): Promise<unknown> {
+    return this.request("kit.inspect");
+  }
+
+  async inspectSound(track: string): Promise<unknown> {
+    return this.request("sound.inspect", { track });
+  }
+
+  async inspectGlobal(): Promise<unknown> {
+    return this.request("global.inspect");
+  }
+
   async validateOperations(operations: RytmPersistentOperation[]): Promise<RytmValidationResult> {
     return this.request("operations.validate", { operations });
   }

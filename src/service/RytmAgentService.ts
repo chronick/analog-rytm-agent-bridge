@@ -53,7 +53,7 @@ interface InternalPattern {
   trackLengths: Map<RytmTrackId, number>;
   machines: Map<RytmTrackId, string>;
   sampleSlots: Map<RytmTrackId, { slot: number; sampleId: string }>;
-  kitParameters: Map<string, number>;
+  kitParameters: Map<string, unknown>;
   trigs: Map<string, InternalTrig>;
 }
 
@@ -72,6 +72,7 @@ export interface RytmAgentServiceOptions {
 }
 
 const exposedHistoryLimit = 512;
+const rytmTrackIds: RytmTrackId[] = ["BD", "SD", "RS", "CP", "BT", "LT", "MT", "HT", "CH", "OH", "CY", "CB"];
 
 export class RytmAgentService {
   readonly journal: EventJournal<RytmEvent>;
@@ -135,6 +136,64 @@ export class RytmAgentService {
   inspectPattern(pattern = this.activePattern): RytmPatternSummary {
     assertPatternSlot(pattern);
     return summarizePattern(this.ensurePattern(pattern));
+  }
+
+  inspectKit(): unknown {
+    return {
+      index: 0,
+      name: "MOCK KIT",
+      structureVersion: 5,
+      trackLevels: Array.from({ length: 12 }, () => 100),
+      retrig: rytmTrackIds.map((track) => ({ track, parameters: { rate: "R1_16", length: 0, velocityCurve: 0, alwaysOn: false } })),
+      sounds: rytmTrackIds.map((track) => this.inspectSound(track)),
+      fx: { delay: {}, reverb: {}, distortion: {}, compressor: {}, lfo: {} },
+      controlInputs: { input1: [], input2: [] },
+    };
+  }
+
+  inspectSound(track: string): unknown {
+    const normalized = track.toUpperCase() as RytmTrackId;
+    if (!rytmTrackIds.includes(normalized)) throw new Error(`invalid track: ${track}`);
+    return {
+      track: normalized,
+      name: `MOCK ${normalized}`,
+      structureVersion: 5,
+      machine: normalized === "BD" ? "bdhard" : "unset",
+      machineParameters: {},
+      accentLevel: 32,
+      sample: {},
+      filter: {},
+      amp: {},
+      lfo: {},
+      settings: {},
+    };
+  }
+
+  inspectGlobal(): unknown {
+    return {
+      global: {
+        index: 0,
+        structureVersion: 5,
+        metronome: {},
+        midi: {},
+        sequencer: {},
+        routing: {
+          routeToMainFlags: 4095,
+          tracksRoutedToMain: rytmTrackIds,
+          sendToFxFlags: 4095,
+          tracksSentToFx: rytmTrackIds,
+          usbIn: "Stereo",
+          usbOut: "Stereo",
+          usbToMainDb: "Zero",
+        },
+      },
+      settings: {
+        structureVersion: 5,
+        tempo: this.transportState.tempo,
+        selectedTrack: "BD",
+        fixedVelocity: { enabled: false, amount: 100 },
+      },
+    };
   }
 
   validateOperations(operations: RytmPersistentOperation[]): RytmValidationResult {
@@ -478,6 +537,24 @@ function applyOperationsToPatterns(
         ensurePattern(patterns, activePattern).kitParameters.set(key, operation.value);
         break;
       }
+      case "set_sound_parameter":
+        ensurePattern(patterns, activePattern).kitParameters.set(
+          `sound.${operation.track}.${operation.page}.${operation.parameter}`,
+          operation.value,
+        );
+        break;
+      case "set_fx_parameter":
+        ensurePattern(patterns, activePattern).kitParameters.set(
+          `fx.${operation.effect}.${operation.parameter}`,
+          operation.value,
+        );
+        break;
+      case "set_global_parameter":
+        ensurePattern(patterns, activePattern).kitParameters.set(
+          `global.${operation.section}${operation.track ? `.${operation.track}` : ""}.${operation.parameter}`,
+          operation.value,
+        );
+        break;
       case "assign_sample_slot":
         ensurePattern(patterns, operation.pattern ?? activePattern).sampleSlots.set(operation.track, { slot: operation.slot, sampleId: operation.sampleId });
         break;

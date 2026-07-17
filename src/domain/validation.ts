@@ -112,7 +112,36 @@ export function validatePersistentOperation(operation: RytmPersistentOperation, 
       requireCapability(capabilities.kitEdit, "kitEdit");
       if (operation.track) assertTrackId(operation.track);
       assertSafeId(operation.parameter, "parameter");
-      assertFiniteRange(operation.value, "value", 0, 127);
+      assertControlValue(operation.value, "value");
+      return;
+
+    case "set_sound_parameter":
+      requireCapability(capabilities.kitEdit, "kitEdit");
+      assertTrackId(operation.track);
+      if (!["machine", "sample", "filter", "amp", "lfo", "settings"].includes(operation.page)) {
+        throw new Error("unsupported Sound page");
+      }
+      assertSafeId(operation.parameter, "parameter");
+      assertControlValue(operation.value, "value");
+      return;
+
+    case "set_fx_parameter":
+      requireCapability(capabilities.kitEdit, "kitEdit");
+      if (!["delay", "reverb", "distortion", "compressor", "lfo"].includes(operation.effect)) {
+        throw new Error("unsupported Kit FX effect");
+      }
+      assertSafeId(operation.parameter, "parameter");
+      assertControlValue(operation.value, "value");
+      return;
+
+    case "set_global_parameter":
+      requireCapability(capabilities.sysExState, "sysExState");
+      if (!["routing", "metronome", "midi_sync", "midi_port", "midi_channels", "sequencer", "settings"].includes(operation.section)) {
+        throw new Error("unsupported Global section");
+      }
+      if (operation.track) assertTrackId(operation.track);
+      assertSafeId(operation.parameter, "parameter");
+      assertControlValue(operation.value, "value");
       return;
 
     case "assign_sample_slot":
@@ -193,3 +222,14 @@ function requireCapability(enabled: boolean, name: keyof RytmCapabilities): void
   if (!enabled) throw new Error(`device capability is not enabled: ${name}`);
 }
 
+function assertControlValue(value: number | boolean | string, label: string): void {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error(`${label} must be finite`);
+    return;
+  }
+  if (typeof value === "string") {
+    assertSafeAtom(value, label);
+    return;
+  }
+  if (typeof value !== "boolean") throw new Error(`${label} must be a number, boolean, or enum string`);
+}

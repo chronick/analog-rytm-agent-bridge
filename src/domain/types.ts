@@ -119,7 +119,27 @@ export type RytmPersistentOperation =
       type: "set_kit_parameter";
       track?: RytmTrackId;
       parameter: string;
-      value: number;
+      value: number | boolean | string;
+    }
+  | {
+      type: "set_sound_parameter";
+      track: RytmTrackId;
+      page: "machine" | "sample" | "filter" | "amp" | "lfo" | "settings";
+      parameter: string;
+      value: number | boolean | string;
+    }
+  | {
+      type: "set_fx_parameter";
+      effect: "delay" | "reverb" | "distortion" | "compressor" | "lfo";
+      parameter: string;
+      value: number | boolean | string;
+    }
+  | {
+      type: "set_global_parameter";
+      section: "routing" | "metronome" | "midi_sync" | "midi_port" | "midi_channels" | "sequencer" | "settings";
+      parameter: string;
+      track?: RytmTrackId;
+      value: number | boolean | string;
     }
   | {
       type: "assign_sample_slot";
@@ -189,7 +209,7 @@ export interface RytmPatternSummary {
   trackLengths: Partial<Record<RytmTrackId, number>>;
   machines: Partial<Record<RytmTrackId, string>>;
   sampleSlots: Partial<Record<RytmTrackId, { slot: number; sampleId: string }>>;
-  kitParameters: Record<string, number>;
+  kitParameters: Record<string, unknown>;
   trigCount: number;
   trigs: RytmPatternTrigSummary[];
 }
@@ -268,4 +288,3 @@ export type RytmEvent =
   | { type: "snapshot.created"; snapshot: RytmStateSnapshot }
   | { type: "snapshot.rolled_back"; snapshotId: RytmSnapshotId; revision: RytmRevision; pattern: RytmPatternSlot }
   | { type: "warning"; source: string; message: string };
-

@@ -8,10 +8,10 @@
     "test": "node --experimental-transform-types --test test/*.test.ts",
     "rust:test": "cd daemon && cargo test",
     "check": "npm test && npm run rust:test",
-    "demo": "node --experimental-transform-types src/bin/mock-demo.ts"
+    "demo": "node --experimental-transform-types src/bin/mock-demo.ts",
+    "hardware:control": "node --experimental-transform-types src/bin/verify-hardware-control.ts"
   },
   "engines": {
     "node": ">=22.14"
   }
 }
-

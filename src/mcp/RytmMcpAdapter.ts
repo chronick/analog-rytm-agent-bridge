@@ -48,6 +48,26 @@ export class RytmMcpAdapter {
         },
       },
       {
+        name: "rytm_inspect_kit",
+        description: "Return compact track-level, retrig, Sound, FX, and control-input state for the active Kit.",
+        inputSchema: emptyInput,
+      },
+      {
+        name: "rytm_inspect_track_sound",
+        description: "Return the active Kit Sound pages and machine parameters for one track.",
+        inputSchema: {
+          type: "object",
+          properties: { track: { type: "string" } },
+          required: ["track"],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: "rytm_inspect_global",
+        description: "Return Global MIDI, routing, metronome, sequencer, and Settings state.",
+        inputSchema: emptyInput,
+      },
+      {
         name: "rytm_propose_pattern_delta",
         description: "Validate operations and return a projected compact pattern summary without mutating state.",
         inputSchema: {
@@ -186,6 +206,14 @@ export class RytmMcpAdapter {
         return this.daemon
           ? this.daemon.inspectPattern((args as { pattern?: string }).pattern)
           : this.service.inspectPattern((args as { pattern?: string }).pattern);
+      case "rytm_inspect_kit":
+        return this.daemon ? this.daemon.inspectKit() : this.service.inspectKit();
+      case "rytm_inspect_track_sound":
+        return this.daemon
+          ? this.daemon.inspectSound((args as { track: string }).track)
+          : this.service.inspectSound((args as { track: string }).track);
+      case "rytm_inspect_global":
+        return this.daemon ? this.daemon.inspectGlobal() : this.service.inspectGlobal();
       case "rytm_propose_pattern_delta":
         return this.daemon
           ? this.daemon.proposePatternDelta(args as RytmPatternDeltaInput)

@@ -30,6 +30,7 @@ test("TypeScript client completes a real round trip through the Rust mock daemon
     assert.equal(health.adapter, "mock");
     assert.ok(health.methods.declared.includes("operations.queue"));
     assert.ok(health.methods.implemented.includes("snapshot.rollback"));
+    assert.ok(health.methods.implemented.includes("sound.inspect"));
 
     const state = await client.inspectDeviceState() as {
       device: { activePattern: string };
@@ -39,6 +40,14 @@ test("TypeScript client completes a real round trip through the Rust mock daemon
     assert.equal(state.device.activePattern, "A01");
     assert.equal(state.activePattern.trigCount, 0);
     assert.equal(state.revision, 0);
+
+    const kit = await client.inspectKit() as { sounds: unknown[] };
+    assert.equal(kit.sounds.length, 12);
+    const sound = await client.inspectSound("BD") as { track: string; machine: string };
+    assert.equal(sound.track, "BD");
+    assert.equal(sound.machine, "bdhard");
+    const globalState = await client.inspectGlobal() as { global: { routing: { tracksRoutedToMain: string[] } } };
+    assert.equal(globalState.global.routing.tracksRoutedToMain.length, 12);
 
     const validation = await client.validateOperations([
       { type: "set_trig", track: "BD", step: 0, velocity: 116 },

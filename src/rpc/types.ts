@@ -54,6 +54,9 @@ export interface RytmDaemonApi {
   health(): Promise<RytmDaemonHealth>;
   inspectDeviceState(): Promise<unknown>;
   inspectPattern(pattern?: string): Promise<unknown>;
+  inspectKit(): Promise<unknown>;
+  inspectSound(track: string): Promise<unknown>;
+  inspectGlobal(): Promise<unknown>;
   validateOperations(operations: RytmPersistentOperation[]): Promise<RytmValidationResult>;
   proposePatternDelta(input: RytmPatternDeltaInput): Promise<{
     validation: RytmValidationResult;
