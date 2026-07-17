@@ -1,3 +1,5 @@
+pub mod hardware;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AdapterMode {
     Mock,
@@ -158,4 +160,3 @@ mod tests {
         assert!(json.contains("\"adapter\":\"mock\""));
     }
 }
-

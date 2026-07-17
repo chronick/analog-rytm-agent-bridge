@@ -2,6 +2,6 @@ node_modules/
 coverage/
 session/
 target/
+hardware/runs/
 *.partial
 .DS_Store
-
