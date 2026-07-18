@@ -42,8 +42,12 @@ Failure:
 Asynchronous event envelope:
 
 ```json
-{"schema":"analog-rytm-rpc.v1","eventId":"event-1","type":"operation_set.applied","payload":{}}
+{"schema":"analog-rytm-rpc.v1","eventId":"event-1","type":"operation_set.applied","cursor":1,"payload":{}}
 ```
+
+`cursor` is the durable journal cursor for the event; clients reconcile pushed
+events against `events.read` paging with it. Events persisted before a daemon
+restart are not re-emitted on the push stream; use `events.read` for history.
 
 After a successful state-changing response, the daemon emits the resulting acknowledgement and state events as separate envelopes. Boundary events can arrive while no request is in flight because the stdio loop polls the hardware scheduler. The TypeScript client exposes these through `onEvent`; `events.read` provides durable cursor-based catch-up on hardware.
 

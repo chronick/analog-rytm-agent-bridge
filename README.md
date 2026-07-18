@@ -57,7 +57,14 @@ npm run hardware:samples -- --execute
 npm run hardware:songs
 npm run hardware:songs -- --execute
 npm run hardware:scheduler -- --execute
+npm run build:project -- <declaration.json> [--execute]
+npm run audition:project [-- A01 B04 ...]
 ```
+
+`build:project` applies a declarative project (patterns, machines, scenes,
+performance macros, samples) from a JSON declaration with validation-first,
+snapshot, and readback. `audition:project` plays each pattern from generated
+clock and captures a verified bounded recording per slot.
 
 The runtime has zero npm dependencies; `npm install` provisions only the dev-time
 TypeScript checker (`npm run typecheck`, included in `npm run check`). Rust

@@ -33,6 +33,19 @@ const TRACK_NAMES: [&str; 12] = [
 
 pub type HardwareResult<T> = Result<T, String>;
 
+// The pinned rytm-rs revision maps its Fill variant to device condition value
+// 22 and FillNot to 23, but on OS 1.72 hardware value 23 is the trig that
+// stays silent until FILL is held (verified by captured playback,
+// 2026-07-17). Swap at the boundary in both directions so the bridge's
+// public "fill"/"fillnot" strings mean what the device panel means.
+fn swap_fill_condition(condition: &str) -> &str {
+    match condition {
+        "fill" => "fillnot",
+        "fillnot" => "fill",
+        other => other,
+    }
+}
+
 pub struct RytmMidiSession {
     _input: MidiInputConnection<()>,
     output: MidiOutputConnection,
@@ -802,7 +815,8 @@ fn apply_persistent_operation(
             }
             if let Some(condition) = condition {
                 trig.set_trig_condition(
-                    TrigCondition::try_from(condition.as_str()).map_err(error_string)?,
+                    TrigCondition::try_from(swap_fill_condition(condition.as_str()))
+                        .map_err(error_string)?,
                 );
             }
             if let Some(retrig) = retrig {
@@ -2707,7 +2721,7 @@ fn pattern_summary(pattern: &Pattern) -> Value {
                 .iter()
                 .filter(|trig| trig.enabled_trig())
                 .map(|trig| {
-                    let condition: &str = trig.trig_condition().into();
+                    let condition: &str = swap_fill_condition(trig.trig_condition().into());
                     let filter_cutoff_lock = if trig.enabled_parameter_lock_env() {
                         trig.plock_get_filter_cutoff().ok().flatten()
                     } else {

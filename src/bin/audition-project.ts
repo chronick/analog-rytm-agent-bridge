@@ -24,7 +24,7 @@ interface CaptureResult {
   status: string;
   warnings?: string[];
   audio?: { silence?: boolean; clipping?: boolean; peak?: number; rms?: number };
-  analysis?: { silence?: boolean; clipping?: boolean; disconnected?: boolean; droppedBlocks?: number };
+  analysis?: { silence?: boolean; clipping?: boolean; disconnected?: boolean; droppedBlocks?: number; peak?: number; rms?: number };
   audioPath?: string;
   pattern?: string;
 }
@@ -65,7 +65,9 @@ export async function runProjectAudition(): Promise<void> {
       })) as CaptureResult;
       await client.setTransport({ command: "stop" });
 
-      const silence = capture.analysis?.silence ?? capture.audio?.silence ?? false;
+      const peak = capture.analysis?.peak ?? capture.audio?.peak ?? 0;
+      // Treat near-floor bleed as silent for verification (strict silence is peak <= 1e-4).
+      const silence = (capture.analysis?.silence ?? capture.audio?.silence ?? false) || peak < 0.005;
       const expectSilent = FILL_SLOTS.has(slot);
       const problems: string[] = [];
       if (capture.status !== "completed") problems.push(`status=${capture.status}`);
