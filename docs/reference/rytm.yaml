@@ -1,0 +1,1408 @@
+# Analog Rytm MKII — machine-readable machine/parameter reference
+# Distilled from the official Elektron user manual (OS 1.72). Structured for
+# agent consumption by the Rytm bridge: every drum MACHINE, its SRC parameters,
+# the shared drum-track parameter pages, the FX track pages, and the
+# track->machine legality table.
+#
+# beads task: vault-1m5s.2
+#
+# ---------------------------------------------------------------------------
+# CONVENTIONS
+#   - Each parameter: `key` (the 2-4 char on-screen label), `name` (expanded
+#     label from the manual's parenthetical), `desc` (concise paraphrase of the
+#     manual's explanation — NOT verbatim beyond the short label), and `range`
+#     ONLY where the manual states one explicitly. Most Appendix D SRC params
+#     give no range; those are omitted rather than guessed (Rytm data-entry
+#     knobs are 0-127 or bipolar by default, but the manual does not confirm
+#     per-param, so we do not assert it).
+#   - `pos` = the parameter's ORDINAL position in the manual's listing for that
+#     page/machine (1-based). On the Elektron parameter pages the eight
+#     DATA ENTRY knobs read left-to-right A(1)..H(8), so pos maps to knob A..H
+#     for pages/machines that fill all eight knobs. For machines with fewer
+#     than eight parameters the manual TEXT does not state which physical knob
+#     slots are used (the knob-layout appears only in page-diagram images that
+#     did not survive PDF->markdown extraction), so we record ordinal position
+#     rather than assert a possibly-wrong A-H letter. LEV is conventionally the
+#     rightmost (H) knob on hardware regardless of ordinal.
+# ---------------------------------------------------------------------------
+
+meta:
+  device: "Elektron Analog Rytm MKII"
+  os_version: "1.72"
+  source_manual: "Analog-Rytm-MKII-User-Manual_ENG_OS1.72_250130.md"
+  source_manual_pdf: "Analog-Rytm-MKII-User-Manual_ENG_OS1.72_250130.pdf"
+  source_manual_dated: "2025-01-30"  # manual last updated (per title page)
+  extraction_date: "2026-07-18"
+  generation_method: >-
+    Hand-distilled from the pymupdf4llm markdown extraction of the official
+    Elektron OS 1.72 PDF manual. Machine SRC params from APPENDIX D (manual
+    p.96-109); shared drum-track pages from APPENDIX A (p.77-80); FX track pages
+    from APPENDIX B (p.81-84); track->machine legality from section 8.2
+    "MACHINES" (manual p.21) cross-checked against the APPENDIX D per-section
+    track headers. Constraints from TWO sources: the core voice/track/budget
+    facts copied from ~/git/vault/music/rytm/rytm-build.yaml (verified device
+    spec, Elektron 2026-06-25), plus manual-sourced facts (songs, audio formats,
+    parameter-page counts, total_sequencer_tracks) tagged inline with manual
+    refs. Ranges recorded only where the manual states them verbatim.
+  precedent: "~/git/octatrack-projects/docs/reference/octatrack.yaml"
+  range_conventions: >-
+    `range` strings use several grammars, as printed in the manual: plain
+    numeric ("0-120"), bipolar ("-64 to +63"), enum lists ("LP2, LP1, BP, ..."),
+    enum+range ("OFF, 1-127"), and unit-bearing ("0.03-30 ms", "0.1-2 s, A1, A2").
+    In all cases `range` describes the ON-SCREEN value, NOT the 0-127 MIDI wire
+    value — except where a desc explicitly notes a midi.guide cc range (e.g.
+    "cc range 0-6"). A structural normalization of these grammars is deferred to
+    a follow-up task.
+  copyright_note: >-
+    Parameter descriptions are concise paraphrases, not copies, of Elektron's
+    manual prose. Manual (c) 2025 Elektron Music Machines MAV AB.
+
+# ===========================================================================
+# CONSTRAINTS — verified device spec, from TWO sources. Core voice/track/budget
+# facts copied from ~/git/vault/music/rytm/rytm-build.yaml (Elektron,
+# 2026-06-25); facts tagged "# manual:" below are sourced from the manual
+# itself, not the build doc (songs, audio, parameter-page counts,
+# total_sequencer_tracks). The coupled-voice / choke behavior is additionally
+# confirmed in the manual (section 8.2, manual p.21): "Track CP mutes track RS,
+# HT mutes MT, OH mutes CH and CB mutes CY."
+# ===========================================================================
+constraints:
+  drum_tracks: 12
+  fx_tracks: 1
+  total_sequencer_tracks: 13   # 12 drum + 1 FX. manual: derived from the track structure (not in rytm-build.yaml)
+  physical_voices: 8           # max 8 simultaneous sounds (polyphony ceiling)
+  dedicated_voice_tracks: [BD, SD, BT, LT]   # independent, never choke
+  coupled_voice_pairs:
+    # Each pair shares ONE physical voice; the right-hand track has priority
+    # and chokes the left-hand track when both are triggered.
+    - { pair: [RS, CP], chokes: "CP mutes RS", shared_voice: true }
+    - { pair: [MT, HT], chokes: "HT mutes MT", shared_voice: true }
+    - { pair: [CH, OH], chokes: "OH mutes CH", shared_voice: true }
+    - { pair: [CY, CB], chokes: "CB mutes CY", shared_voice: true }
+  default_track_layout:   # factory pad 1-12 -> track type
+    1: BD
+    2: SD
+    3: RS
+    4: CP
+    5: BT
+    6: LT
+    7: MT
+    8: HT
+    9: CH
+    10: OH
+    11: CY
+    12: CB
+  budgets:
+    kits_per_project: 128
+    banks: 8                    # A-H
+    patterns_per_bank: 16
+    patterns_per_project: 128   # 8 banks x 16
+    songs: 16                   # SONG mode slots (per project). manual: SONG mode chapter (not in rytm-build.yaml)
+    scenes_per_kit: 12
+    perf_macros_per_kit: 12
+    sample_slots_per_project: 127
+    plus_drive_sample_store: "1 GB"
+  audio:
+    # manual: two DISTINCT audio specs — do not conflate. The sample engine's
+    # native file format is 16-bit, but the analog I/O converters are 24-bit.
+    sample_format: "16-bit, 48 kHz, mono"   # manual: sample-engine native audio format (14.2.3 — transfers auto-convert to this)
+    converters: "24-bit, 48 kHz D/A and A/D" # manual: HARDWARE appendix — the physical converter spec
+  parameter_pages_per_drum_track: 5   # SRC, SMPL, FLTR, AMP, LFO. manual: APPENDIX A (not in rytm-build.yaml)
+  parameter_pages_per_fx_track: 5     # DELAY, REVERB, DISTORTION, COMPRESSOR, LFO. manual: APPENDIX B (not in rytm-build.yaml)
+  source_constraints: "~/git/vault/music/rytm/rytm-build.yaml"
+
+# ===========================================================================
+# MIDI — the CC / NRPN control map (APPENDIX C: MIDI, manual p.85-95) joined
+# onto the parameter schema. Ground truth is the manual's APPENDIX C; every
+# number below was cross-checked against midi.guide
+# (https://midi.guide/d/elektron/analog-rytm-mkii/). Where the two sources
+# disagree, BOTH values are recorded in the `uncertainties:` block (ids
+# prefixed `midi-`) rather than silently resolved. midi.guide-only additions
+# (value ranges / orientation) are marked `source: midi.guide`.
+#
+# ADDRESSING IN ONE LINE: each drum track (12) and the FX track has its OWN
+# MIDI channel; a CC/NRPN on a track's channel addresses THAT track. The same
+# CC number therefore means different things on a drum-track channel vs the
+# FX-track channel (CC16 = Synth slot 1/Level on a drum track, but = Delay Time
+# on the FX track) — disambiguated by channel AND by NRPN MSB (synth/sample/
+# filter/amp/lfo = NRPN MSB 1, FX = NRPN MSB 2, kit/perf/trig/euclid = other).
+#
+# The page-level maps for the SHARED pages (SMPL/FLTR/AMP/LFO) live INLINE as
+# `cc:` / `nrpn:` keys on each parameter under `track_pages:`; likewise the FX
+# pages under `fx_track:`. This section carries the addressing model, the
+# machine-independent maps (trig/euclid/kit/perf), and the knob-indexed SRC
+# synth-slot map plus its per-machine ordering.
+# ===========================================================================
+midi:
+  manual_ref: "APPENDIX C: MIDI (p.85-95)"
+  cross_check: "https://midi.guide/d/elektron/analog-rytm-mkii/"
+  nrpn_notation: "`nrpn: [MSB, LSB]`. `cc` is the CC MSB; `cc_lsb` is present only for high-resolution params."
+
+  addressing:
+    model: >-
+      Each of the 12 drum tracks and the 1 FX track has its own MIDI channel
+      (GLOBAL SETTINGS > MIDI CONFIG > CHANNELS: TRACK 1-12 + FX). A CC/NRPN
+      sent on a track's channel addresses that track's parameters. Identical CC
+      numbers on different channels address different tracks; the synth/sample/
+      filter/amp/lfo params (NRPN MSB 1) and the FX params (NRPN MSB 2) reuse
+      the CC ranges 16-23 and 70-85, kept distinct by channel + NRPN MSB.
+    track_channels: >-
+      Set per track in CHANNELS (TRACK 1-12, FX). Factory default = MIDI
+      channels 1-12 for the twelve drum tracks (order = constraints.default_track_layout).
+      An OFF setting makes that track disregard incoming MIDI.
+    auto_channel: >-
+      AUTO CHANNEL addresses whichever track is currently ACTIVE (one channel
+      that follows the active track). Also the fallback channel for program
+      change in/out when those are set to AUTO.
+    perf_channel: "PERF CHANNEL — the channel the DATA ENTRY knobs transmit on in PERFORMANCE mode."
+    param_output: >-
+      MIDI CONFIG > PORT CONFIG > PARAM OUTPUT selects whether the DATA ENTRY
+      knobs emit CC or NRPN; OUTPUT CH selects auto-channel vs track-channel for
+      the pads/knobs.
+    receive_flags: >-
+      RECEIVE NOTES enables external note triggering; RECEIVE CC/NRPN enables
+      external parameter control (both in MIDI CONFIG > PORT CONFIG).
+    program_change:
+      maps: "MIDI Program Change 0-127 selects pattern 1-128 (A01-H16)."
+      manual_ref: "section 8.6 (p.22) + 14.4 CHANNELS/SYNC (p.61-63)"
+      receive: "Enable PRG CH RECEIVE (MIDI CONFIG > SYNC). Listen channel = PROGRAM CH IN CH (AUTO = auto channel)."
+      send: "Enable PRG CH SEND. Send channel = PROGRAM CH OUT CH (AUTO = auto channel)."
+
+  note_map:
+    manual_ref: "APPENDIX C.8 MIDI NOTE TRIGGERS (p.95) + section 8.6 (p.22)"
+    numbering_note: >-
+      The manual numbers TWO subsections 'C.8': C.8 MACHINE PARAMETERS (p.88-95)
+      and C.8 MIDI NOTE TRIGGERS (p.95). The note-triggers section (referenced
+      here) is effectively C.9; we cite it as printed.
+    track_triggers:
+      desc: >-
+        MIDI notes 0-11 (C0-B0; some DAWs label this octave C-2..B-2) trigger
+        the Sound of drum tracks 1-12 respectively, regardless of which track is
+        active, PROVIDED each track is on its default channel 1-12.
+      map: { 0: BD, 1: SD, 2: RS, 3: CP, 4: BT, 5: LT, 6: MT, 7: HT, 8: CH, 9: OH, 10: CY, 11: CB }
+      note: "Order follows constraints.default_track_layout (pad 1-12 -> track type)."
+    chromatic:
+      range: "notes 12-59 (C1-B4)"
+      desc: >-
+        Plays the ACTIVE track's Sound across its 48 chromatic variations (as in
+        CHROMATIC mode). The track's Sound must be chromatic-enabled (SOUND SETTINGS).
+    trig_note_param_range: "The Trig Note PARAMETER (cc 3 / nrpn 3:0, see trig_parameters) is listed with range 36-84 by midi.guide. source: midi.guide"
+
+  # --- Machine-independent maps -------------------------------------------
+  trig_parameters:
+    manual_ref: "APPENDIX C.1 GENERAL TRIG PARAMETERS (p.85)"
+    desc: "Per-trig parameters, addressed on the track's MIDI channel."
+    parameters:
+      - { key: NOTE, name: "Note",        cc: 3,  nrpn: [3, 0], range: "36-84 (source: midi.guide)" }
+      - { key: VEL,  name: "Velocity",    cc: 4,  nrpn: [3, 1], range: "1-127 (source: midi.guide)" }
+      - { key: LEN,  name: "Length",      cc: 5,  nrpn: [3, 2] }
+      - { key: SYN,  name: "Synth Trig",  cc: 11, nrpn: [3, 3] }
+      - { key: SMP,  name: "Sample Trig", cc: 12, nrpn: [3, 4] }
+      - { key: ENV,  name: "ENV Trig",    cc: 13, nrpn: [3, 5] }
+      - { key: LFO,  name: "LFO Trig",    cc: 14, nrpn: [3, 6] }
+
+  euclidean_parameters:
+    manual_ref: "APPENDIX C.2 EUCLIDEAN SEQUENCER PARAMETERS (p.85)"
+    parameters:
+      - { name: "Pulse Generator 1",    cc: 86,  nrpn: [3, 8] }
+      - { name: "Pulse Generator 2",    cc: 87,  nrpn: [3, 9] }
+      - { name: "Euclidean On/Off",     cc: 117, nrpn: [3, 14] }
+      - { name: "Rotation Generator 1", cc: 89,  nrpn: [3, 11] }
+      - { name: "Rotation Generator 2", cc: 90,  nrpn: [3, 12] }
+      - { name: "Track Rotation",       cc: 91,  nrpn: [3, 13] }
+      - { name: "Boolean Operator",     cc: 88,  nrpn: [3, 10], range: "0-3 = OR/XOR/AND/SUB (source: midi.guide)" }
+
+  kit_parameters:
+    manual_ref: "APPENDIX C.3 GENERAL KIT PARAMETERS / COMMON (p.85)"
+    desc: "Per-track kit/common parameters."
+    parameters:
+      - { name: "Track Level",        cc: 95, nrpn: [1, 100] }
+      - { name: "Track Mute",         cc: 94, nrpn: [1, 101], note: "sequencer mute" }
+      - { name: "Track Solo",         cc: 93, nrpn: [1, 102], note: "sequencer solo" }
+      - { name: "Track Machine Type", cc: 15, nrpn: [1, 103], note: "Selects the SRC machine (see legality). midi.guide range 1-33 (33 selectable types) vs 34 machine entries here incl. DISABLE — see uncertainties.midi-machine-type-count. source: midi.guide (range)" }
+      - { name: "Active Scene",       cc: 92, nrpn: [1, 104] }
+
+  performance_parameters:
+    manual_ref: "APPENDIX C.4 PERFORMANCE PARAMETERS (p.85-86)"
+    channel: "PERF CHANNEL"
+    note: "CC 38 is SKIPPED between Perf Param 3 (cc 37) and Perf Param 4 (cc 39). midi.guide compresses these as a contiguous CC 35-47 range — see uncertainties.midi-performance-cc38-skip."
+    parameters:
+      - { name: "Performance Parameter 1",  cc: 35, nrpn: [0, 0] }
+      - { name: "Performance Parameter 2",  cc: 36, nrpn: [0, 1] }
+      - { name: "Performance Parameter 3",  cc: 37, nrpn: [0, 2] }
+      - { name: "Performance Parameter 4",  cc: 39, nrpn: [0, 3] }
+      - { name: "Performance Parameter 5",  cc: 40, nrpn: [0, 4] }
+      - { name: "Performance Parameter 6",  cc: 41, nrpn: [0, 5] }
+      - { name: "Performance Parameter 7",  cc: 42, nrpn: [0, 6] }
+      - { name: "Performance Parameter 8",  cc: 43, nrpn: [0, 7] }
+      - { name: "Performance Parameter 9",  cc: 44, nrpn: [0, 8] }
+      - { name: "Performance Parameter 10", cc: 45, nrpn: [0, 9] }
+      - { name: "Performance Parameter 11", cc: 46, nrpn: [0, 10] }
+      - { name: "Performance Parameter 12", cc: 47, nrpn: [0, 11] }
+
+  # --- SRC / MACHINE synth params: knob-indexed (see machines: header) -----
+  synth_param_slots:
+    manual_ref: "APPENDIX C.5 SYNTH (p.86) + C.8 MACHINE PARAMETERS (p.88-95)"
+    desc: >-
+      The SRC/machine synthesis parameters are addressed by KNOB SLOT, not by a
+      machine-specific CC. The eight synth slots are ALWAYS the same numbers:
+      slot 1..8 -> cc 16..23 -> nrpn [1, 0..7]. What each slot MEANS depends on
+      the active machine (Track Machine Type, kit_parameters). Slot 1 is Level on
+      every machine. IMPORTANT: the manual's C.8 MIDI ordering per machine OFTEN
+      DIFFERS in order AND naming from the on-screen SRC-page order recorded as
+      `pos` under `machines:` (see machine_src_midi_order and
+      uncertainties.midi-appendixC-vs-appendixD-src).
+    slots:
+      - { slot: 1, cc: 16, nrpn: [1, 0] }
+      - { slot: 2, cc: 17, nrpn: [1, 1] }
+      - { slot: 3, cc: 18, nrpn: [1, 2] }
+      - { slot: 4, cc: 19, nrpn: [1, 3] }
+      - { slot: 5, cc: 20, nrpn: [1, 4] }
+      - { slot: 6, cc: 21, nrpn: [1, 5] }
+      - { slot: 7, cc: 22, nrpn: [1, 6] }
+      - { slot: 8, cc: 23, nrpn: [1, 7] }
+
+  machine_src_midi_order:
+    manual_ref: "APPENDIX C.8 MACHINE PARAMETERS (p.88-95)"
+    desc: >-
+      Per-machine SRC synth-slot order, AS PRINTED IN APPENDIX C.8 (the MIDI
+      order). Read as slot 1..N left-to-right; slot i -> cc (15+i) -> nrpn
+      [1, i-1] via synth_param_slots. This C.8 MIDI order differs from the
+      Appendix D SRC-page params in `machines:` (both order and, for some
+      machines, naming) — do NOT assume machines[*].parameters[pos] lines up
+      with slot pos. midi.guide corroborates these C.8 orderings.
+    by_machine:
+      bd-hard:     ["Level", "Tune", "Decay", "Hold", "Sweep Time", "Sweep Depth", "Waveform", "Transient Tick"]
+      bd-classic:  ["Level", "Tune", "Decay", "Hold", "Sweep Time", "Sweep Depth", "Waveform", "Transient Tick"]
+      bd-fm:       ["Level", "Tune", "Decay", "FM Amount", "Sweep Time", "FM Sweep Time", "FM Decay Time", "FM Tune"]
+      bd-plastic:  ["Level", "Tune", "Decay Time", "Sweep Depth", "Sweep Time", "Hold Time", "VCO Click", "Dust Level"]
+      bd-silky:    ["Level", "Tune", "Decay", "Sweep Depth", "Sweep Time", "Hold", "VCO Click", "Dust Level"]
+      bd-sharp:    ["Level", "Tune", "Decay", "Sweep Depth", "Sweep Time", "Hold Time", "Tick Level", "Waveform"]
+      bd-acoustic: ["Level", "Tune", "Decay", "Sweep Depth", "Sweep Time", "Hold Time", "Impact", "Waveform"]
+      sd-hard:     ["Level", "Tune", "Decay", "Sweep Depth", "Tick Level", "Noise Decay", "Noise Level", "Sweep Time"]
+      sd-classic:  ["Level", "Tune", "Decay", "Detune", "Snap Amount", "Noise Decay", "Noise Level", "Osc Balance"]
+      sd-fm:       ["Level", "Tune", "Decay", "FM Tune", "FM Decay Time", "Noise Decay", "Noise Level", "FM Amount"]
+      sd-natural:  ["Level", "Tune", "Body Decay", "Noise Decay", "Noise LPF", "Noise Balance", "Noise Resonance", "Noise HPF"]
+      sd-acoustic: ["Level", "Tune", "Decay", "Noise Decay", "Hold Time", "Noise Level", "Impact", "Sweep Depth"]
+      rs-hard:     ["Level", "Tune", "Decay", "Sweep Depth", "Tick Level", "Noise Level", "Symmetry", "Sweep Time"]
+      rs-classic:  ["Level", "Tune Osc 1", "Decay", "Osc Balance", "Tune Osc 2", "Symmetry", "Noise Level", "Tick Level"]
+      cp-classic:  ["Level", "Noise Tone", "Noise Decay", "Clap Number", "Clap Rate", "Noise Level", "Random Claps", "Clap Decay"]
+      sy-dual-vco: ["Level", "Osc 1 Tune", "Osc 1 Decay", "Balance", "Osc 2 Detune", "Osc Config", "Osc 2 Decay", "Bend"]
+      sy-chip:     ["Level", "Tune", "Decay", "Waveform", "Speed", "Offset 2", "Offset 3", "Offset 4"]
+      sy-raw:      ["Level", "Tune", "Decay", "Noise Level", "Osc 2 Detune", "Waveform 1", "Waveform 2", "Balance"]
+      bt-classic:  ["Level", "Tune", "Decay", "Sweep Depth", "Noise Level", "Snap Type"]
+      xt-classic:  ["Level", "Tune", "Decay", "Sweep Depth", "Sweep Time", "Noise Decay", "Noise Level", "Noise Tone"]
+      ch-classic:  ["Level", "Tune", "Decay", "Color"]
+      ch-metallic: ["Level", "Tune", "Decay Time"]
+      oh-classic:  ["Level", "Tune", "Decay", "Color"]
+      oh-metallic: ["Level", "Tune", "Decay Time"]
+      hh-basic:    ["Level", "Tune", "Decay Time", "Tone", "Transient Decay", "Osc Reset"]
+      hh-lab:      ["Level", "Tune 1", "Decay Time", "Tune 2", "Tune 3", "Tune 4", "Tune 5", "Tune 6"]
+      cy-classic:  ["Level", "Tune", "Decay", "Color", "Tone"]
+      cy-metallic: ["Level", "Tune", "Decay Time", "Tone", "Transient Decay"]
+      cy-ride:     ["Level", "Tune", "Tail Decay", "Hit Decay", "Cymbal Type", "Component 1", "Component 2", "Component 3"]
+      cb-classic:  ["Level", "Tune", "Decay Time", "Detune"]
+      cb-metallic: ["Level", "Tune", "Decay Time", "Detune"]
+      ut-noise:    ["Level", "LP Frequency", "Decay", "Sweep Depth", "Sweep Time", "LP Resonance", "HP Frequency", "Attack"]
+      ut-impulse:  ["Level", "Attack", "Decay", "Polarity"]
+    notes:
+      - "disable has no SRC params (no synth slots)."
+      - "xt-classic is printed 'LT, MT, HT CLASSIC' in C.8 — one shared MIDI map for all three tom tracks (matches the single XT machine)."
+      - "cb-classic and cb-metallic share one C.8 map printed 'CB CLASSIC & METALLIC'."
+      - "SY machines (sy-dual-vco/sy-chip/sy-raw): C.8 prints CC only with BLANK NRPN columns; the C.5 generic map still implies nrpn [1, 0..7]. See uncertainties.midi-sy-machines-nrpn-blank."
+      - "hh-lab: the C.8 NRPN LSB column extracted garbled (1:3,1:3,1:3,1:4,1:5); the CC column (16-23) is intact and the true NRPN LSBs are the sequential 1:0-1:7 per synth_param_slots (midi.guide corroborates). See uncertainties.midi-hh-lab-nrpn-garbled."
+      - "cb-classic / cb-metallic: the shared C.8 table maps only 4 slots (Level, Tune, Decay Time, Detune). The two pulse-width SRC params (PW1/PW2, machines[cb-*].pos 4-5) have NO CC/NRPN in Appendix C — they are MIDI-UNMAPPED. See uncertainties.midi-cowbell-pw-unmapped."
+
+# ===========================================================================
+# TRACK PAGES — the shared drum-track PARAMETER pages (APPENDIX A). Every drum
+# track exposes these identical pages EXCEPT the SRC page, whose parameters are
+# machine-dependent (see `machines:` below). SRC is described here only as a
+# pointer; its concrete params live per-machine.
+# ===========================================================================
+track_pages:
+
+  SRC:
+    manual_ref: "APPENDIX A.1 (p.77)"
+    key: SRC
+    name: "Source / synthesis"
+    machine_dependent: true
+    desc: >-
+      Controls the analog + digital sound synthesis. Parameters vary with the
+      active MACHINE — see `machines:` for the per-machine SRC parameter set.
+      The manual's default example is the BD track with the BD HARD (BDHD)
+      machine. Double-tap the SRC [PARAMETER] key to change MACHINE.
+    midi: >-
+      SRC params are MIDI-addressed by KNOB SLOT, not per-machine CC: slot 1..8
+      -> cc 16..23 -> nrpn [1, 0..7] (midi.synth_param_slots). The per-machine
+      slot ordering is midi.machine_src_midi_order (and differs from the `pos`
+      order below). Select the machine itself via kit Track Machine Type
+      (cc 15 / nrpn [1, 103]).
+
+  SMPL:
+    manual_ref: "APPENDIX A.2 / A.3 (p.77-78)"
+    key: SMPL
+    name: "Sample playback"
+    desc: >-
+      Controls playback of the assigned sample. A project has 127 sample slots,
+      dynamically allocated per kit. SMPL page 1 is the numeric view; SMPL
+      page 2 shows the same parameters graphically over the sample waveform
+      (toggle with [SMPL]).
+    midi_ref: "APPENDIX C.5 SAMPLE (p.86)"
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", range: "-24 to +24", cc: 24, nrpn: [1, 8], desc: "Sample pitch in chromatic semitones (bipolar, 0 = unchanged; +/-24 = four octaves). midi.guide: cc range 40-88, centered." }
+      - { pos: 2, key: FIN, name: "Fine Tune", range: "-64 to +63", cc: 25, nrpn: [1, 9], desc: "Fine pitch offset from TUN; full range spans one semitone down to one up (bipolar)." }
+      - { pos: 3, key: BR,  name: "Bit Reduction", cc: 26, nrpn: [1, 10], desc: "Lowers sample resolution for a grainy, dirty lo-fi character." }
+      - { pos: 4, key: SMP, name: "Sample Slot", range: "OFF, 1-127", cc: 27, nrpn: [1, 11], desc: "Selects one of up to 127 project samples. OFF (cc 0) plays no sample." }
+      - { pos: 5, key: STA, name: "Start", range: "0-120", cc: 28, nrpn: [1, 12], desc: "Sample playback start point (0 = very beginning, 120 = very end). Codependent with END." }
+      - { pos: 6, key: END, name: "End", range: "0-120", cc: 29, nrpn: [1, 13], desc: "Sample playback end point. If END < STA the sample plays backward." }
+      - { pos: 7, key: LOP, name: "Loop", range: "OFF, ON", cc: 30, nrpn: [1, 14], desc: "OFF = one-shot per trig. ON = loops for the trig length (bounded by AMP HLD/DEC)." }
+      - { pos: 8, key: LEV, name: "Level", cc: 31, nrpn: [1, 15], desc: "Sample volume." }
+
+  FLTR:
+    manual_ref: "APPENDIX A.4 (p.78)"
+    key: FLTR
+    name: "Filter + filter envelope"
+    desc: >-
+      The analog multimode filter and its dedicated AHDSR-style envelope.
+      Technically all seven types are resonant 2-pole filters; the 1-pole
+      variants have a flatter response suited to EQ duty.
+    midi_ref: "APPENDIX C.5 FILTER (p.86)"
+    parameters:
+      - { pos: 1, key: ATK, name: "Attack",  cc: 70, nrpn: [1, 16], desc: "Filter-envelope attack time." }
+      - { pos: 2, key: DEC, name: "Decay",   cc: 71, nrpn: [1, 17], desc: "Filter-envelope decay time." }
+      - { pos: 3, key: SUS, name: "Sustain Level", cc: 72, nrpn: [1, 18], desc: "Filter-envelope sustain level." }
+      - { pos: 4, key: REL, name: "Release", cc: 73, nrpn: [1, 19], desc: "Filter-envelope release time." }
+      - { pos: 5, key: FRQ, name: "Frequency", cc: 74, nrpn: [1, 20], desc: "Filter cutoff frequency." }
+      - { pos: 6, key: RES, name: "Resonance", cc: 75, nrpn: [1, 21], desc: "Resonance peak at cutoff (a notch, not a peak, for the Bandstop type)." }
+      - { pos: 7, key: TYP, name: "Filter Type", range: "LP2, LP1, BP, HP1, HP2, BS, PK", cc: 76, nrpn: [1, 22], desc: "Selects one of seven filter types (see filter_types). Manual/Appendix C calls this 'Filter Mode'. midi.guide: cc range 0-6, order matches filter_types." }
+      - { pos: 8, key: ENV, name: "Envelope Depth", cc: 77, nrpn: [1, 23], desc: "Depth of filter-envelope modulation of cutoff (bipolar: negative or positive; midi.guide: centered)." }
+    filter_types:
+      # TYP selectable types, in manual order.
+      - { id: LP2, name: "2-pole Lowpass" }
+      - { id: LP1, name: "1-pole Lowpass" }
+      - { id: BP,  name: "Bandpass" }
+      - { id: HP1, name: "1-pole Highpass" }
+      - { id: HP2, name: "2-pole Highpass" }
+      - { id: BS,  name: "Bandstop" }
+      - { id: PK,  name: "Peak" }
+
+  AMP:
+    manual_ref: "APPENDIX A.5 (p.79)"
+    key: AMP
+    name: "Amplitude envelope, overdrive, sends, pan, volume"
+    desc: >-
+      Amp envelope plus overdrive, the two FX send amounts (delay/reverb),
+      panning and volume. Overdrive sits BEFORE the multimode filter in the
+      signal path.
+    midi_ref: "APPENDIX C.5 AMP (p.86-87)"
+    parameters:
+      - { pos: 1, key: ATK, name: "Attack", cc: 78, nrpn: [1, 24], desc: "Amp-envelope attack time." }
+      - { pos: 2, key: HLD, name: "Hold", range: "AUTO, 1-127", cc: 79, nrpn: [1, 25], desc: "Amp-envelope hold time before decay. AUTO = held while the pad is pressed; 1-127 fixes the hold length." }
+      - { pos: 3, key: DEC, name: "Decay", cc: 80, nrpn: [1, 26], desc: "Amp-envelope decay time." }
+      - { pos: 4, key: OVR, name: "Overdrive", cc: 81, nrpn: [1, 27], desc: "Amp overdrive/gain boost, pre-filter." }
+      - { pos: 5, key: DEL, name: "Delay Send", cc: 82, nrpn: [1, 28], desc: "Amount sent to the Delay FX (FX track)." }
+      - { pos: 6, key: REV, name: "Reverb Send", cc: 83, nrpn: [1, 29], desc: "Amount sent to the Reverb FX (FX track)." }
+      - { pos: 7, key: PAN, name: "Pan", range: "-64 to +63", cc: 10, nrpn: [1, 30], desc: "Stereo position (bipolar; 0 = center, -64 = full left, +63 = full right). cc 10 = standard MIDI Pan; midi.guide: centered." }
+      - { pos: 8, key: VOL, name: "Volume", cc: 7, nrpn: [1, 31], desc: "Sound amplification volume, independent of the overall track level. cc 7 = standard MIDI Channel Volume." }
+
+  LFO:
+    manual_ref: "APPENDIX A.6 (p.79-80)"
+    key: LFO
+    name: "Per-track LFO"
+    desc: >-
+      One LFO per drum track, assignable to any parameter on the SRC, SMPL,
+      FLTR or AMP pages.
+    midi_ref: "APPENDIX C.6 LFO (p.87)"
+    parameters:
+      - { pos: 1, key: SPD, name: "Speed", cc: 102, nrpn: [1, 32], desc: "LFO speed (bipolar; negative runs the cycle backward). Try 8/16/32 for beat-synced motion." }
+      - { pos: 2, key: MUL, name: "Multiplier", cc: 103, nrpn: [1, 33], desc: "Multiplies SPD. 24 settings: 12 tempo-synced (x, multiply current BPM) + 12 free (dot, sync to 120 BPM regardless of tempo)." }
+      - { pos: 3, key: FAD, name: "Fade In/Out", cc: 104, nrpn: [1, 34], desc: "Fades the LFO modulation in or out (bipolar; positive = fade-out, negative = fade-in, 0 = no fade)." }
+      - { pos: 4, key: DST, name: "Destination", cc: 105, nrpn: [1, 35], desc: "Chooses the modulation target — any parameter on the SRC/SMPL/FLTR/AMP pages (selected from a live list, confirmed with [YES]). midi.guide: cc range 0-41." }
+      - { pos: 5, key: WAV, name: "Waveform", range: "TRI, SINE, SQR, SAW, EXP, RMP, RND", cc: 106, nrpn: [1, 36], desc: "LFO waveform (see lfo_waveforms). midi.guide: cc range 0-6, order matches lfo_waveforms." }
+      - { pos: 6, key: SPH, name: "Start Phase", range: "0-127", cc: 107, nrpn: [1, 37], desc: "Cycle start position when trigged (0 = start, 64 = center, 127 = end). With WAV=RND, adds slew to the random transitions instead." }
+      - { pos: 7, key: MOD, name: "Trig Mode", range: "FREE, TRIG, HOLD, ONE, HALF", cc: 108, nrpn: [1, 38], desc: "How the LFO responds to a trig (see lfo_trig_modes). midi.guide: cc range 0-4." }
+      - { pos: 8, key: DEP, name: "Depth", cc: 109, cc_lsb: 118, nrpn: [1, 39], desc: "Modulation depth and polarity (bipolar; positive starts toward the crest, negative toward the trough, 0 = none). HIGH-RESOLUTION: cc MSB 109 + cc LSB 118; midi.guide: centered." }
+    lfo_waveforms:
+      - { id: TRI, name: "Triangle" }
+      - { id: SINE, name: "Sine" }
+      - { id: SQR, name: "Square" }
+      - { id: SAW, name: "Sawtooth" }
+      - { id: EXP, name: "Exponential" }
+      - { id: RMP, name: "Ramp" }
+      - { id: RND, name: "Random" }
+    lfo_trig_modes:
+      - { id: FREE, desc: "Free-running; never restarts or stops (default)." }
+      - { id: TRIG, desc: "Restarts on each trig." }
+      - { id: HOLD, desc: "Runs free in background; latches/holds its output level at each trig until the next." }
+      - { id: ONE,  desc: "Starts on trig, runs to end of waveform, then stops (envelope-like)." }
+      - { id: HALF, desc: "Starts on trig, runs to the middle of the waveform, then stops." }
+    lfo_destinations:
+      enumerated: false
+      note: >-
+        The manual does not enumerate a fixed destination list; DST can target
+        ANY parameter on the SRC, SMPL, FLTR and AMP pages of the same track
+        (the concrete list depends on the active machine).
+
+# ===========================================================================
+# MACHINES — every SRC-page machine in APPENDIX D (manual p.96-109).
+# `tracks` = the drum tracks the machine is legal on (from the APPENDIX D
+# per-section track headers, cross-checked with section 8.2).
+# Machine SRC params give no explicit ranges in the manual except where noted.
+#
+# MIDI ADDRESSING (indirection — no per-machine `cc:` keys are added here on
+# purpose): SRC synth params are addressed by KNOB SLOT, not per-machine CC —
+# slot 1..8 -> cc 16..23 -> nrpn [1, 0..7] (see midi.synth_param_slots). The
+# machine itself is selected via kit Track Machine Type (cc 15 / nrpn [1, 103]).
+# CRUCIAL: the manual's Appendix C.8 MIDI slot ordering per machine differs from
+# the Appendix D SRC-page order (and, for a few machines, the naming) recorded
+# as `pos` below. So `parameters[].pos` here is the ON-SCREEN order and does NOT
+# reliably equal the MIDI slot number. To get a param's CC/NRPN, look up the
+# machine in midi.machine_src_midi_order (Appendix C.8 order) and map its slot
+# via midi.synth_param_slots. See uncertainties.midi-appendixC-vs-appendixD-src.
+# ===========================================================================
+machines:
+
+  # ----- D.1 ALL — usable on ALL 12 drum tracks -----------------------------
+  - id: disable
+    name: "DISABLE"
+    display: "Machine Disabled"
+    manual_ref: "APPENDIX D.1 (p.96)"
+    tracks: [BD, SD, RS, CP, BT, LT, MT, HT, CH, OH, CY, CB]
+    category: all
+    desc: >-
+      Disables the SRC synthesis engine (no SRC parameters). Select DISABLE
+      then save to make a purely sample-based Sound loadable / Sound-Lockable
+      on any of the 12 tracks.
+    parameters: []
+
+  - id: ut-noise
+    name: "UT NOISE"
+    display: "White Noise Generator"
+    manual_ref: "APPENDIX D.1 (p.96)"
+    tracks: [BD, SD, RS, CP, BT, LT, MT, HT, CH, OH, CY, CB]
+    category: all
+    desc: "General-purpose white-noise source with LP/HP filtering and an LP sweep."
+    parameters:
+      - { pos: 1, key: LPF, name: "LP Filter", desc: "Lowpass cutoff frequency." }
+      - { pos: 2, key: LPQ, name: "LP Resonance", desc: "Resonance around the LP cutoff (0 quenches resonance)." }
+      - { pos: 3, key: ATK, name: "Attack", desc: "Attack phase length." }
+      - { pos: 4, key: DEC, name: "Decay", desc: "Decay phase length." }
+      - { pos: 5, key: HPF, name: "HP Filter", desc: "Highpass cutoff frequency." }
+      - { pos: 6, key: SWD, name: "Sweep Depth", desc: "Depth of the LP filter sweep (negative or positive)." }
+      - { pos: 7, key: SWT, name: "Sweep Time", desc: "Length of the sweep from SWD (low = snappy, high = longer)." }
+      - { pos: 8, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  - id: ut-impulse
+    name: "UT IMPULSE"
+    display: "Positive/Negative Polarity Impulse"
+    manual_ref: "APPENDIX D.1 (p.96)"
+    tracks: [BD, SD, RS, CP, BT, LT, MT, HT, CH, OH, CY, CB]
+    category: all
+    desc: "General-purpose single-impulse generator with selectable polarity."
+    parameters:
+      - { pos: 1, key: ATK, name: "Attack", desc: "Attack phase length." }
+      - { pos: 2, key: DEC, name: "Decay", desc: "Decay phase length." }
+      - { pos: 3, key: POL, name: "Polarity", range: "POS, NEG", desc: "Impulse polarity, positive or negative." }
+      - { pos: 4, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  # ----- D.2 BASS DRUM — usable on BD, SD, RS, CP tracks ---------------------
+  - id: bd-hard
+    name: "BD HARD"
+    display: "Bass Drum — Hard"
+    manual_ref: "APPENDIX D.2 (p.97)"
+    tracks: [BD, SD, RS, CP]
+    category: bass-drum
+    desc: "Punchy hard bass drum (the manual's default SRC example, BDHD). Fixed sweep depth; tick + snap transient shaping."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Oscillator pitch in semitones." }
+      - { pos: 2, key: SWT, name: "Sweep Time", desc: "Pitch sweep time (sweep depth is fixed)." }
+      - { pos: 3, key: SNP, name: "Snap Amount", desc: "Snap transient level." }
+      - { pos: 4, key: DEC, name: "Decay", desc: "Decay phase length." }
+      - { pos: 5, key: WAV, name: "Waveform", range: "sine, asym sine, triangle", desc: "Oscillator waveform (increasing overtone content)." }
+      - { pos: 6, key: HLD, name: "Hold Time", desc: "Hold time before the decay phase." }
+      - { pos: 7, key: TIC, name: "Tick Level", desc: "Transient tick level." }
+      - { pos: 8, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  - id: bd-classic
+    name: "BD CLASSIC"
+    display: "Bass Drum — Classic"
+    manual_ref: "APPENDIX D.2 (p.97)"
+    tracks: [BD, SD, RS, CP]
+    category: bass-drum
+    desc: "Classic analog bass drum with adjustable sweep depth and a tick/noise transient."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Oscillator pitch in semitones." }
+      - { pos: 2, key: SWT, name: "Sweep Time", desc: "Pitch sweep time (low = short sweep)." }
+      - { pos: 3, key: SWD, name: "Sweep Depth", desc: "Depth of the pitch sweep." }
+      - { pos: 4, key: DEC, name: "Decay", desc: "Decay phase length." }
+      - { pos: 5, key: WAV, name: "Waveform", range: "sine, asym sine, triangle", desc: "Oscillator waveform." }
+      - { pos: 6, key: HLD, name: "Hold Time", desc: "Hold time before the decay phase." }
+      - { pos: 7, key: TRA, name: "Transient", desc: "Selects tick or noise transient sound and its level." }
+      - { pos: 8, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  - id: bd-fm
+    name: "BD FM"
+    display: "Bass Drum — FM"
+    manual_ref: "APPENDIX D.2 (p.97-98)"
+    tracks: [BD, SD, RS, CP]
+    category: bass-drum
+    desc: "FM bass drum: a modulated oscillator driven by a second modulating oscillator with its own tune/sweep/decay."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Pitch of the first (modulated) oscillator, in semitones." }
+      - { pos: 2, key: SWT, name: "Sweep Time", desc: "Pitch sweep time of the first (modulated) oscillator." }
+      - { pos: 3, key: FMD, name: "FM Decay", desc: "Decay of the second (modulating) oscillator = decay of the FM effect." }
+      - { pos: 4, key: DEC, name: "Decay", desc: "Decay of the first (modulated) oscillator = whole-drum decay." }
+      - { pos: 5, key: FMT, name: "FM Tune", desc: "Pitch of the second (modulating) oscillator." }
+      - { pos: 6, key: FMS, name: "FM Sweep Time", desc: "Pitch sweep time of the second (modulating) oscillator." }
+      - { pos: 7, key: FMA, name: "FM Amount", desc: "Amount of frequency modulation applied to the first oscillator." }
+      - { pos: 8, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  - id: bd-plastic
+    name: "BD PLASTIC"
+    display: "Bass Drum — Plastic"
+    manual_ref: "APPENDIX D.2 (p.98)"
+    tracks: [BD, SD, RS, CP]
+    category: bass-drum
+    desc: "Two interacting oscillators with selectable FM or FM+ring modulation for a buoyant plastic character."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Pitch of the two interacting oscillators, in semitones." }
+      - { pos: 2, key: SWT, name: "Sweep Time", desc: "Pitch sweep time of the two oscillators." }
+      - { pos: 3, key: SWD, name: "Sweep Depth", desc: "Depth of the pitch sweep." }
+      - { pos: 4, key: DEC, name: "Decay", desc: "Decay phase length." }
+      - { pos: 5, key: TYP, name: "Modulation Type", range: "A, B", desc: "A = linear FM between oscillators; B = FM combined with ring modulation." }
+      - { pos: 6, key: MOD, name: "Modulation Level", desc: "Modulation depth (both types add distinctive harmonics)." }
+      - { pos: 7, key: TIC, name: "Tick Level", desc: "Transient tick level." }
+      - { pos: 8, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  - id: bd-silky
+    name: "BD SILKY"
+    display: "Bass Drum — Silky"
+    manual_ref: "APPENDIX D.2 (p.98)"
+    tracks: [BD, SD, RS, CP]
+    category: bass-drum
+    desc: "Smooth bass drum with tape-like dust and a soft oscillator click for gentle transient color."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Oscillator pitch in semitones." }
+      - { pos: 2, key: SWT, name: "Sweep Time", desc: "Pitch sweep time." }
+      - { pos: 3, key: SWD, name: "Sweep Depth", desc: "Depth of the pitch sweep." }
+      - { pos: 4, key: DEC, name: "Decay", desc: "Decay phase length." }
+      - { pos: 5, key: HLD, name: "Hold Time", desc: "Hold phase length." }
+      - { pos: 6, key: DUS, name: "Dust Level", desc: "Level of subtle tape-like static." }
+      - { pos: 7, key: CLK, name: "VCO Click", desc: "Soft oscillator-generated click level." }
+      - { pos: 8, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  - id: bd-sharp
+    name: "BD SHARP"
+    display: "Bass Drum — Sharp"
+    manual_ref: "APPENDIX D.2 (p.99)"
+    tracks: [BD, SD, RS, CP]
+    category: bass-drum
+    desc: "Sharp bass drum with six selectable waveforms and free-run/reset oscillator behavior."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Oscillator pitch in semitones." }
+      - { pos: 2, key: SWT, name: "Sweep Time", desc: "Pitch sweep time." }
+      - { pos: 3, key: SWD, name: "Sweep Depth", desc: "Depth of the pitch sweep." }
+      - { pos: 4, key: DEC, name: "Decay", desc: "Decay phase length." }
+      - { pos: 5, key: HLD, name: "Hold Time", desc: "Hold phase length." }
+      - { pos: 6, key: TIC, name: "Tick Level", desc: "Transient tick level." }
+      - { pos: 7, key: WAV, name: "Waveform", range: "sine, asym sine, triangle, sinetooth, sawtooth, square (+ free/reset)", desc: "Six waveforms; oscillator can run free or reset each trig." }
+      - { pos: 8, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  - id: bd-acoustic
+    name: "BD ACOUSTIC"
+    display: "Bass Drum — Acoustic"
+    manual_ref: "APPENDIX D.2 (p.99)"
+    tracks: [BD, SD, RS, CP]
+    category: bass-drum
+    desc: "Acoustic-style bass drum with a digital PCM+noise impact transient and six waveforms."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Oscillator pitch in semitones." }
+      - { pos: 2, key: SWT, name: "Sweep Time", desc: "Pitch sweep time." }
+      - { pos: 3, key: SWD, name: "Sweep Depth", desc: "Depth of the pitch sweep." }
+      - { pos: 4, key: DEC, name: "Decay", desc: "Decay phase length." }
+      - { pos: 5, key: HLD, name: "Hold Time", desc: "Hold phase length." }
+      - { pos: 6, key: IMP, name: "Impact", desc: "Digital transient level (a mix of PCM and noise)." }
+      - { pos: 7, key: WAV, name: "Waveform", range: "sine, asym sine, triangle, sinetooth, sawtooth, square (+ free/reset)", desc: "Six waveforms; oscillator can run free or reset each trig." }
+      - { pos: 8, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  # ----- D.3 SNARE DRUM — usable on BD, SD, RS, CP tracks --------------------
+  - id: sd-hard
+    name: "SD HARD"
+    display: "Snare Drum — Hard"
+    manual_ref: "APPENDIX D.3 (p.99-100)"
+    tracks: [BD, SD, RS, CP]
+    category: snare-drum
+    desc: "Hard snare: fixed-interval oscillator pair plus an independent noise section."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Pitch of the oscillators in semitones (their interval is fixed)." }
+      - { pos: 2, key: SWT, name: "Sweep Time", desc: "Pitch sweep time." }
+      - { pos: 3, key: SWD, name: "Sweep Depth", desc: "Depth of the pitch sweep." }
+      - { pos: 4, key: DEC, name: "Decay", desc: "Decay phase length." }
+      - { pos: 5, key: TIC, name: "Tick Level", desc: "Transient tick level." }
+      - { pos: 6, key: NOD, name: "Noise Decay", desc: "Noise decay phase length." }
+      - { pos: 7, key: NOL, name: "Noise Level", desc: "Noise level." }
+      - { pos: 8, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  - id: sd-classic
+    name: "SD CLASSIC"
+    display: "Snare Drum — Classic"
+    manual_ref: "APPENDIX D.3 (p.100)"
+    tracks: [BD, SD, RS, CP]
+    category: snare-drum
+    desc: "Classic snare with a detunable second oscillator, oscillator balance, snap transient and noise."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Common pitch of the oscillators, in semitones." }
+      - { pos: 2, key: DET, name: "Detune", desc: "Pitch of the second oscillator relative to the first." }
+      - { pos: 3, key: BAL, name: "Osc Balance", desc: "Level balance between oscillator 1 and oscillator 2." }
+      - { pos: 4, key: DEC, name: "Decay", desc: "Decay phase length." }
+      - { pos: 5, key: SNP, name: "Snap Amount", desc: "Snap transient level." }
+      - { pos: 6, key: NOD, name: "Noise Decay", desc: "Noise decay phase length." }
+      - { pos: 7, key: NOL, name: "Noise Level", desc: "Noise level." }
+      - { pos: 8, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  - id: sd-fm
+    name: "SD FM"
+    display: "Snare Drum — FM"
+    manual_ref: "APPENDIX D.3 (p.100)"
+    tracks: [BD, SD, RS, CP]
+    category: snare-drum
+    desc: "FM snare: a modulated oscillator plus a modulating oscillator, with an independent noise section."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Pitch of the first (modulated) oscillator, in semitones." }
+      - { pos: 2, key: FMT, name: "FM Tune", desc: "Pitch of the second (modulating) oscillator." }
+      - { pos: 3, key: FMD, name: "FM Decay Time", desc: "Decay of the modulating oscillator = decay of the FM effect." }
+      - { pos: 4, key: DEC, name: "Decay", desc: "Decay of the first (modulated) oscillator = whole-drum decay." }
+      - { pos: 5, key: FMA, name: "FM Amount", range: "0-127", desc: "Amount of frequency modulation applied to the first oscillator." }
+      - { pos: 6, key: NOD, name: "Noise Decay", desc: "Noise decay phase length." }
+      - { pos: 7, key: NOL, name: "Noise Level", desc: "Noise level." }
+      - { pos: 8, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  - id: sd-natural
+    name: "SD NATURAL"
+    display: "Snare Drum — Natural"
+    manual_ref: "APPENDIX D.3 (p.101)"
+    tracks: [BD, SD, RS, CP]
+    category: snare-drum
+    desc: >-
+      Naturalistic snare with a filtered/resonant noise section. NOTE: on this
+      machine DEC controls NOISE decay and BDY controls oscillator decay (the
+      DEC key is repurposed vs other machines — see uncertainties).
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Pitch of the first oscillator, in semitones." }
+      - { pos: 2, key: DEC, name: "Noise Decay", desc: "Noise decay length (on this machine DEC = noise decay, not oscillator decay)." }
+      - { pos: 3, key: BAL, name: "Noise Balance", desc: "Balance between noise and oscillator." }
+      - { pos: 4, key: BDY, name: "Decay Time", desc: "Decay phase length of the oscillator (the body)." }
+      - { pos: 5, key: HPF, name: "Noise HPF", desc: "Noise highpass cutoff frequency." }
+      - { pos: 6, key: LPF, name: "Noise LPF", desc: "Noise lowpass cutoff frequency." }
+      - { pos: 7, key: RES, name: "Noise Resonance", desc: "Resonant peak on the Noise LPF (0 quenches resonance)." }
+      - { pos: 8, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  - id: sd-acoustic
+    name: "SD ACOUSTIC"
+    display: "Snare Drum — Acoustic"
+    manual_ref: "APPENDIX D.3 (p.101)"
+    tracks: [BD, SD, RS, CP]
+    category: snare-drum
+    desc: "Acoustic-style snare with a digital PCM+noise impact transient and a tunable body/noise mix."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Oscillator pitch in semitones." }
+      - { pos: 2, key: NOD, name: "Noise Decay", desc: "Noise decay length." }
+      # NOTE: manual prints NOL as name 'Noise Balance' but describes it as 'the
+      # level of the noise' — treated as Noise Level (see uncertainties).
+      - { pos: 3, key: NOL, name: "Noise Level", desc: "Noise level. (Manual parenthetical mislabels this 'Noise Balance'; its own description says it sets the noise LEVEL.)" }
+      - { pos: 4, key: BDY, name: "Decay Time", desc: "Decay phase length of the oscillator (the body)." }
+      - { pos: 5, key: HLD, name: "Hold Time", desc: "Hold phase length." }
+      - { pos: 6, key: IMP, name: "Impact", desc: "Digital transient level (a mix of PCM and noise)." }
+      - { pos: 7, key: SWD, name: "Sweep Depth", desc: "Depth of the pitch sweep." }
+      - { pos: 8, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  # ----- D.4 RIMSHOT — usable on RS, CP tracks ONLY -------------------------
+  - id: rs-hard
+    name: "RS HARD"
+    display: "Rimshot — Hard"
+    manual_ref: "APPENDIX D.4 (p.101-102)"
+    tracks: [RS, CP]
+    category: rimshot
+    desc: "Hard rimshot from a single oscillator through a nonlinear rimshot circuit, with tick and noise."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Oscillator pitch in semitones." }
+      - { pos: 2, key: SWT, name: "Sweep Time", desc: "Pitch sweep time." }
+      - { pos: 3, key: SWD, name: "Sweep Depth", desc: "Depth of the pitch sweep." }
+      - { pos: 4, key: DEC, name: "Decay", desc: "Decay phase length." }
+      - { pos: 5, key: SYM, name: "Symmetry", desc: "Adjusts the nonlinearity of the special rimshot circuit." }
+      - { pos: 6, key: TIC, name: "Tick Level", desc: "Transient tick level." }
+      - { pos: 7, key: NOL, name: "Noise Level", desc: "Noise level." }
+      - { pos: 8, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  - id: rs-classic
+    name: "RS CLASSIC"
+    display: "Rimshot — Classic"
+    manual_ref: "APPENDIX D.4 (p.102)"
+    tracks: [RS, CP]
+    category: rimshot
+    desc: "Classic two-oscillator rimshot with independent tuning, balance and a nonlinear rimshot circuit."
+    parameters:
+      - { pos: 1, key: T1,  name: "Tune Osc1", desc: "Pitch of the first oscillator, in semitones." }
+      - { pos: 2, key: T2,  name: "Tune Osc2", desc: "Pitch of the second oscillator, in semitones." }
+      - { pos: 3, key: BAL, name: "Osc Balance", desc: "Balance between oscillator 1 and oscillator 2." }
+      - { pos: 4, key: DEC, name: "Decay", desc: "Decay phase length." }
+      - { pos: 5, key: SYM, name: "Symmetry", desc: "Adjusts the nonlinearity of the special rimshot circuit." }
+      - { pos: 6, key: TIC, name: "Tick Level", desc: "Transient tick level." }
+      - { pos: 7, key: NOL, name: "Noise Level", desc: "Noise level." }
+      - { pos: 8, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  # ----- D.5 HAND CLAP — usable on RS, CP tracks ONLY -----------------------
+  - id: cp-classic
+    name: "CP CLASSIC"
+    display: "Hand Clap — Classic"
+    manual_ref: "APPENDIX D.5 (p.102)"
+    tracks: [RS, CP]
+    category: hand-clap
+    desc: "Classic hand clap: a burst of individual claps (rate/number/randomization) plus a tunable noise tail."
+    parameters:
+      - { pos: 1, key: RAT, name: "Clap Rate", desc: "Rate of the hand claps." }
+      - { pos: 2, key: NUM, name: "Clap Number", desc: "Number of hand claps in the burst." }
+      - { pos: 3, key: RND, name: "Random Claps", desc: "Randomizes the timing of the claps." }
+      - { pos: 4, key: CPD, name: "Clap Decay", desc: "Decay phase length of the claps." }
+      - { pos: 5, key: TON, name: "Noise Tone", desc: "Pitch of the noise." }
+      - { pos: 6, key: NOD, name: "Noise Decay", desc: "Decay phase length of the noise." }
+      - { pos: 7, key: NOL, name: "Noise Level", desc: "Noise level." }
+      - { pos: 8, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  # ----- D.6 SYNTH — usable on BD, SD, RS, CP tracks ------------------------
+  - id: sy-dual-vco
+    name: "SY DUAL VCO"
+    display: "Synth — Dual VCO"
+    manual_ref: "APPENDIX D.6 (p.103)"
+    tracks: [BD, SD, RS, CP]
+    category: synth
+    desc: >-
+      Two-oscillator synth voice with selectable mix/ring/FM interaction, a
+      fixed-time pitch bend envelope and independent per-oscillator decays.
+      TUN value 0 = note C-2; one octave = 24 units (osc1), 48 units (osc2 DET).
+    parameters:
+      - { pos: 1, key: TUN,  name: "Osc 1 Tune", desc: "Pitch of oscillator 1 in semitones (0 = C-2; one octave = 24 units)." }
+      - { pos: 2, key: DET,  name: "Osc 2 Detune", desc: "Pitch of oscillator 2 relative to osc 1 (one octave = 48 units)." }
+      # NOTE: the manual labels BOTH decay knobs 'DEC' (Osc 1 Decay, Osc 2 Decay).
+      # Kept as printed; on hardware they are distinct knobs (see uncertainties).
+      - { pos: 3, key: DEC,  name: "Osc 1 Decay", desc: "Decay time of oscillator 1's level. (Manual labels this DEC; distinct knob from the osc-2 decay below.)" }
+      - { pos: 4, key: DEC,  name: "Osc 2 Decay", desc: "Decay time of oscillator 2's level. (Manual also labels this DEC.)" }
+      - { pos: 5, key: CFG,  name: "Osc Config", range: "+, R, F, FR, _", desc: "Selects the oscillator waveforms and interaction: + mix, R ring-mod, F linear FM (osc1 carrier), FR FM+ring, _ resets oscillators on trig. 2 osc1 waveforms (sine, sinesaw) x 5 osc2 waveforms (sine, skewed sine, triangle, sinesaw, saw)." }
+      - { pos: 6, key: BND,  name: "Bend", desc: "Depth of a fixed-time pitch envelope (one octave = 24 units)." }
+      - { pos: 7, key: BAL,  name: "Balance", desc: "Levels of the two oscillators (0 = both max; negative attenuates osc2, positive attenuates osc1)." }
+      - { pos: 8, key: LEV,  name: "Level", desc: "Overall machine volume." }
+
+  - id: sy-chip
+    name: "SY CHIP"
+    display: "Synth — Chip"
+    manual_ref: "APPENDIX D.6 (p.103-104)"
+    tracks: [BD, SD, RS, CP]
+    category: synth
+    desc: >-
+      Chiptune-style voice modeled on 80s home-computer arpeggiation: the root
+      note is followed by up to three offset notes at high speed to imply a
+      chord. Rich waveform set (static analog, SID noise, animated, table-based,
+      pulse-width).
+    parameters:
+      - { pos: 1, key: TUNE, name: "Tune", desc: "Oscillator pitch in semitones." }
+      - { pos: 2, key: WAV,  name: "Waveform", desc: "Oscillator waveform: static (analog sine/asym-sine/triangle/sinesaw/saw/square, SID-style pitched noise), animated (Anim 1-5, PWM+/-), table-based (.TRI/+TRI/TRI+/TRI*, TBL1-3), and 1-99% pulse waves." }
+      - { pos: 3, key: SPD,  name: "Speed", desc: "Internal arpeggiator speed: first a range of BPM note-divisions, then fixed Hz values, then single-shot (non-restarting) modes at the end of the list." }
+      - { pos: 4, key: DEC,  name: "Decay", desc: "Decay phase length." }
+      - { pos: 5, key: OF2,  name: "Offset 2", desc: "First note offset from TUNE (builds the implied chord; 0 restarts/stops the arp)." }
+      - { pos: 6, key: OF3,  name: "Offset 3", desc: "Second note offset from TUNE (0 restarts/stops the arp)." }
+      - { pos: 7, key: OF4,  name: "Offset 4", desc: "Third note offset from TUNE (0 restarts/stops the arp)." }
+      - { pos: 8, key: LEV,  name: "Level", desc: "Overall machine volume." }
+
+  - id: sy-raw
+    name: "SY RAW"
+    display: "Synth — Raw"
+    manual_ref: "APPENDIX D.6 (p.104)"
+    tracks: [BD, SD, RS, CP]
+    category: synth
+    desc: >-
+      Raw two-oscillator synth with a rich osc-1 waveform set (incl. ring mod),
+      a two-waveform osc 2, and a noise section. TUNE value 0 = note C-2.
+    parameters:
+      - { pos: 1, key: TUNE, name: "Osc 1 Tune", desc: "Pitch of oscillator 1 (0 = C-2)." }
+      - { pos: 2, key: DET,  name: "Detune", desc: "Tuning of oscillator 2 relative to oscillator 1." }
+      - { pos: 3, key: BAL,  name: "Balance", desc: "Balance between oscillator 1 and oscillator 2." }
+      - { pos: 4, key: DEC2, name: "Osc 2 Decay", desc: "Decay time of oscillator 2's level." }
+      - { pos: 5, key: WAV1, name: "Osc 1 Wave", range: "sine, asym sine, triangle, sinesaw, asym saw, saw, ring-mod", desc: "Osc 1 waveform (7 options; ring-mod = osc1 ring-modulates osc2 with a square wave)." }
+      - { pos: 6, key: WAV2, name: "Osc 2 Wave", range: "sine, sinesaw", desc: "Osc 2 waveform (2 options; a leading small square resets both oscillators' phase on trig)." }
+      - { pos: 7, key: NLEV, name: "Noise Level", desc: "Noise level." }
+      - { pos: 8, key: LEV,  name: "Level", range: "0-127", desc: "Overall machine volume." }
+
+  # ----- D.7 BASS TOM — usable on BT track ONLY ----------------------------
+  - id: bt-classic
+    name: "BT CLASSIC"
+    display: "Bass Tom — Classic"
+    manual_ref: "APPENDIX D.7 (p.105)"
+    tracks: [BT]
+    category: bass-tom
+    desc: "Classic bass/low tom with pitch sweep, snap transient and a noise component."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Oscillator pitch." }
+      - { pos: 2, key: SWD, name: "Sweep Depth", desc: "Depth of the pitch sweep." }
+      - { pos: 3, key: DEC, name: "Decay", desc: "Decay phase length." }
+      - { pos: 4, key: SNP, name: "Snap", desc: "Length of the snap transient." }
+      - { pos: 5, key: NOL, name: "Noise Level", desc: "Noise level." }
+      - { pos: 6, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  # ----- D.8 LOW/MID/HIGH TOM — usable on LT, MT, HT tracks -----------------
+  - id: xt-classic
+    name: "XT CLASSIC"
+    display: "Tom — Classic (Low/Mid/High)"
+    manual_ref: "APPENDIX D.8 (p.105)"
+    tracks: [LT, MT, HT]
+    category: tom
+    desc: >-
+      The single tom machine shared by the LT (Low Tom), MT (Mid Tom) and HT
+      (High Tom) tracks — the 'XT' machine. Pitch sweep plus a tunable noise
+      component. (Section 8.2 refers to this as 'XT CLASSIC' for all three tom
+      tracks.)
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Oscillator pitch." }
+      - { pos: 2, key: SWT, name: "Sweep Time", desc: "Pitch sweep time." }
+      - { pos: 3, key: SWD, name: "Sweep Depth", desc: "Depth of the pitch sweep." }
+      - { pos: 4, key: DEC, name: "Decay", desc: "Decay phase length." }
+      - { pos: 5, key: TON, name: "Noise Tone", desc: "Pitch of the noise." }
+      - { pos: 6, key: NOD, name: "Noise Decay", desc: "Noise decay phase length." }
+      - { pos: 7, key: NOL, name: "Noise Level", desc: "Noise level." }
+      - { pos: 8, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  # ----- D.9 CLOSED HIHAT — usable on CH, OH tracks -------------------------
+  - id: hh-basic
+    name: "HH BASIC"
+    display: "Hihat — Basic"
+    manual_ref: "APPENDIX D.9 (p.106)"
+    tracks: [CH, OH]
+    category: hihat
+    desc: "Basic hihat: six combined oscillators with tone shaping and a transient decay."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Pitch of the six combined oscillators." }
+      - { pos: 2, key: TON, name: "Tone", desc: "Tone of the sound (positive = shriller, negative = deeper)." }
+      - { pos: 3, key: TRD, name: "Transient Decay", desc: "Length of the transient." }
+      - { pos: 4, key: DEC, name: "Decay", desc: "Length of the hihat sound." }
+      - { pos: 5, key: RST, name: "Osc Reset", desc: "Reset the oscillators on each trig, or let them run free." }
+      - { pos: 6, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  - id: hh-lab
+    name: "HH LAB"
+    display: "Hihat — Lab"
+    manual_ref: "APPENDIX D.9 (p.106)"
+    tracks: [CH, OH]
+    category: hihat
+    desc: "Hihat lab: freely tune each of the six oscillators that make up the hihat sound."
+    parameters:
+      - { pos: 1, key: OSC1, name: "Oscillator 1 Frequency", desc: "Pitch of oscillator 1." }
+      - { pos: 2, key: OSC2, name: "Oscillator 2 Frequency", desc: "Pitch of oscillator 2." }
+      - { pos: 3, key: OSC3, name: "Oscillator 3 Frequency", desc: "Pitch of oscillator 3." }
+      - { pos: 4, key: OSC4, name: "Oscillator 4 Frequency", desc: "Pitch of oscillator 4." }
+      - { pos: 5, key: OSC5, name: "Oscillator 5 Frequency", desc: "Pitch of oscillator 5." }
+      - { pos: 6, key: OSC6, name: "Oscillator 6 Frequency", desc: "Pitch of oscillator 6." }
+      - { pos: 7, key: DEC,  name: "Decay", desc: "Length of the hihat sound." }
+      - { pos: 8, key: LEV,  name: "Level", desc: "Overall machine volume." }
+
+  - id: ch-classic
+    name: "CH CLASSIC"
+    display: "Closed Hihat — Classic"
+    manual_ref: "APPENDIX D.9 (p.106)"
+    tracks: [CH, OH]
+    category: hihat
+    desc: "Classic closed hihat with a noise-color (metal-alloy hardness) control."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Pitch of the closed-hihat oscillators." }
+      - { pos: 2, key: DEC, name: "Decay", desc: "Decay phase length of the closed-hihat sound." }
+      - { pos: 3, key: COL, name: "Noise Color", desc: "Timbral color — the virtual hardness of the imaginary metal alloy." }
+      - { pos: 4, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  - id: ch-metallic
+    name: "CH METALLIC"
+    display: "Closed Hihat — Metallic"
+    manual_ref: "APPENDIX D.9 (p.107)"
+    tracks: [CH, OH]
+    category: hihat
+    desc: "Metallic closed hihat from interacting oscillators."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Pitch of the interacting oscillators of the metallic hihat." }
+      - { pos: 2, key: DEC, name: "Decay", desc: "Decay phase length." }
+      - { pos: 3, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  # ----- D.10 OPEN HIHAT — usable on CH, OH tracks --------------------------
+  - id: oh-classic
+    name: "OH CLASSIC"
+    display: "Open Hihat — Classic"
+    manual_ref: "APPENDIX D.10 (p.107)"
+    tracks: [CH, OH]
+    category: hihat
+    desc: "Classic open hihat with a noise-color control."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Pitch of the open-hihat oscillators." }
+      - { pos: 2, key: DEC, name: "Decay", desc: "Decay phase length." }
+      - { pos: 3, key: COL, name: "Noise Color", desc: "Timbral color." }
+      - { pos: 4, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  - id: oh-metallic
+    name: "OH METALLIC"
+    display: "Open Hihat — Metallic"
+    manual_ref: "APPENDIX D.10 (p.107)"
+    tracks: [CH, OH]
+    category: hihat
+    desc: "Metallic open hihat from interacting oscillators."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Pitch of the oscillators of the metallic hihat." }
+      - { pos: 2, key: DEC, name: "Decay", desc: "Decay phase length." }
+      - { pos: 3, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  # ----- D.11 CYMBAL — usable on CY, CB tracks ------------------------------
+  - id: cy-classic
+    name: "CY CLASSIC"
+    display: "Cymbal — Classic"
+    manual_ref: "APPENDIX D.11 (p.108)"
+    tracks: [CY, CB]
+    category: cymbal
+    desc: "Classic cymbal from interacting oscillators with tone and noise-color shaping."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Pitch of the interacting oscillators of the cymbal." }
+      - { pos: 2, key: TON, name: "Tone", desc: "Metallic tone of the cymbal." }
+      - { pos: 3, key: DEC, name: "Decay", desc: "Decay phase length of the cymbal sound." }
+      - { pos: 4, key: COL, name: "Noise Color", desc: "Timbral color of the cymbal." }
+      - { pos: 5, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  - id: cy-metallic
+    name: "CY METALLIC"
+    display: "Cymbal — Metallic"
+    manual_ref: "APPENDIX D.11 (p.108)"
+    tracks: [CY, CB]
+    category: cymbal
+    desc: "Metallic cymbal from ring-modulated oscillators with a tunable transient."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Pitch of the ring-modulated oscillators of the metallic cymbal." }
+      - { pos: 2, key: TON, name: "Tone", desc: "Tone of the metallic transient." }
+      - { pos: 3, key: TRD, name: "Transient Decay", desc: "Length of the transient decay phase." }
+      - { pos: 4, key: DEC, name: "Decay", desc: "Decay phase length of the oscillators." }
+      - { pos: 5, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  - id: cy-ride
+    name: "CY RIDE"
+    display: "Cymbal — Ride"
+    manual_ref: "APPENDIX D.11 (p.108)"
+    tracks: [CY, CB]
+    category: cymbal
+    desc: "Ride cymbal model with selectable oscillator sets, separate hit/tail decays and three tunable components."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Pitch of the interacting oscillators of the ride model." }
+      - { pos: 2, key: TYP, name: "Cymbal Type", desc: "Selects fundamental oscillator-frequency sets and inter-oscillator interaction." }
+      - { pos: 3, key: HIT, name: "Hit Decay", desc: "Top (hit) decay." }
+      - { pos: 4, key: DEC, name: "Tail Decay", desc: "Tail decay." }
+      - { pos: 5, key: C1,  name: "Component 1", desc: "Level of component 1." }
+      - { pos: 6, key: C2,  name: "Component 2", desc: "Level of component 2." }
+      - { pos: 7, key: C3,  name: "Component 3", desc: "Level of component 3." }
+      - { pos: 8, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  # ----- D.12 COWBELL — usable on CY, CB tracks -----------------------------
+  - id: cb-classic
+    name: "CB CLASSIC"
+    display: "Cowbell — Classic"
+    manual_ref: "APPENDIX D.12 (p.109)"
+    tracks: [CY, CB]
+    category: cowbell
+    desc: "Classic cowbell from two detunable pulse oscillators with per-oscillator pulse width."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Base pitch of the two oscillators." }
+      - { pos: 2, key: DEC, name: "Decay", desc: "Decay phase length of the cowbell sound." }
+      - { pos: 3, key: DET, name: "Detune", desc: "Detune offset of the second oscillator." }
+      - { pos: 4, key: PW1, name: "Pulse Width Oscillator 1", desc: "Pulse width of the first oscillator." }
+      - { pos: 5, key: PW2, name: "Pulse Width Oscillator 2", desc: "Pulse width of the second oscillator." }
+      - { pos: 6, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+  - id: cb-metallic
+    name: "CB METALLIC"
+    display: "Cowbell — Metallic"
+    manual_ref: "APPENDIX D.12 (p.109)"
+    tracks: [CY, CB]
+    category: cowbell
+    desc: "Metallic cowbell from two detunable pulse oscillators with per-oscillator pulse width."
+    parameters:
+      - { pos: 1, key: TUN, name: "Tune", desc: "Base pitch of the two oscillators." }
+      - { pos: 2, key: DEC, name: "Decay", desc: "Decay phase length of the metallic cowbell sound." }
+      - { pos: 3, key: DET, name: "Detune", desc: "Detune offset of the second oscillator." }
+      - { pos: 4, key: PW1, name: "Pulse Width Oscillator 1", desc: "Pulse width of the first oscillator." }
+      - { pos: 5, key: PW2, name: "Pulse Width Oscillator 2", desc: "Pulse width of the second oscillator." }
+      - { pos: 6, key: LEV, name: "Level", desc: "Overall machine volume." }
+
+# ===========================================================================
+# LEGALITY — which MACHINES each drum track can host. Built from section 8.2
+# "MACHINES" (manual p.21, the numbered per-track list) cross-checked against
+# the APPENDIX D per-section track headers. General machines (DISABLE, UT NOISE,
+# UT IMPULSE) are legal on ALL tracks (APPENDIX D.1) and are listed via
+# `general_machines_on_all_tracks` rather than repeated per track.
+#
+# KEY ASYMMETRY: the BD/SD synthesis machines flow DOWN to the RS and CP tracks
+# (RS/CP can host all BD/SD/SY machines), but the RS/CP-specific machines
+# (RS HARD, RS CLASSIC, CP CLASSIC) do NOT flow UP to BD/SD (they are legal on
+# RS and CP only, per APPENDIX D.4/D.5 "can only be used on the RS and CP
+# tracks"). So BD and SD share one machine set; RS and CP share a larger one.
+# ===========================================================================
+legality:
+  general_machines_on_all_tracks: [disable, ut-noise, ut-impulse]
+  tracks:
+    BD:
+      name: "Bass Drum"
+      machines: [bd-hard, bd-classic, bd-fm, bd-plastic, bd-silky, bd-sharp, bd-acoustic,
+                 sd-hard, sd-classic, sd-fm, sd-natural, sd-acoustic,
+                 sy-dual-vco, sy-chip, sy-raw]
+      note: "BD machines + all SD machines + SY machines. Does NOT include RS/CP machines."
+    SD:
+      name: "Snare Drum"
+      machines: [sd-hard, sd-classic, sd-fm, sd-natural, sd-acoustic,
+                 bd-hard, bd-classic, bd-fm, bd-plastic, bd-silky, bd-sharp, bd-acoustic,
+                 sy-dual-vco, sy-chip, sy-raw]
+      note: "SD machines + all BD machines + SY machines. Same set as BD. Does NOT include RS/CP machines."
+    RS:
+      name: "Rim Shot"
+      machines: [rs-hard, rs-classic,
+                 bd-hard, bd-classic, bd-fm, bd-plastic, bd-silky, bd-sharp, bd-acoustic,
+                 sd-hard, sd-classic, sd-fm, sd-natural, sd-acoustic,
+                 cp-classic,
+                 sy-dual-vco, sy-chip, sy-raw]
+      note: "RS machines + all BD, SD and CP machines + SY machines."
+    CP:
+      name: "Hand Clap"
+      machines: [cp-classic,
+                 bd-hard, bd-classic, bd-fm, bd-plastic, bd-silky, bd-sharp, bd-acoustic,
+                 sd-hard, sd-classic, sd-fm, sd-natural, sd-acoustic,
+                 rs-hard, rs-classic,
+                 sy-dual-vco, sy-chip, sy-raw]
+      note: "CP machine + all BD, SD and RS machines + SY machines. Same set as RS."
+    BT:
+      name: "Bass Tom"
+      machines: [bt-classic]
+      note: "BT CLASSIC only."
+    LT:
+      name: "Low Tom"
+      machines: [xt-classic]
+      note: "XT CLASSIC (the shared tom machine)."
+    MT:
+      name: "Mid Tom"
+      machines: [xt-classic]
+      note: "XT CLASSIC (the shared tom machine)."
+    HT:
+      name: "High Tom"
+      machines: [xt-classic]
+      note: "XT CLASSIC (the shared tom machine)."
+    CH:
+      name: "Closed Hihat"
+      machines: [ch-classic, ch-metallic, hh-basic, hh-lab, oh-classic, oh-metallic]
+      note: "CH machines + HH BASIC/LAB + all OH machines."
+    OH:
+      name: "Open Hihat"
+      machines: [oh-classic, oh-metallic, hh-basic, hh-lab, ch-classic, ch-metallic]
+      note: "OH machines + HH BASIC/LAB + all CH machines. Same set as CH."
+    CY:
+      name: "Cymbal"
+      machines: [cy-classic, cy-metallic, cy-ride, cb-classic, cb-metallic]
+      note: "CY machines + all CB machines."
+    CB:
+      name: "Cow Bell"
+      machines: [cb-classic, cb-metallic, cy-classic, cy-metallic, cy-ride]
+      note: "CB machines + all CY machines. Same set as CY."
+
+# ===========================================================================
+# FX TRACK — the five FX-track PARAMETER pages (APPENDIX B). Delay and Reverb
+# are SEND effects (fed by each drum track's AMP-page DEL/REV sends);
+# Distortion and Compressor are MASTER effects (condition the whole mix); the
+# FX LFO is a dedicated LFO whose parameters mirror the drum-track LFO.
+# ===========================================================================
+fx_track:
+  pages:
+
+    DELAY:
+      manual_ref: "APPENDIX B.1 (p.81)"
+      type: send
+      name: "Delay"
+      desc: "Send delay: a duplicated, time-delayed copy of the signal rejoined with the original."
+      midi_ref: "APPENDIX C.7 DELAY (p.87). Addressed on the FX-track MIDI channel; nrpn MSB 2."
+      parameters:
+        - { pos: 1, key: TIM, name: "Delay Time", cc: 16, nrpn: [2, 0], desc: "Delay time relative to BPM, measured in 128th notes (e.g. 32 = one beat / four 16ths)." }
+        - { pos: 2, key: X,   name: "Pingpong", range: "0 (off), 1 (on)", cc: 17, nrpn: [2, 1], desc: "0 = manual pan via WID; 1 = signal alternates left/right (WID sets the pan amount)." }
+        - { pos: 3, key: WID, name: "Stereo Width", cc: 18, nrpn: [2, 2], desc: "Delay-signal pan width across the stereo field (bipolar; midi.guide: centered)." }
+        - { pos: 4, key: FDB, name: "Feedback", cc: 19, nrpn: [2, 3], desc: "Amount of delay output fed back to its input (high values give infinite/swelling delays — can get very loud)." }
+        - { pos: 5, key: HPF, name: "HP Filter", cc: 20, nrpn: [2, 4], desc: "Delay highpass cutoff frequency." }
+        - { pos: 6, key: LPF, name: "LP Filter", cc: 21, nrpn: [2, 5], desc: "Delay lowpass cutoff frequency." }
+        - { pos: 7, key: REV, name: "Reverb Send", cc: 22, nrpn: [2, 6], desc: "Amount of delay output sent to the reverb." }
+        - { pos: 8, key: VOL, name: "Mix Volume", cc: 23, nrpn: [2, 7], desc: "Delay output volume (routed pre/post distortion+compressor per the DEL setting on the DISTORTION page)." }
+
+    REVERB:
+      manual_ref: "APPENDIX B.2 (p.81-82)"
+      type: send
+      name: "Reverb"
+      desc: "Send reverb: simulates spaces from large halls to small confinements, with shelving damping and HP/LP filtering."
+      midi_ref: "APPENDIX C.7 REVERB (p.87). FX-track channel; nrpn MSB 2."
+      parameters:
+        - { pos: 1, key: PRE, name: "Pre-delay", cc: 24, nrpn: [2, 8], desc: "Reverb pre-delay time." }
+        - { pos: 2, key: DEC, name: "Decay", cc: 25, nrpn: [2, 9], desc: "Decay length of the reverberated signal (the size of the acoustic space)." }
+        - { pos: 3, key: FRQ, name: "Shelving Frequency", cc: 26, nrpn: [2, 10], desc: "Shelving-filter frequency; with GAI, damps the reverb tail above this frequency." }
+        - { pos: 4, key: GAI, name: "Shelving Gain", cc: 27, nrpn: [2, 11], desc: "Damping of the reverb tail above the shelving frequency (max = full treble; lower = gradually damped)." }
+        - { pos: 5, key: HPF, name: "HP Filter", cc: 28, nrpn: [2, 12], desc: "Reverb highpass cutoff frequency." }
+        - { pos: 6, key: LPF, name: "LP Filter", cc: 29, nrpn: [2, 13], desc: "Reverb lowpass cutoff frequency." }
+        - { pos: 7, key: VOL, name: "Mix Volume", cc: 31, nrpn: [2, 15], desc: "Reverb output volume (routed pre/post distortion+compressor per the REV setting on the DISTORTION page)." }
+      note: "The Reverb page exposes 7 parameters; the unused eighth knob slot corresponds to the skipped MIDI address cc 30 / nrpn [2, 14] (both manual C.7 and midi.guide skip it)."
+
+    DISTORTION:
+      manual_ref: "APPENDIX B.3 (p.82)"
+      type: master
+      name: "Distortion"
+      desc: >-
+        Master distortion: pronounces and distorts signal peaks, with a DC
+        offset for asymmetric distortion. Also hosts the delay overdrive and the
+        pre/post routing of the delay and reverb effect returns.
+      midi_ref: "APPENDIX C.7 DISTORTION (p.87). FX-track channel; nrpn MSB 2."
+      parameters:
+        - { pos: 1, key: AMT, name: "Distortion Amount", cc: 70, nrpn: [2, 16], desc: "Amount of distortion applied." }
+        - { pos: 2, key: SYM, name: "Distortion Symmetry", cc: 71, nrpn: [2, 17], desc: "Offsets the whole signal up/down before distortion, fringing only the crests or troughs (asymmetric distortion)." }
+        - { pos: 3, key: DOV, name: "Delay Overdrive", cc: 72, nrpn: [2, 18], desc: "Overdrive of the Delay effect for a warm dynamic distortion (pair with the DELAY-page FDB)." }
+        - { pos: 4, key: DEL, name: "Delay Dist/Comp", range: "PRE, POST", cc: 76, nrpn: [2, 22], desc: "Whether the Delay return is before (PRE, default) or after (POST) distortion + compression." }
+        - { pos: 5, key: REV, name: "Reverb Dist/Comp", range: "PRE, POST", cc: 77, nrpn: [2, 23], desc: "Whether the Reverb return is before (PRE) or after (POST, default) distortion + compression." }
+      note: "The Distortion page exposes 5 parameters. Note the MIDI gap: DOV (cc 72 / nrpn [2, 18]) jumps to DEL (cc 76 / nrpn [2, 22]); cc 73-75 / nrpn [2, 19..21] are unused knob slots (both manual C.7 and midi.guide)."
+
+    COMPRESSOR:
+      manual_ref: "APPENDIX B.4 (p.82-83)"
+      type: master
+      name: "Compressor"
+      desc: "Master compressor across the whole mix, with sidechain EQ and dry/wet parallel-compression mix."
+      midi_ref: "APPENDIX C.7 COMPRESSOR (p.87). FX-track channel; nrpn MSB 2."
+      parameters:
+        - { pos: 1, key: THR, name: "Threshold", cc: 78, nrpn: [2, 24], desc: "Compressor threshold (lower = more of the signal compressed)." }
+        - { pos: 2, key: ATK, name: "Attack", range: "0.03-30 ms", cc: 79, nrpn: [2, 25], desc: "Attack time — how quickly the compressor responds to loud peaks. midi.guide: cc range 0-6." }
+        - { pos: 3, key: REL, name: "Release", range: "0.1-2 s, A1, A2", cc: 80, nrpn: [2, 26], desc: "Release time; A1/A2 are auto-release modes (A2 slightly longer than A1). midi.guide: cc range 0-7." }
+        - { pos: 4, key: MUP, name: "Makeup Gain", cc: 81, nrpn: [2, 27], desc: "Makeup gain to compensate for compression-reduced levels." }
+        - { pos: 5, key: RAT, name: "Compression Ratio", range: "1:2, 1:4, 1:8, MAX", cc: 82, nrpn: [2, 28], desc: "Compression ratio (higher = more compression). midi.guide: cc range 0-3." }
+        - { pos: 6, key: SEQ, name: "Sidechain EQ", range: "OFF, LPF, HPF, HIT", cc: 83, nrpn: [2, 29], desc: "Filters the detector signal: OFF unchanged, LPF reacts to bass (pumping), HPF reacts less to bass (avoids pumping), HIT balanced across frequencies. midi.guide: cc range 0-3." }
+        - { pos: 7, key: MIX, name: "Dry/Wet Mix", range: "0-127", cc: 84, nrpn: [2, 30], desc: "Blend of uncompressed and compressed signal (parallel compression); left = dry, right = fully compressed." }
+        - { pos: 8, key: VOL, name: "Volume", cc: 85, nrpn: [2, 31], desc: "Output signal volume." }
+
+    LFO:
+      manual_ref: "APPENDIX B.5 (p.83-84)"
+      type: modulation
+      name: "FX Track LFO"
+      desc: >-
+        Dedicated FX-track LFO; can modulate any parameter on the FX-track
+        pages. Parameters mirror the drum-track LFO exactly (same waveforms and
+        trig modes as track_pages.LFO).
+      midi_ref: >-
+        Appendix C documents ONE LFO CC/NRPN map (C.6, cc 102-109 / nrpn MSB 1);
+        the FX-track LFO is addressed with the SAME numbers on the FX-track's MIDI
+        channel (there is no separate FX-LFO table). See uncertainties.midi-fx-lfo-map-shared.
+      # WARNING for consumers: unlike every OTHER FX-track page (which uses
+      # NRPN MSB 2), the FX LFO uses NRPN MSB 1 — the shared C.6 LFO map — on
+      # the FX channel. Do NOT iterate "FX channel => nrpn MSB 2" or you will
+      # mis-address these eight params (uncertainties.midi-fx-lfo-map-shared).
+      parameters:
+        - { pos: 1, key: SPD, name: "Speed", cc: 102, nrpn: [1, 32], desc: "LFO speed (bipolar; negative runs the cycle backward). Try 8/16/32 for beat-synced motion." }
+        - { pos: 2, key: MUL, name: "Multiplier", cc: 103, nrpn: [1, 33], desc: "Multiplies SPD. 24 settings: 12 tempo-synced (x) + 12 free (dot, sync to 120 BPM)." }
+        - { pos: 3, key: FAD, name: "Fade In/Out", cc: 104, nrpn: [1, 34], desc: "Fades the modulation in/out (bipolar; positive = fade-out, negative = fade-in, 0 = none)." }
+        - { pos: 4, key: DST, name: "Destination", cc: 105, nrpn: [1, 35], desc: "Modulation target — any parameter on the FX-track pages (selected from a live list, confirmed with [YES])." }
+        - { pos: 5, key: WAV, name: "Waveform", range: "TRI, SINE, SQR, SAW, EXP, RMP, RND", cc: 106, nrpn: [1, 36], desc: "LFO waveform (same set as the drum-track LFO)." }
+        - { pos: 6, key: SPH, name: "Start Phase", range: "0-127", cc: 107, nrpn: [1, 37], desc: "Cycle start position when trigged (0 = start, 64 = center, 127 = end). With WAV=RND, adds slew instead." }
+        - { pos: 7, key: MOD, name: "Trig Mode", range: "FREE, TRIG, HOLD, ONE, HALF", cc: 108, nrpn: [1, 38], desc: "How the LFO responds to a trig (same modes as the drum-track LFO)." }
+        - { pos: 8, key: DEP, name: "Depth", cc: 109, cc_lsb: 118, nrpn: [1, 39], desc: "Modulation depth and polarity (bipolar; 0 = none). HIGH-RESOLUTION: cc MSB 109 + cc LSB 118." }
+
+# ===========================================================================
+# UNCERTAINTIES & FLAGGED INCONSISTENCIES
+# Table extraction from the PDF was imperfect (the parameter-page layout images
+# did not survive as text). Everything below is cross-checked against the
+# surrounding prose; items are flagged rather than silently resolved.
+# ===========================================================================
+uncertainties:
+  - id: knob-positions-not-explicit
+    where: "all machines + track_pages + fx_track"
+    issue: >-
+      The manual's explicit A-H knob labels live in parameter-page diagram
+      images that did not extract to text. `pos` records each parameter's
+      ordinal position in the manual's listing (which follows knob order A->H
+      left to right). For pages/machines with all 8 parameters this equals
+      knob A..H; for machines with fewer than 8 parameters the specific unused
+      knob slots are not stated in the text.
+    resolution: "Recorded ordinal position; did not assert speculative A-H letters."
+
+  - id: sd-acoustic-nol-label
+    where: "machines[sd-acoustic].parameters NOL"
+    issue: >-
+      The manual prints 'NOL (Noise Balance) sets the level of the noise' — the
+      parenthetical name ('Noise Balance') contradicts the description ('the
+      level of the noise'). Elsewhere NOL is always 'Noise Level'.
+    resolution: "Treated NOL as Noise Level (matches the description and the NOL key used on every other machine); flagged in the param desc."
+
+  - id: sy-dual-vco-duplicate-dec
+    where: "machines[sy-dual-vco].parameters"
+    issue: >-
+      The manual labels TWO adjacent knobs 'DEC' — 'DEC (Osc 1 Decay)' and
+      'DEC (Osc 2 Decay)'. Both share the key DEC in the text; on hardware they
+      are two distinct knobs (likely shown as DEC1/DEC2 on the device).
+    resolution: "Kept both as printed (key DEC) with distinct names Osc 1 Decay / Osc 2 Decay; flagged."
+
+  - id: sd-natural-dec-repurposed
+    where: "machines[sd-natural].parameters DEC / BDY"
+    issue: >-
+      On SD NATURAL the manual assigns DEC to 'Noise Decay' and BDY to the
+      oscillator 'Decay Time' — the opposite polarity of DEC vs BDY on
+      SD ACOUSTIC (where NOD = noise decay and BDY = body decay). Internally
+      consistent within the machine but the DEC key means something different
+      here than on other machines.
+    resolution: "Recorded as printed; flagged the per-machine meaning of DEC."
+
+  - id: disable-omitted-from-8.2-overview
+    where: "legality vs section 8.2 overview"
+    issue: >-
+      Section 8.2's numbered per-track lists and its 'GENERAL MACHINES' line
+      name only UT NOISE and UT IMPULSE as general/all-track machines and never
+      mention DISABLE. APPENDIX D.1 ('ALL', p.96) explicitly lists DISABLE
+      alongside UT NOISE / UT IMPULSE as usable on all 12 tracks.
+    resolution: "Followed APPENDIX D.1 — DISABLE is legal on all tracks; recorded via general_machines_on_all_tracks. Flagged the section-8.2 omission."
+
+  - id: tom-machine-naming
+    where: "machines[xt-classic] / legality LT,MT,HT"
+    issue: >-
+      Section 8.2 lists the LT/MT/HT machine as 'XT CLASSIC' and APPENDIX D.8
+      confirms a single 'XT CLASSIC' machine shared by all three tom tracks.
+      (Separately, the design doc rytm-build.yaml uses shorthand 'LT CLASSIC' /
+      'MT CLASSIC' / 'HT CLASSIC' machine names that do NOT exist in the manual
+      — the real machine is XT CLASSIC. This is a build-doc-vs-manual mismatch,
+      not a manual-internal one.)
+    resolution: "Used the manual's canonical 'XT CLASSIC'; noted the rytm-build.yaml shorthand for cross-reference."
+
+  - id: rs-cp-machine-flow-asymmetry
+    where: "legality BD,SD,RS,CP"
+    issue: >-
+      APPENDIX D groups the BD (D.2) and SD (D.3) machines under 'can be used
+      on the BD, SD, RS and CP tracks', but the RS/CP machines (D.4 RIMSHOT,
+      D.5 HAND CLAP) under 'can only be used on the RS and CP tracks'. So
+      BD/SD machines are legal on RS/CP, but RS/CP machines are NOT legal on
+      BD/SD. This is consistent between 8.2 and APPENDIX D — recorded, not a
+      contradiction, but easy to misread.
+    resolution: "Encoded the asymmetry in legality.tracks and documented in the legality header."
+
+  # --- MIDI (APPENDIX C) join, task vault-1m5s.3 -----------------------------
+  - id: midi-appendixC-vs-appendixD-src
+    where: "machines[*].parameters (pos) vs midi.machine_src_midi_order"
+    issue: >-
+      The manual's APPENDIX C.5 explicitly warns 'the order of the SYNTH
+      parameters ... will sometimes differ from the order ... on the SRC page',
+      and C.8 bears this out: the MIDI slot order per machine differs from the
+      Appendix D SRC-page order, and for a few machines the NAMING differs too.
+      Example: BD HARD in C.8 lists slot 6 as 'Sweep Depth' and slot 8 as
+      'Transient Tick', whereas Appendix D (machines[bd-hard]) has a FIXED sweep
+      depth and prints SNP 'Snap Amount' + TIC 'Tick Level' with a different
+      ordering (pos: TUN,SWT,SNP,DEC,WAV,HLD,TIC,LEV). This is a MANUAL-INTERNAL
+      Appendix-C-vs-Appendix-D mismatch, NOT a manual-vs-midi.guide one —
+      midi.guide agrees with the C.8 MIDI ordering/naming.
+    sources:
+      manual_appendix_c: "APPENDIX C.8 (p.88-95) — MIDI order/naming"
+      manual_appendix_d: "APPENDIX D (p.96-109) — SRC-page order/naming"
+      midi_guide: "https://midi.guide/d/elektron/analog-rytm-mkii/ — agrees with C.8"
+    resolution: >-
+      Kept BOTH representations without conflating: machines[*].parameters keeps
+      the Appendix D SRC-page params with on-screen `pos`; midi.machine_src_midi_order
+      keeps the verbatim C.8 MIDI order for CC/NRPN lookup. Added NO per-machine
+      `cc:` keys under machines to avoid asserting a false pos<->slot equivalence.
+
+  - id: midi-machine-type-count
+    where: "midi.kit_parameters 'Track Machine Type' (cc 15) vs machines count"
+    issue: >-
+      midi.guide gives Track Machine Type (cc 15 / nrpn [1, 103]) a value range
+      of 1-33 ('33 selectable machine types'), and the sound-design research doc
+      likewise cites 33. This reference enumerates 34 machine entries under
+      `machines:` (incl. DISABLE, counting the shared XT tom machine once). The
+      manual's APPENDIX C does not state the machine-type count.
+    sources:
+      midi_guide: "cc 15 range 1-33 (33 types)"
+      this_reference: "34 machine entries in machines:"
+      manual: "APPENDIX C.3 gives no count"
+    resolution: >-
+      Recorded both. The 34-vs-33 gap is most plausibly DISABLE (a disable state,
+      not an indexed selectable machine type) — but not asserting that; flagged
+      for hardware confirmation. Kept all 34 machine entries.
+
+  - id: midi-performance-cc38-skip
+    where: "midi.performance_parameters"
+    issue: >-
+      The manual's APPENDIX C.4 lists Perf Param 3 = cc 37 and Perf Param 4 =
+      cc 39, SKIPPING cc 38. midi.guide represents the twelve performance params
+      as a contiguous 'cc 35-47' range, which hides the skipped 38.
+    sources:
+      manual_appendix_c: "cc 35,36,37,39,40,41,42,43,44,45,46,47 (38 skipped)"
+      midi_guide: "cc 35-47 (contiguous notation)"
+    resolution: "Recorded the manual's explicit per-param CCs (authoritative), with a note documenting midi.guide's compressed range."
+
+  - id: midi-hh-lab-nrpn-garbled
+    where: "midi.machine_src_midi_order.hh-lab"
+    issue: >-
+      In the PDF->markdown extraction of APPENDIX C.8, the HH LAB NRPN LSB column
+      came through garbled/duplicated (Tune 2/3/4 all show LSB 3, then 4, then 5).
+      The CC column (16-23) extracted cleanly and sequentially.
+    sources:
+      manual_appendix_c_extraction: "NRPN LSB garbled (…,3,3,3,4,5)"
+      midi_guide: "HH LAB = cc 16-23 mapped to nrpn [1, 0..7] (sequential)"
+    resolution: >-
+      Used midi.guide's clean sequential nrpn [1, 0..7], which also matches the
+      APPENDIX C.5 generic synth-slot map (synth_param_slots). Flagged the
+      extraction defect; the CC values are unaffected.
+
+  - id: midi-sy-machines-nrpn-blank
+    where: "midi.machine_src_midi_order.{sy-dual-vco,sy-chip,sy-raw}"
+    issue: >-
+      APPENDIX C.8 prints the SY DUAL VCO / SY CHIP / SY RAW machine tables with
+      CC values (16-23) only and BLANK NRPN MSB/LSB columns. midi.guide likewise
+      shows CC only for these machines.
+    sources:
+      manual_appendix_c: "SY machine tables: CC only, NRPN blank"
+      manual_appendix_c5: "generic SYNTH map: Synth Param 1-8 = cc 16-23 = nrpn [1, 0..7]"
+      midi_guide: "SY machines: CC only"
+    resolution: >-
+      Treated SY machines as nrpn [1, 0..7] per the C.5 generic map (the blank
+      per-machine NRPN columns are an omission, not evidence NRPN is unsupported);
+      noted the omission in machine_src_midi_order.notes. Both sources agree the
+      CC tables are 16-23.
+
+  - id: midi-cowbell-pw-unmapped
+    where: "machines[cb-classic|cb-metallic].parameters PW1, PW2"
+    issue: >-
+      The Appendix D SRC page for the cowbell machines exposes 6 params
+      (TUN, DEC, DET, PW1 Pulse Width Osc1, PW2 Pulse Width Osc2, LEV), but the
+      shared APPENDIX C.8 'CB CLASSIC & METALLIC' MIDI table lists only 4
+      (Level, Tune, Decay Time, Detune). PW1 and PW2 therefore have no CC/NRPN.
+    sources:
+      manual_appendix_d: "6 SRC params incl. PW1/PW2"
+      manual_appendix_c8: "4 MIDI params (no pulse-width)"
+      midi_guide: "CB machines summarized as cc 16-23 -> nrpn [1, 0..7], but the detailed CB table also shows only Level/Tune/Decay/Detune"
+    resolution: >-
+      Recorded PW1/PW2 as MIDI-UNMAPPED (no cc/nrpn); documented in
+      machine_src_midi_order.notes and left out of the cowbell slot order.
+
+  - id: midi-fx-lfo-map-shared
+    where: "fx_track.pages.LFO midi_ref"
+    issue: >-
+      APPENDIX C documents a SINGLE LFO CC/NRPN table (C.6, cc 102-109 /
+      nrpn MSB 1). Neither the manual nor midi.guide tabulates a SEPARATE FX-track
+      LFO map, even though the FX track has its own dedicated LFO page.
+    sources:
+      manual_appendix_c6: "one LFO table (cc 102-109, nrpn [1, 32..39])"
+      midi_guide: "one LFO table (same numbers)"
+    resolution: >-
+      Applied the C.6 LFO numbers to fx_track.pages.LFO, addressed on the FX
+      track's own MIDI channel (same numbers, different channel — consistent with
+      the whole per-track channel scheme). Flagged that Appendix C does not
+      separately enumerate the FX LFO.
+
+  - id: midi-program-change-not-on-guide-fetch
+    where: "midi.addressing.program_change"
+    issue: >-
+      The manual (section 8.6 p.22, and 14.4 CHANNELS/SYNC) clearly documents
+      Program Change 0-127 -> pattern 1-128 (A01-H16). A WebFetch of the
+      midi.guide page did not surface any Program Change mapping ('No Program
+      Change mapping documented in this specification').
+    sources:
+      manual: "PC 0-127 -> pattern 1-128; section 8.6 + 14.4"
+      midi_guide_fetch: "PC not surfaced (likely a page-scope/fetch artifact, not a contradiction)"
+    resolution: "Used the manual (ground truth) for program change; treated the midi.guide gap as a fetch/scope artifact rather than a claimed absence."
