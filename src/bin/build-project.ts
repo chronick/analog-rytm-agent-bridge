@@ -139,8 +139,9 @@ export async function runProjectBuild(): Promise<void> {
       if (execute) {
         await client.changePattern({ pattern: pattern.slot, immediate: true });
         for (let attempt = 0; attempt < 20; attempt += 1) {
-          const state = (await client.inspectDeviceState()) as { activePattern?: string };
-          if (state.activePattern === pattern.slot) break;
+          const state = (await client.inspectDeviceState()) as { activePattern?: string | { pattern?: string } };
+          const active = typeof state.activePattern === "object" ? state.activePattern?.pattern : state.activePattern;
+          if (active === pattern.slot) break;
           await new Promise((resolve) => setTimeout(resolve, 250));
         }
       }

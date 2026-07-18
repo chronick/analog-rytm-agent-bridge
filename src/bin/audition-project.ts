@@ -54,8 +54,9 @@ export async function runProjectAudition(): Promise<void> {
     for (const slot of slots) {
       await client.changePattern({ pattern: slot, immediate: true });
       for (let attempt = 0; attempt < 20; attempt += 1) {
-        const state = (await client.inspectDeviceState()) as { activePattern?: string };
-        if (state.activePattern === slot) break;
+        const state = (await client.inspectDeviceState()) as { activePattern?: string | { pattern?: string } };
+        const active = typeof state.activePattern === "object" ? state.activePattern?.pattern : state.activePattern;
+        if (active === slot) break;
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
       await client.setTransport({ command: "start", tempo: TEMPO[slot] ?? 130 });
