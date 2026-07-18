@@ -61,10 +61,46 @@ npm run build:project -- <declaration.json> [--execute]
 npm run audition:project [-- A01 B04 ...]
 ```
 
-`build:project` applies a declarative project (patterns, machines, scenes,
-performance macros, samples) from a JSON declaration with validation-first,
-snapshot, and readback. `audition:project` plays each pattern from generated
-clock and captures a verified bounded recording per slot.
+`build:project` applies a declarative project (patterns, machines, sounds,
+scenes, performance macros, samples) from a JSON declaration with
+validation-first, snapshot, and readback. `audition:project` plays each pattern
+from generated clock and captures a verified bounded recording per slot.
+
+The optional `sounds` section designs each track's kit sound — a machine
+selection plus per-page parameter locks. Every field is optional; the machine
+is emitted before its params because `set_track_machine` resets the machine
+page to defaults. Parameter names and enum casing are the daemon's (see
+`daemon/src/hardware.rs` `apply_sound_parameter`); enum values are the CamelCase
+serde variants (`SampleStart`, `Tri`, ...), not the lowercase rytm-rs strings.
+Ground the values in the sound-design corpus
+(`~/git/vault/corpus/sound-design/`) rather than improvising:
+
+```jsonc
+{
+  "project": "layered-kick-demo",
+  "patterns": [],
+  "sounds": {
+    "BD": {
+      "machine": "bdplastic",
+      // techniques/layered-kick anchor E1 (verified via set_sound_parameter page:"machine")
+      "machineParams": { "tun": -14, "swt": 54, "swd": 21, "dec": 45, "tic": 32, "lev": 110 },
+      "filter": { "filter_type": "Pk", "resonance": 40 },
+      "amp": { "overdrive": 8 }
+    },
+    "BT": {
+      "machine": "btclassic",
+      "lfo": { "destination": "SampleFineTune", "waveform": "Tri", "mode": "Hold", "depth": 32 }
+    }
+  }
+}
+```
+
+Each `sounds.<track>` key accepts `machine` (string → `set_track_machine`),
+`machineParams` (→ `set_sound_parameter page:"machine"`), and any of `sample`,
+`filter`, `amp`, `lfo`, `settings` (→ `set_sound_parameter` with `page` = that
+section name). The section is applied as one validated, content-hashed,
+revision-scoped batch — validate-only (no `--execute`) still requires a running
+hardware daemon.
 
 The runtime has zero npm dependencies; `npm install` provisions only the dev-time
 TypeScript checker (`npm run typecheck`, included in `npm run check`). Rust

@@ -5,12 +5,34 @@ import { RustDaemonClient } from "../rpc/RustDaemonClient.ts";
 import type { RytmPersistentOperation } from "../domain/types.ts";
 
 // Generic declarative Rytm project builder. Reads a JSON declaration (banks of
-// pattern grids + kit/scene/perf/sample sections) and applies it through the
-// hardware daemon with snapshot, validation-first, and readback. The
+// pattern grids + kit/scene/perf/sample/sound sections) and applies it through
+// the hardware daemon with snapshot, validation-first, and readback. The
 // declaration is content (lives in the vault); this file is mechanism.
 //
 //   npm run build:project -- <declaration.json>            validate only
 //   npm run build:project -- <declaration.json> --execute  apply to hardware
+//
+// The optional `sounds` section designs each track's kit sound: a machine
+// selection plus per-page parameter locks. Shape (all fields optional):
+//
+//   "sounds": {
+//     "<track>": {
+//       "machine": "bdplastic",                 // -> set_track_machine
+//       "machineParams": { "tun": -14, ... },   // -> set_sound_parameter page:"machine"
+//       "sample":   { "start": 0, ... },        // -> set_sound_parameter page:"sample"
+//       "filter":   { "cutoff": 90, ... },      //    page:"filter"
+//       "amp":      { "overdrive": 8, ... },     //    page:"amp"
+//       "lfo":      { "destination": "SampleFineTune", ... }, // page:"lfo"
+//       "settings": { "velocity_to_volume": false, ... }     // page:"settings"
+//     }
+//   }
+//
+// Parameter names and enum casing are the daemon's (see hardware.rs
+// apply_sound_parameter); enum values are CamelCase serde variants
+// (`SampleStart`, `Tri`, ...), not the lowercase rytm-rs strings. The
+// machine selection is emitted before its params because set_track_machine
+// resets the machine page to defaults. Ground values in the sound-design
+// corpus (`~/git/vault/corpus/sound-design/`) rather than improvising.
 
 interface TrackDecl {
   grid: string;
@@ -24,10 +46,20 @@ interface PatternDecl {
   tracks: Record<string, TrackDecl>;
   plocks?: Array<Record<string, unknown>>;
 }
+interface SoundDecl {
+  machine?: string;
+  machineParams?: Record<string, number | string>;
+  sample?: Record<string, unknown>;
+  filter?: Record<string, unknown>;
+  amp?: Record<string, unknown>;
+  lfo?: Record<string, unknown>;
+  settings?: Record<string, unknown>;
+}
 interface Declaration {
   project: string;
   machines?: Array<{ track: string; machine: string }>;
   patterns: PatternDecl[];
+  sounds?: Record<string, SoundDecl>;
   scenes?: Array<Record<string, unknown>>;
   performances?: Array<Record<string, unknown>>;
   samples?: Array<{ file: string; track: string; slot: number }>;
@@ -64,6 +96,36 @@ function gridOperations(pattern: PatternDecl): RytmPersistentOperation[] {
   }
   for (const plock of pattern.plocks ?? []) {
     operations.push({ ...plock, pattern: pattern.slot } as unknown as RytmPersistentOperation);
+  }
+  return operations;
+}
+
+// Sound-page sections in emission order (machine params are handled first,
+// under page "machine", so set_track_machine can precede them per track).
+const SOUND_PAGES = ["sample", "filter", "amp", "lfo", "settings"] as const;
+
+function soundOperations(sounds: Record<string, SoundDecl>): RytmPersistentOperation[] {
+  const operations: RytmPersistentOperation[] = [];
+  for (const [track, decl] of Object.entries(sounds)) {
+    // Machine selection first: set_track_machine resets the sound's machine
+    // page to that machine's defaults, so its param locks must follow it.
+    if (decl.machine !== undefined) {
+      operations.push({ type: "set_track_machine", track, machine: decl.machine } as unknown as RytmPersistentOperation);
+    }
+    for (const [parameter, value] of Object.entries(decl.machineParams ?? {})) {
+      operations.push({ type: "set_sound_parameter", track, page: "machine", parameter, value } as unknown as RytmPersistentOperation);
+    }
+    for (const page of SOUND_PAGES) {
+      for (const [parameter, value] of Object.entries(decl[page] ?? {})) {
+        operations.push({
+          type: "set_sound_parameter",
+          track,
+          page,
+          parameter,
+          value: value as number | boolean | string,
+        } as unknown as RytmPersistentOperation);
+      }
+    }
   }
   return operations;
 }
@@ -131,6 +193,9 @@ export async function runProjectBuild(): Promise<void> {
         declaration.machines.map((entry) => ({ type: "set_track_machine", ...entry }) as unknown as RytmPersistentOperation),
         execute,
       );
+    }
+    if (declaration.sounds && Object.keys(declaration.sounds).length) {
+      await applyBatch(client, "sounds", soundOperations(declaration.sounds), execute);
     }
     for (const pattern of declaration.patterns) {
       // Pattern deltas target the work buffer, so each slot must be active
