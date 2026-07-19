@@ -4953,6 +4953,9 @@ bridge_interface:
       (wrong key; it is `mod_level`) and `typ` value "a" (wrong type; typ is NUMERIC
       0..1 where 0=A/1=B) were rejected on NAMING/TYPE, not because the params are
       unavailable. Use parameter "mod_level" (0-127) and "typ" (0 or 1).
+      Hardware-verified 2026-07-19 (run typmod-verify-2026-07-19T00-07-19-470Z):
+      both keys accepted AND audibly reach the voice — A/B capture typ 0/mod_level 0
+      vs typ 1/mod_level 100 shifted centroid 683.7 -> 520.3 Hz, peak +1.7 dB.
     bd_sharp_wav: WAV (Waveform) not exposed by pinned rytm-rs (reserved synth slot 7 commented out).
     bd_acoustic_wav: WAV (Waveform) not exposed by pinned rytm-rs (reserved synth slot 7 commented out).
     hh_basic_rst: RST (Osc Reset) not exposed by pinned rytm-rs (reserved synth slot 6 commented out).
