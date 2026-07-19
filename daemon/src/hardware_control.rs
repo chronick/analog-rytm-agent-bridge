@@ -523,9 +523,18 @@ impl HardwareBridgeState {
             "note": note,
             "status": "triggered",
         });
+        // A track trigger is an ephemeral real-time event: the note-on has
+        // already been sent, and it changes no durable device state that must
+        // survive a daemon restart. We keep the in-memory `append_event` so
+        // `events.read`/the push stream and the revision cursor stay consistent,
+        // but deliberately DO NOT persist here. A fsync of the whole state file
+        // takes ~0.5-0.9 s on a large log, which throttled rapid triggers to
+        // ~1/second and made it impossible to record an audible loop at musical
+        // tempo. The accumulated in-memory event is flushed to disk by the next
+        // durable operation (apply/snapshot/transport/reconcile), all of which
+        // persist the full state anyway.
         self.scheduler
             .append_event(json!({ "type": "track.triggered", "input": result }));
-        self.scheduler.persist()?;
         Ok(result)
     }
 

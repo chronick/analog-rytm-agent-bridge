@@ -15,6 +15,31 @@ use std::{
 const STORE_SCHEMA: &str = "analog-rytm-hardware-state.v1";
 const MIDI_CLOCKS_PER_STEP: u8 = 6;
 
+// Retention caps that keep the durable state file (and the buffer we serialize
+// and fsync on every persist) bounded. Both logs are append-only and were
+// previously unbounded: a live session grew the file to tens of MB and an
+// orphaned daemon to multiple GB of RAM, which in turn made every persist slow
+// enough to throttle real-time triggers.
+//
+// `events` keeps the newest N. Consumers read events by cursor: the push stream
+// (`emitted_event_cursor` in rpc.rs) starts at the last cursor on load and only
+// advances forward, and `events.read` accepts an `afterCursor`. The serve loop
+// drains events on every poll (~2 ms), so at most a handful are undrained at
+// any instant; 2000 is an enormous margin over that working set. We only ever
+// drop from the front (oldest) so `events.last()` — and therefore the next
+// cursor — is unchanged, keeping cursors monotonic without renumbering.
+const MAX_RETAINED_EVENTS: usize = 2000;
+
+// `operation_sets` keeps the newest M *terminal* records (Applied/Rejected).
+// Non-terminal (Queued) records are NEVER pruned: `apply_due_operations` and
+// `reconcile_queued_epochs` still need them, and dropping one would silently
+// lose a pending change. Terminal records are only read for display
+// (`operation_sets()`) and idempotency dedup (`operation_by_id`); rollback uses
+// `snapshots`, not this ledger. Pruning ancient terminal records past the cap
+// therefore loses only stale history and stale dedup for operation IDs no
+// client would resubmit.
+const MAX_RETAINED_OPERATION_SETS: usize = 500;
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClockSource {
@@ -226,6 +251,16 @@ impl HardwareOperationStatus {
             Self::Rejected => "rejected",
         }
     }
+
+    /// A terminal record has reached a final state and no longer participates in
+    /// scheduling. Only terminal records are eligible for retention pruning;
+    /// `Queued` records are still pending and must be preserved.
+    fn is_terminal(&self) -> bool {
+        match self {
+            Self::Applied | Self::Rejected => true,
+            Self::Queued => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -379,7 +414,11 @@ impl HardwareScheduler {
         Ok(Self { path, state })
     }
 
-    pub fn persist(&self) -> Result<(), String> {
+    pub fn persist(&mut self) -> Result<(), String> {
+        // Bound the append-only logs before we serialize + fsync them, so the
+        // written buffer (and the file it replaces) can never grow without
+        // limit.
+        self.prune();
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent).map_err(|error| {
             format!(
@@ -424,6 +463,45 @@ impl HardwareScheduler {
                     parent.display()
                 )
             })
+    }
+
+    /// Enforce the retention caps on the two append-only logs. Called from
+    /// `persist` so every growth point (which is always followed by a persist)
+    /// is bounded, without scattering pruning through the call sites.
+    fn prune(&mut self) {
+        // Events: keep only the newest `MAX_RETAINED_EVENTS`, dropping from the
+        // front (oldest first). Draining the front leaves `events.last()`
+        // untouched, so `append_event`'s next cursor stays monotonic and no
+        // cursor is renumbered.
+        let event_count = self.state.events.len();
+        if event_count > MAX_RETAINED_EVENTS {
+            self.state
+                .events
+                .drain(0..event_count - MAX_RETAINED_EVENTS);
+        }
+
+        // Operation sets: keep every non-terminal (Queued) record plus the
+        // newest `MAX_RETAINED_OPERATION_SETS` terminal records, dropping the
+        // oldest terminal records first. `retain` walks front-to-back, so
+        // decrementing `to_drop` on the earliest terminal records removes the
+        // oldest ones and leaves the newest cap intact.
+        let terminal_count = self
+            .state
+            .operation_sets
+            .iter()
+            .filter(|record| record.status.is_terminal())
+            .count();
+        if terminal_count > MAX_RETAINED_OPERATION_SETS {
+            let mut to_drop = terminal_count - MAX_RETAINED_OPERATION_SETS;
+            self.state.operation_sets.retain(|record| {
+                if to_drop > 0 && record.status.is_terminal() {
+                    to_drop -= 1;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
     }
 
     pub fn next_id(&mut self, prefix: &str) -> String {
@@ -569,6 +647,168 @@ mod tests {
         assert_eq!(restored.state.operation_sets.len(), 1);
         assert_eq!(restored.state.events.len(), 1);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn ephemeral_scheduler() -> HardwareScheduler {
+        // A unique, non-existent path: `load` only touches the filesystem when
+        // the file exists, so these tests exercise the in-memory state and
+        // pruning without writing anything to disk.
+        let path = std::env::temp_dir().join(format!(
+            "analog-rytm-scheduler-inmem-{}-{}.json",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        HardwareScheduler::load(&path).unwrap()
+    }
+
+    fn queued_input(id: &str) -> OperationSetInput {
+        OperationSetInput {
+            operation_set_id: Some(id.to_string()),
+            expected_revision: 0,
+            apply_at: apply_at("next_measure", "epoch-1"),
+            late_policy: LatePolicy::RollForward,
+            operations: serde_json::from_value(json!([
+                { "type": "set_kit_parameter", "track": "BD", "parameter": "track_level", "value": 99 }
+            ]))
+            .unwrap(),
+            dry_run: false,
+        }
+    }
+
+    fn op_record(id: &str, status: HardwareOperationStatus) -> HardwareOperationSet {
+        HardwareOperationSet {
+            operation_set_id: id.to_string(),
+            input: queued_input(id),
+            target: BoundaryTarget {
+                transport_epoch: "epoch-1".to_string(),
+                kind: "next_measure".to_string(),
+                absolute_step: 16,
+            },
+            status,
+            submitted_at: timestamp(),
+            queued_at: timestamp(),
+            applied_at: None,
+            applied_at_boundary: None,
+            resulting_revision: None,
+            rejection_reason: None,
+            result: None,
+        }
+    }
+
+    #[test]
+    fn trigger_style_append_stays_in_memory_until_a_durable_persist() {
+        let directory = std::env::temp_dir().join(format!(
+            "analog-rytm-scheduler-trigger-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = directory.join("state.json");
+        let mut scheduler = HardwareScheduler::load(&path).unwrap();
+
+        // Mirrors trigger_track: the ephemeral event is appended in memory but
+        // NOT persisted, so no state file is written by the trigger itself.
+        scheduler.append_event(json!({ "type": "track.triggered" }));
+        assert_eq!(scheduler.state.events.len(), 1);
+        assert!(
+            !path.exists(),
+            "an ephemeral trigger must not write the state file"
+        );
+
+        // The accumulated event is flushed to disk by the next durable persist.
+        scheduler.persist().unwrap();
+        assert!(path.exists());
+        let restored = HardwareScheduler::load(&path).unwrap();
+        assert_eq!(restored.state.events.len(), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn prune_caps_events_to_the_newest_entries_with_monotonic_cursors() {
+        let mut scheduler = ephemeral_scheduler();
+        let total = MAX_RETAINED_EVENTS + 50;
+        for _ in 0..total {
+            scheduler.append_event(json!({ "type": "noise" }));
+        }
+        assert_eq!(scheduler.state.events.last().unwrap().cursor, total as u64);
+
+        scheduler.prune();
+
+        // Cap enforced, and the newest entries are the ones retained.
+        assert_eq!(scheduler.state.events.len(), MAX_RETAINED_EVENTS);
+        assert_eq!(scheduler.state.events.last().unwrap().cursor, total as u64);
+        assert_eq!(
+            scheduler.state.events.first().unwrap().cursor,
+            (total - MAX_RETAINED_EVENTS + 1) as u64
+        );
+        // Cursors remain strictly increasing (monotonic) and are not renumbered.
+        for pair in scheduler.state.events.windows(2) {
+            assert!(pair[1].cursor > pair[0].cursor);
+        }
+        // A later append continues from the retained maximum without resetting.
+        scheduler.append_event(json!({ "type": "after-prune" }));
+        assert_eq!(
+            scheduler.state.events.last().unwrap().cursor,
+            total as u64 + 1
+        );
+    }
+
+    #[test]
+    fn prune_keeps_queued_and_newest_terminal_operation_sets() {
+        let mut scheduler = ephemeral_scheduler();
+        // The oldest record is Queued and must survive pruning unconditionally.
+        scheduler
+            .state
+            .operation_sets
+            .push(op_record("queued-oldest", HardwareOperationStatus::Queued));
+        // A run of terminal records that overflows the cap; the oldest excess
+        // terminal records should be dropped.
+        let terminal_total = MAX_RETAINED_OPERATION_SETS + 40;
+        for index in 0..terminal_total {
+            let status = if index % 2 == 0 {
+                HardwareOperationStatus::Applied
+            } else {
+                HardwareOperationStatus::Rejected
+            };
+            scheduler
+                .state
+                .operation_sets
+                .push(op_record(&format!("term-{index:04}"), status));
+        }
+        // A Queued record interleaved among the terminal ones must also survive.
+        let middle = scheduler.state.operation_sets.len() / 2;
+        scheduler.state.operation_sets.insert(
+            middle,
+            op_record("queued-middle", HardwareOperationStatus::Queued),
+        );
+
+        scheduler.prune();
+
+        let terminal_after = scheduler
+            .state
+            .operation_sets
+            .iter()
+            .filter(|record| record.status.is_terminal())
+            .count();
+        assert_eq!(terminal_after, MAX_RETAINED_OPERATION_SETS);
+        // Neither Queued record is ever dropped, regardless of age or position.
+        assert!(scheduler.operation_by_id("queued-oldest").is_some());
+        assert!(scheduler.operation_by_id("queued-middle").is_some());
+        // The oldest terminal record is dropped; the newest is retained.
+        assert!(scheduler.operation_by_id("term-0000").is_none());
+        assert!(scheduler
+            .operation_by_id(&format!("term-{:04}", terminal_total - 1))
+            .is_some());
+        // Total == the terminal cap plus the two preserved Queued records.
+        assert_eq!(
+            scheduler.state.operation_sets.len(),
+            MAX_RETAINED_OPERATION_SETS + 2
+        );
     }
 
     #[test]
