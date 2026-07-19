@@ -4922,11 +4922,13 @@ bridge_interface:
       filter:
         params: [attack, sustain, decay, release, cutoff, resonance, filter_type, envelope_amount]
         note: 'filter_type is an enum (FilterType serde: Lp2/Lp1/Bp/Hp1/Hp2/Bs/Pk)'
+        ranges: 'envelope_amount is BIPOLAR -64..63 (rytm-rs filter.rs parameter_range "envelope_amount:-64..=63"; hardware-verified 2026-07-19 — daemon rejects 64). Others 0..127.'
       amp:
         params: [attack, hold, decay, overdrive, delay_send, reverb_send, pan, volume]
       lfo:
         params: [speed, multiplier, fade, destination, waveform, depth, start_phase_or_slew, mode]
         note: multiplier/destination/waveform/mode are enums (serde CamelCase); destination = LfoDestination, waveform = LfoWaveform (Tri/Sin/Sqr/Saw/Exp/Rmp/Rnd), mode = LfoMode (Free/Trig/Hold/One/Half)
+        ranges: 'BIPOLAR numerics (rytm-rs lfo.rs parameter_range; speed/fade hardware-verified 2026-07-19 — daemon rejects 64): speed -64..63, fade -64..63, depth -128.0..127.99 (round-safe integer subset -128..127), start_phase_or_slew 0..127.'
       settings:
         params: [name, accent_level, chromatic_mode, env_reset_filter, velocity_to_volume, legacy_fx_send, velocity_modulation_amt_1, velocity_modulation_amt_2, velocity_modulation_amt_3, velocity_modulation_amt_4, velocity_modulation_target_1, velocity_modulation_target_2, velocity_modulation_target_3, velocity_modulation_target_4, after_touch_modulation_amt_1, after_touch_modulation_amt_2, after_touch_modulation_amt_3, after_touch_modulation_amt_4, after_touch_modulation_target_1, after_touch_modulation_target_2, after_touch_modulation_target_3, after_touch_modulation_target_4]
         note: velocity/aftertouch targets are SoundModTarget enums (serde CamelCase); see velocity_mod/aftertouch_mod
