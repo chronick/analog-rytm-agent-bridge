@@ -19,6 +19,7 @@
     "hardware:songs": "node --experimental-transform-types src/bin/verify-hardware-songs.ts",
     "hardware:scheduler": "node --experimental-transform-types src/bin/verify-hardware-scheduler.ts",
     "build:project": "node --experimental-transform-types src/bin/build-project.ts",
+    "lint:declaration": "node --experimental-transform-types src/bin/lint-declaration.ts",
     "audition:project": "node --experimental-transform-types src/bin/audition-project.ts"
   },
   "engines": {
