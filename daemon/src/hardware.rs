@@ -1868,7 +1868,12 @@ fn apply_parameter_lock_set(
             .plock_set_lfo_mode(parse_enum(value, "value")?)
             .map_err(error_string),
         "lfo_depth" => trig
-            .plock_set_lfo_depth(control_f32(value, "value")?)
+            .plock_set_lfo_depth(compound_plock_quantize(
+                control_f32(value, "value")?,
+                -128.0,
+                127.99,
+                32767.0,
+            ))
             .map_err(error_string),
         // ----- sample page (SMP p-lock family) -----
         "sample_tune" => trig
@@ -1884,10 +1889,20 @@ fn apply_parameter_lock_set(
             .plock_set_sample_bit_reduction(control_usize(value, "value")?)
             .map_err(error_string),
         "sample_start" => trig
-            .plock_set_sample_start(control_f32(value, "value")?)
+            .plock_set_sample_start(compound_plock_quantize(
+                control_f32(value, "value")?,
+                0.0,
+                120.0,
+                30720.0,
+            ))
             .map_err(error_string),
         "sample_end" => trig
-            .plock_set_sample_end(control_f32(value, "value")?)
+            .plock_set_sample_end(compound_plock_quantize(
+                control_f32(value, "value")?,
+                0.0,
+                120.0,
+                30720.0,
+            ))
             .map_err(error_string),
         "sample_loop" => trig
             .plock_set_sample_loop_flag(control_bool(value, "value")?)
@@ -3458,6 +3473,18 @@ fn control_isize(value: &Value, label: &str) -> HardwareResult<isize> {
         .ok_or_else(|| format!("{label} must be an integer"))
 }
 
+// The device keeps only the low 7 bits of a compound parameter lock's
+// companion (LSB) pool slot: raw values whose LSB has bit 7 set read back
+// with that bit cleared (observed on hardware: 0x6080 -> 0x6000). Quantize
+// to the nearest encodable value below (max error 128/32767 of full scale,
+// inaudible) so the written state round-trips byte-exact. Applies to the
+// compound (two-slot) locks only: lfo_depth, sample_start, sample_end.
+fn compound_plock_quantize(value: f32, in_min: f32, in_max: f32, out_max: f32) -> f32 {
+    let raw = ((value - in_min) * (out_max / (in_max - in_min))) as u16;
+    let safe = raw & !0x0080u16;
+    (f32::from(safe) + 0.5) * ((in_max - in_min) / out_max) + in_min
+}
+
 fn control_f32(value: &Value, label: &str) -> HardwareResult<f32> {
     let value = value
         .as_f64()
@@ -4112,5 +4139,28 @@ mod tests {
         // Clear rejects the same way.
         let cleared = apply_parameter_lock_clear(trig, "machine_parameter_1").unwrap_err();
         assert!(cleared.contains("synth/machine-page"), "message: {cleared}");
+    }
+
+    #[test]
+    fn compound_plock_quantize_yields_bit7_clear_stable_raws() {
+        // lfo_depth scale: -128.0..=127.99 <-> 0..=32767 (truncating encode).
+        for i in -128..=127 {
+            let v = compound_plock_quantize(i as f32, -128.0, 127.99, 32767.0);
+            let raw = ((v + 128.0) * (32767.0 / 255.99)) as u16;
+            assert_eq!(raw & 0x0080, 0, "depth {i} -> raw {raw:#06x} keeps LSB bit 7");
+            let v2 = compound_plock_quantize(v, -128.0, 127.99, 32767.0);
+            let raw2 = ((v2 + 128.0) * (32767.0 / 255.99)) as u16;
+            assert_eq!(raw, raw2, "depth {i} not a fixed point");
+            assert!((v - i as f32).abs() <= 1.01, "depth {i} quantized too far: {v}");
+        }
+        // sample_start/end scale: 0.0..=120.0 <-> 0..=30720; integer positions
+        // encode to LSB 0 and must survive essentially unchanged.
+        for i in 0..=120 {
+            let v = compound_plock_quantize(i as f32, 0.0, 120.0, 30720.0);
+            let raw = (v * 256.0) as u16;
+            assert_eq!(raw & 0x0080, 0);
+            assert_eq!(raw, (i as u16) * 256, "integer position {i} must encode exactly");
+            assert!((v - i as f32).abs() < 0.01, "integer position {i} drifted: {v}");
+        }
     }
 }
