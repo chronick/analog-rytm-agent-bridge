@@ -107,7 +107,9 @@ interface Declaration {
   scenes?: Array<Record<string, unknown>>;
   performances?: Array<Record<string, unknown>>;
   song?: SongDecl;
-  samples?: Array<{ file: string; track: string; slot: number }>;
+  // track omitted = upload + resolve the RAM slot only (no Sound assignment);
+  // patterns reach such samples via per-step sample_number p-locks.
+  samples?: Array<{ file: string; track?: string; slot: number }>;
   sampleDirectory?: string;
 }
 
@@ -330,6 +332,10 @@ export async function runProjectBuild(): Promise<void> {
           deviceDirectory: `/${declaration.project}`,
         })) as { sampleId: string };
         const resolved = (await client.resolveSampleRam({ sampleId: uploaded.sampleId, slot: sample.slot })) as { slot: number };
+        if (sample.track === undefined) {
+          process.stderr.write(`sample ${sample.file} -> RAM ${resolved.slot} (unassigned; sample_number p-locks)\n`);
+          continue;
+        }
         const state = (await client.inspectDeviceState()) as { revision: number };
         await client.applyOperationsNow({
           operationSetId: `build-sample-${sample.track}-${sample.slot}-r${state.revision}`,
