@@ -52,6 +52,21 @@ test("rejects invalid ranges and unsafe atoms", () => {
   assert.equal(result.errors.length, 5);
 });
 
+test("accepts the full parameter-lock value surface (signed, float, bool, enum)", () => {
+  assert.doesNotThrow(() => validateOperationSetInput({
+    expectedRevision: 0,
+    applyAt: { kind: "next_measure" },
+    latePolicy: "roll-forward",
+    operations: [
+      { type: "set_parameter_lock", track: "BD", step: 0, parameter: "amp_pan", value: -40 },
+      { type: "set_parameter_lock", track: "BD", step: 0, parameter: "lfo_speed", value: -20 },
+      { type: "set_parameter_lock", track: "BD", step: 0, parameter: "sample_start", value: 60.5 },
+      { type: "set_parameter_lock", track: "BD", step: 0, parameter: "sample_loop", value: true },
+      { type: "set_parameter_lock", track: "BD", step: 0, parameter: "filter_type", value: "Hp1" },
+    ],
+  }, capabilities));
+});
+
 test("validates optional hardware transport epochs on musical boundaries", () => {
   assert.doesNotThrow(() => validateOperationSetInput({
     expectedRevision: 0,

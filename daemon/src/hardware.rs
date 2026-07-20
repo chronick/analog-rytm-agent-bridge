@@ -853,16 +853,7 @@ fn apply_persistent_operation(
                 .trigs_mut()
                 .get_mut(usize::from(*step))
                 .ok_or_else(|| format!("step {step} must be between 0 and 63"))?;
-            match parameter.as_str() {
-                "filter_frequency" | "filter_cutoff" => {
-                    trig.set_parameter_lock_env(true);
-                    trig.plock_set_filter_cutoff(exact_nonnegative_usize(*value, "value")?)
-                        .map_err(error_string)
-                }
-                _ => Err(format!(
-                    "unsupported hardware parameter lock {parameter:?}; supported: filter_frequency"
-                )),
-            }
+            apply_parameter_lock_set(trig, parameter, value)
         }
         PersistentOperation::ClearParameterLock {
             pattern,
@@ -876,14 +867,7 @@ fn apply_persistent_operation(
                 .trigs_mut()
                 .get_mut(usize::from(*step))
                 .ok_or_else(|| format!("step {step} must be between 0 and 63"))?;
-            match parameter.as_str() {
-                "filter_frequency" | "filter_cutoff" => {
-                    trig.plock_clear_filter_cutoff().map_err(error_string)
-                }
-                _ => Err(format!(
-                    "unsupported hardware parameter lock {parameter:?}; supported: filter_frequency"
-                )),
-            }
+            apply_parameter_lock_clear(trig, parameter)
         }
         PersistentOperation::SetTrackLength {
             pattern,
@@ -1179,13 +1163,6 @@ fn typed_song_pattern(position: &SongPatternInput) -> HardwareResult<SongPattern
             .map_err(error_string)?;
     }
     Ok(pattern)
-}
-
-fn exact_nonnegative_usize(value: f64, label: &str) -> HardwareResult<usize> {
-    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > usize::MAX as f64 {
-        return Err(format!("{label} must be a non-negative integer"));
-    }
-    Ok(value as usize)
 }
 
 fn macro_index(value: u8, label: &str) -> HardwareResult<usize> {
@@ -1786,6 +1763,199 @@ fn apply_fx_parameter(
             }
         }
         _ => Err(format!("unsupported Kit FX effect {effect:?}")),
+    }
+}
+
+/// Routes a full per-trig parameter lock onto a sound-page trig.
+///
+/// The flat `parameter` names match `voice_macro_parameter_id` so p-locks and
+/// scene/performance macros share one naming surface. Each family sets BOTH of
+/// the device's trig-flag bits for that family — the `_PL_SW` "p-locked state"
+/// bit (bits 7-10) and the `_PL_EN` "enable" bit (bits 6/11-13):
+///
+/// - filter + amp pages -> ENV family (the AR groups FLTR and AMP p-locks under
+///   one envelope bit pair)
+/// - lfo page -> LFO family
+/// - sample page -> SMP family
+///
+/// Setting only `_PL_EN` is not enough: hardware A/B (2026-07-19) showed the lock
+/// does not sound for amp/sample/lfo, and captured device patterns carry every
+/// `_PL_SW` bit clear on empty trigs (rytm-rs's `TrigFlags::default()` of `0x0380`
+/// is not what the device stores). A byte-level round-trip proved the plock pool
+/// and `_PL_EN` bits serialize correctly, so the missing `_PL_SW` bit was the only
+/// difference from a device-authored lock. The device pairs the two, so the bridge
+/// sets both.
+///
+/// Value coercion mirrors `apply_sound_parameter`: `usize`/`isize`/`f32`/`bool`
+/// via the `control_*` helpers, enums parsed from symbolic strings via
+/// `parse_enum`. rytm-rs enforces the per-parameter numeric ranges.
+fn apply_parameter_lock_set(
+    trig: &mut rytm_rs::object::pattern::Trig,
+    parameter: &str,
+    value: &Value,
+) -> HardwareResult<()> {
+    match parameter {
+        // ----- filter page (ENV p-lock family) -----
+        "filter_attack" => trig
+            .plock_set_filter_attack(control_usize(value, "value")?)
+            .map_err(error_string),
+        "filter_sustain" => trig
+            .plock_set_filter_sustain(control_usize(value, "value")?)
+            .map_err(error_string),
+        "filter_decay" => trig
+            .plock_set_filter_decay(control_usize(value, "value")?)
+            .map_err(error_string),
+        "filter_release" => trig
+            .plock_set_filter_release(control_usize(value, "value")?)
+            .map_err(error_string),
+        "filter_frequency" | "filter_cutoff" => trig
+            .plock_set_filter_cutoff(control_usize(value, "value")?)
+            .map_err(error_string),
+        "filter_resonance" => trig
+            .plock_set_filter_resonance(control_usize(value, "value")?)
+            .map_err(error_string),
+        "filter_type" => trig
+            .plock_set_filter_type(parse_enum(value, "value")?)
+            .map_err(error_string),
+        "filter_envelope" => trig
+            .plock_set_filter_envelope_amount(control_isize(value, "value")?)
+            .map_err(error_string),
+        // ----- amp page (ENV p-lock family) -----
+        "amp_attack" => trig
+            .plock_set_amplitude_attack(control_usize(value, "value")?)
+            .map_err(error_string),
+        "amp_hold" => trig
+            .plock_set_amplitude_hold(control_usize(value, "value")?)
+            .map_err(error_string),
+        "amp_decay" => trig
+            .plock_set_amplitude_decay(control_usize(value, "value")?)
+            .map_err(error_string),
+        "amp_overdrive" => trig
+            .plock_set_amplitude_overdrive(control_usize(value, "value")?)
+            .map_err(error_string),
+        "amp_delay_send" => trig
+            .plock_set_amplitude_delay_send(control_usize(value, "value")?)
+            .map_err(error_string),
+        "amp_reverb_send" => trig
+            .plock_set_amplitude_reverb_send(control_usize(value, "value")?)
+            .map_err(error_string),
+        "amp_pan" => trig
+            .plock_set_amplitude_pan(control_isize(value, "value")?)
+            .map_err(error_string),
+        "amp_volume" => trig
+            .plock_set_amplitude_volume(control_usize(value, "value")?)
+            .map_err(error_string),
+        // ----- lfo page (LFO p-lock family) -----
+        "lfo_speed" => trig
+            .plock_set_lfo_speed(control_isize(value, "value")?)
+            .map_err(error_string),
+        "lfo_multiplier" => trig
+            .plock_set_lfo_multiplier(parse_enum(value, "value")?)
+            .map_err(error_string),
+        "lfo_fade" => trig
+            .plock_set_lfo_fade(control_isize(value, "value")?)
+            .map_err(error_string),
+        "lfo_destination" => trig
+            .plock_set_lfo_destination(parse_enum(value, "value")?)
+            .map_err(error_string),
+        "lfo_waveform" => trig
+            .plock_set_lfo_waveform(parse_enum(value, "value")?)
+            .map_err(error_string),
+        "lfo_phase" => trig
+            .plock_set_lfo_start_phase(control_usize(value, "value")?)
+            .map_err(error_string),
+        "lfo_mode" => trig
+            .plock_set_lfo_mode(parse_enum(value, "value")?)
+            .map_err(error_string),
+        "lfo_depth" => trig
+            .plock_set_lfo_depth(control_f32(value, "value")?)
+            .map_err(error_string),
+        // ----- sample page (SMP p-lock family) -----
+        "sample_tune" => trig
+            .plock_set_sample_tune(control_isize(value, "value")?)
+            .map_err(error_string),
+        "sample_fine_tune" => trig
+            .plock_set_sample_fine_tune(control_isize(value, "value")?)
+            .map_err(error_string),
+        "sample_number" => trig
+            .plock_set_sample_number(control_usize(value, "value")?)
+            .map_err(error_string),
+        "sample_bit_reduction" => trig
+            .plock_set_sample_bit_reduction(control_usize(value, "value")?)
+            .map_err(error_string),
+        "sample_start" => trig
+            .plock_set_sample_start(control_f32(value, "value")?)
+            .map_err(error_string),
+        "sample_end" => trig
+            .plock_set_sample_end(control_f32(value, "value")?)
+            .map_err(error_string),
+        "sample_loop" => trig
+            .plock_set_sample_loop_flag(control_bool(value, "value")?)
+            .map_err(error_string),
+        "sample_level" => trig
+            .plock_set_sample_volume(control_usize(value, "value")?)
+            .map_err(error_string),
+        _ => Err(crate::state::unsupported_parameter_lock_message(parameter)),
+    }
+}
+
+/// Clears a full per-trig parameter lock from a sound-page trig.
+///
+/// Mirrors `apply_parameter_lock_set`'s name set. Following the established
+/// filter path, this clears only the individual p-lock value and leaves the
+/// family enable flag as-is (other locks in the same family may remain).
+fn apply_parameter_lock_clear(
+    trig: &rytm_rs::object::pattern::Trig,
+    parameter: &str,
+) -> HardwareResult<()> {
+    match parameter {
+        // ----- filter page -----
+        "filter_attack" => trig.plock_clear_filter_attack().map_err(error_string),
+        "filter_sustain" => trig.plock_clear_filter_sustain().map_err(error_string),
+        "filter_decay" => trig.plock_clear_filter_decay().map_err(error_string),
+        "filter_release" => trig.plock_clear_filter_release().map_err(error_string),
+        "filter_frequency" | "filter_cutoff" => {
+            trig.plock_clear_filter_cutoff().map_err(error_string)
+        }
+        "filter_resonance" => trig.plock_clear_filter_resonance().map_err(error_string),
+        "filter_type" => trig.plock_clear_filter_type().map_err(error_string),
+        "filter_envelope" => trig
+            .plock_clear_filter_envelope_amount()
+            .map_err(error_string),
+        // ----- amp page -----
+        "amp_attack" => trig.plock_clear_amplitude_attack().map_err(error_string),
+        "amp_hold" => trig.plock_clear_amplitude_hold().map_err(error_string),
+        "amp_decay" => trig.plock_clear_amplitude_decay().map_err(error_string),
+        "amp_overdrive" => trig.plock_clear_amplitude_overdrive().map_err(error_string),
+        "amp_delay_send" => trig
+            .plock_clear_amplitude_delay_send()
+            .map_err(error_string),
+        "amp_reverb_send" => trig
+            .plock_clear_amplitude_reverb_send()
+            .map_err(error_string),
+        "amp_pan" => trig.plock_clear_amplitude_pan().map_err(error_string),
+        "amp_volume" => trig.plock_clear_amplitude_volume().map_err(error_string),
+        // ----- lfo page -----
+        "lfo_speed" => trig.plock_clear_lfo_speed().map_err(error_string),
+        "lfo_multiplier" => trig.plock_clear_lfo_multiplier().map_err(error_string),
+        "lfo_fade" => trig.plock_clear_lfo_fade().map_err(error_string),
+        "lfo_destination" => trig.plock_clear_lfo_destination().map_err(error_string),
+        "lfo_waveform" => trig.plock_clear_lfo_waveform().map_err(error_string),
+        "lfo_phase" => trig.plock_clear_lfo_start_phase().map_err(error_string),
+        "lfo_mode" => trig.plock_clear_lfo_mode().map_err(error_string),
+        "lfo_depth" => trig.plock_clear_lfo_depth().map_err(error_string),
+        // ----- sample page -----
+        "sample_tune" => trig.plock_clear_sample_tune().map_err(error_string),
+        "sample_fine_tune" => trig.plock_clear_sample_fine_tune().map_err(error_string),
+        "sample_number" => trig.plock_clear_sample_number().map_err(error_string),
+        "sample_bit_reduction" => trig
+            .plock_clear_sample_bit_reduction()
+            .map_err(error_string),
+        "sample_start" => trig.plock_clear_sample_start().map_err(error_string),
+        "sample_end" => trig.plock_clear_sample_end().map_err(error_string),
+        "sample_loop" => trig.plock_clear_sample_loop_flag().map_err(error_string),
+        "sample_level" => trig.plock_clear_sample_volume().map_err(error_string),
+        _ => Err(crate::state::unsupported_parameter_lock_message(parameter)),
     }
 }
 
@@ -2710,6 +2880,142 @@ fn serialize_value(value: &impl Serialize) -> Value {
         .unwrap_or_else(|error| json!({ "serializationError": error.to_string() }))
 }
 
+/// Collects the parameter locks set on a trig into a flat `name -> value` map,
+/// using the same flat names the write path (`apply_parameter_lock_set`) accepts,
+/// so the whole sound-page surface is verifiable via `inspectPattern`.
+///
+/// IMPORTANT: rytm-rs's `plock_get_*` does NOT return `None` for a step that is
+/// unlocked inside an otherwise-used slot — `get_basic_plock` returns the raw
+/// `data[step]` byte, which is the unset sentinel `0xFF` (decoding to `255`, or
+/// out-of-range values for signed/float types). So every numeric read is
+/// range-gated here: an out-of-range value means "unset" and is dropped. This
+/// removes the spurious `amp_volume: 255`-style reports.
+///
+/// Known limitation: a device-*saved* pattern can fill unlocked steps with `0x00`
+/// instead of `0xFF` (observed in a captured device pool). An in-range `0` from
+/// such a slot is indistinguishable from a real `0` lock through rytm-rs's public
+/// API, so it may still surface; the daemon's own work-buffer writes use `0xFF`
+/// fill and read back clean.
+fn collect_trig_plocks(trig: &rytm_rs::object::pattern::Trig) -> serde_json::Map<String, Value> {
+    let mut locks = serde_json::Map::new();
+    // isize-valued locks, gated to each parameter's signed range.
+    let mut sig = |name: &str, value: Result<Option<isize>, _>, lo: isize, hi: isize| {
+        if let Ok(Some(value)) = value {
+            if (lo..=hi).contains(&value) {
+                locks.insert(name.to_string(), json!(value));
+            }
+        }
+    };
+    sig(
+        "filter_envelope",
+        trig.plock_get_filter_envelope_amount(),
+        -64,
+        63,
+    );
+    sig("amp_pan", trig.plock_get_amplitude_pan(), -64, 63);
+    sig("lfo_speed", trig.plock_get_lfo_speed(), -64, 63);
+    sig("lfo_fade", trig.plock_get_lfo_fade(), -64, 63);
+    sig("sample_tune", trig.plock_get_sample_tune(), -24, 24);
+    sig(
+        "sample_fine_tune",
+        trig.plock_get_sample_fine_tune(),
+        -64,
+        63,
+    );
+
+    // usize-valued locks (all 0..=127); 255 (0xFF sentinel) is out of range.
+    let mut uns = |name: &str, value: Result<Option<usize>, _>| {
+        if let Ok(Some(value)) = value {
+            if value <= 127 {
+                locks.insert(name.to_string(), json!(value));
+            }
+        }
+    };
+    uns("filter_attack", trig.plock_get_filter_attack());
+    uns("filter_sustain", trig.plock_get_filter_sustain());
+    uns("filter_decay", trig.plock_get_filter_decay());
+    uns("filter_release", trig.plock_get_filter_release());
+    uns("filter_cutoff", trig.plock_get_filter_cutoff());
+    uns("filter_resonance", trig.plock_get_filter_resonance());
+    uns("amp_attack", trig.plock_get_amplitude_attack());
+    uns("amp_hold", trig.plock_get_amplitude_hold());
+    uns("amp_decay", trig.plock_get_amplitude_decay());
+    uns("amp_overdrive", trig.plock_get_amplitude_overdrive());
+    uns("amp_delay_send", trig.plock_get_amplitude_delay_send());
+    uns("amp_reverb_send", trig.plock_get_amplitude_reverb_send());
+    uns("amp_volume", trig.plock_get_amplitude_volume());
+    uns("lfo_phase", trig.plock_get_lfo_start_phase());
+    uns("sample_number", trig.plock_get_sample_number());
+    uns(
+        "sample_bit_reduction",
+        trig.plock_get_sample_bit_reduction(),
+    );
+    uns("sample_level", trig.plock_get_sample_volume());
+
+    // f32-valued locks, gated to each parameter's float range.
+    let mut flt = |name: &str, value: Result<Option<f32>, _>, lo: f32, hi: f32| {
+        if let Ok(Some(value)) = value {
+            if value >= lo && value <= hi {
+                locks.insert(name.to_string(), json!(value));
+            }
+        }
+    };
+    flt("lfo_depth", trig.plock_get_lfo_depth(), -128.0, 127.99);
+    flt("sample_start", trig.plock_get_sample_start(), 0.0, 120.0);
+    flt("sample_end", trig.plock_get_sample_end(), 0.0, 120.0);
+
+    // bool-valued lock. Caveat: rytm-rs decodes the 0xFF unset sentinel to `true`,
+    // so an unset step inside a used loop-flag slot reads as a spurious `true`; a
+    // `false` read is always real. Reported as-is (loop plocks are rare).
+    if let Ok(Some(value)) = trig.plock_get_sample_loop_flag() {
+        locks.insert("sample_loop".to_string(), json!(value));
+    }
+
+    // enum-valued locks (serde variant string, matching the write path)
+    let mut enm = |name: &str, value: Option<Value>| {
+        if let Some(value) = value {
+            locks.insert(name.to_string(), value);
+        }
+    };
+    enm(
+        "filter_type",
+        trig.plock_get_filter_type()
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::to_value(value).ok()),
+    );
+    enm(
+        "lfo_multiplier",
+        trig.plock_get_lfo_multiplier()
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::to_value(value).ok()),
+    );
+    enm(
+        "lfo_waveform",
+        trig.plock_get_lfo_waveform()
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::to_value(value).ok()),
+    );
+    enm(
+        "lfo_mode",
+        trig.plock_get_lfo_mode()
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::to_value(value).ok()),
+    );
+    enm(
+        "lfo_destination",
+        trig.plock_get_lfo_destination()
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::to_value(value).ok()),
+    );
+
+    locks
+}
+
 fn pattern_summary(pattern: &Pattern) -> Value {
     let tracks = pattern
         .tracks()
@@ -2722,17 +3028,17 @@ fn pattern_summary(pattern: &Pattern) -> Value {
                 .filter(|trig| trig.enabled_trig())
                 .map(|trig| {
                     let condition: &str = swap_fill_condition(trig.trig_condition().into());
-                    let filter_cutoff_lock = if trig.enabled_parameter_lock_env() {
-                        trig.plock_get_filter_cutoff().ok().flatten()
-                    } else {
-                        None
-                    };
+                    let locks = collect_trig_plocks(trig);
+                    // Retained for backward compatibility with existing readers;
+                    // the full per-trig lock set now lives in `locks`.
+                    let filter_cutoff_lock = locks.get("filter_cutoff").cloned();
                     json!({
                         "step": trig.index(),
                         "velocity": trig.velocity(),
                         "microTiming": normalized_micro_timing(trig),
                         "condition": condition,
-                        "filterCutoffLock": filter_cutoff_lock
+                        "filterCutoffLock": filter_cutoff_lock,
+                        "locks": Value::Object(locks)
                     })
                 })
                 .collect::<Vec<_>>();
@@ -2881,7 +3187,6 @@ fn set_filter_cutoff_lock(
     cutoff: usize,
 ) -> HardwareResult<()> {
     let trig = &mut pattern.tracks_mut()[track_index].trigs_mut()[step];
-    trig.set_parameter_lock_env(true);
     trig.plock_set_filter_cutoff(cutoff).map_err(error_string)
 }
 
@@ -3536,5 +3841,276 @@ mod tests {
             summary["songs"]["work_buffer"]["target"]["scope"],
             "work_buffer"
         );
+    }
+
+    /// Sets a p-lock through `apply_parameter_lock_set` on the work-buffer
+    /// pattern `A01`, track `BD` (index 0), step 0, then returns the project so
+    /// the caller can read it back through the shared parameter-lock pool.
+    fn set_plock(parameter: &str, value: Value) -> RytmProject {
+        let mut project = RytmProject::try_default().unwrap();
+        {
+            let trig = &mut project.patterns_mut()[0].tracks_mut()[0].trigs_mut()[0];
+            apply_parameter_lock_set(trig, parameter, &value)
+                .unwrap_or_else(|error| panic!("set {parameter}: {error}"));
+        }
+        project
+    }
+
+    fn head_trig(project: &RytmProject) -> &rytm_rs::object::pattern::Trig {
+        &project.patterns()[0].tracks()[0].trigs()[0]
+    }
+
+    #[test]
+    fn parameter_lock_routes_each_sound_page_family_to_the_pool_without_trig_flags() {
+        // A p-lock is stored in the plock POOL only; the device sets NO trig-flag
+        // bits for value locks (verified against a device-authored capture). Each
+        // family routes its value; no `_PL_SW`/`_PL_EN` bit is touched.
+        for (parameter, expected) in [
+            ("filter_cutoff", 84usize),
+            ("amp_volume", 100),
+            ("lfo_phase", 40),
+            ("sample_number", 7),
+        ] {
+            let project = set_plock(parameter, json!(expected));
+            let trig = head_trig(&project);
+            // No family enable/switch bit is ever set by a value lock.
+            assert!(!trig.enabled_parameter_lock_env(), "{parameter} ENV_PL_EN");
+            assert!(
+                !trig.enabled_parameter_lock_env_switch(),
+                "{parameter} ENV_PL_SW"
+            );
+            assert!(!trig.enabled_parameter_lock_lfo(), "{parameter} LFO_PL_EN");
+            assert!(
+                !trig.enabled_parameter_lock_lfo_switch(),
+                "{parameter} LFO_PL_SW"
+            );
+            assert!(
+                !trig.enabled_parameter_lock_sample(),
+                "{parameter} SMP_PL_EN"
+            );
+            assert!(
+                !trig.enabled_parameter_lock_sample_switch(),
+                "{parameter} SMP_PL_SW"
+            );
+        }
+        // Values land in the pool for each family.
+        assert_eq!(
+            head_trig(&set_plock("filter_cutoff", json!(84)))
+                .plock_get_filter_cutoff()
+                .unwrap(),
+            Some(84)
+        );
+        assert_eq!(
+            head_trig(&set_plock("amp_volume", json!(100)))
+                .plock_get_amplitude_volume()
+                .unwrap(),
+            Some(100)
+        );
+        assert_eq!(
+            head_trig(&set_plock("lfo_phase", json!(40)))
+                .plock_get_lfo_start_phase()
+                .unwrap(),
+            Some(40)
+        );
+        assert_eq!(
+            head_trig(&set_plock("sample_number", json!(7)))
+                .plock_get_sample_number()
+                .unwrap(),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn parameter_lock_coerces_signed_float_bool_and_enum_values() {
+        // signed isize (amp pan, negative)
+        let project = set_plock("amp_pan", json!(-30));
+        assert_eq!(
+            head_trig(&project).plock_get_amplitude_pan().unwrap(),
+            Some(-30)
+        );
+
+        // signed isize (lfo speed, negative)
+        let project = set_plock("lfo_speed", json!(-20));
+        assert_eq!(
+            head_trig(&project).plock_get_lfo_speed().unwrap(),
+            Some(-20)
+        );
+
+        // float f32 (sample start)
+        let project = set_plock("sample_start", json!(60.0));
+        let start = head_trig(&project)
+            .plock_get_sample_start()
+            .unwrap()
+            .unwrap();
+        assert!(
+            (start - 60.0).abs() < 1.0,
+            "sample_start round-trip: {start}"
+        );
+
+        // bool (sample loop flag)
+        let project = set_plock("sample_loop", json!(true));
+        assert_eq!(
+            head_trig(&project).plock_get_sample_loop_flag().unwrap(),
+            Some(true)
+        );
+
+        // enum from string (filter type, serde variant casing)
+        let project = set_plock("filter_type", json!("Hp1"));
+        let filter_type = head_trig(&project)
+            .plock_get_filter_type()
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::to_value(filter_type).unwrap(), json!("Hp1"));
+
+        // enum from string (lfo mode)
+        let project = set_plock("lfo_mode", json!("Trig"));
+        let mode = head_trig(&project).plock_get_lfo_mode().unwrap().unwrap();
+        assert_eq!(serde_json::to_value(mode).unwrap(), json!("Trig"));
+    }
+
+    #[test]
+    fn parameter_lock_clear_removes_the_lock() {
+        let mut project = set_plock("filter_cutoff", json!(84));
+        assert_eq!(
+            head_trig(&project).plock_get_filter_cutoff().unwrap(),
+            Some(84)
+        );
+        {
+            let trig = &mut project.patterns_mut()[0].tracks_mut()[0].trigs_mut()[0];
+            apply_parameter_lock_clear(trig, "filter_cutoff").unwrap();
+        }
+        assert_eq!(head_trig(&project).plock_get_filter_cutoff().unwrap(), None);
+    }
+
+    #[test]
+    fn parameter_lock_survives_work_buffer_sysex_round_trip_pool_only_no_trig_flags() {
+        // Author locks across every family on one trig, then serialize through
+        // the exact path the daemon sends (work buffer pattern -> sysex) and
+        // re-parse the way the daemon reads a device response.
+        let mut project = RytmProject::try_default().unwrap();
+        {
+            let trig = &mut project.work_buffer_mut().pattern_mut().tracks_mut()[0].trigs_mut()[0];
+            trig.set_trig_enable(true);
+            apply_parameter_lock_set(trig, "filter_cutoff", &json!(8)).unwrap();
+            apply_parameter_lock_set(trig, "amp_volume", &json!(8)).unwrap();
+            apply_parameter_lock_set(trig, "lfo_speed", &json!(-20)).unwrap();
+            apply_parameter_lock_set(trig, "sample_start", &json!(95.0)).unwrap();
+        }
+
+        let bytes = project
+            .work_buffer()
+            .pattern()
+            .as_sysex()
+            .expect("as_sysex");
+        let mut reparsed = RytmProject::try_default().unwrap();
+        reparsed
+            .update_from_sysex_response(&bytes)
+            .expect("update_from_sysex_response");
+        let trig = &reparsed.work_buffer().pattern().tracks()[0].trigs()[0];
+
+        // Every family's value survives the encode/decode round trip.
+        assert_eq!(trig.plock_get_filter_cutoff().unwrap(), Some(8));
+        assert_eq!(trig.plock_get_amplitude_volume().unwrap(), Some(8));
+        assert_eq!(trig.plock_get_lfo_speed().unwrap(), Some(-20));
+        assert!(trig.plock_get_sample_start().unwrap().is_some());
+
+        // Device ground truth (captured device-authored plock): parameter LOCKS
+        // live in the plock POOL alone, per step, and carry NO `_PL_SW`/`_PL_EN`
+        // trig-flag bits (those bits are the separate per-step engine on/off
+        // feature, not value locks). The trig must show ENABLE only.
+        assert!(!trig.enabled_parameter_lock_env_switch(), "ENV_PL_SW");
+        assert!(!trig.enabled_parameter_lock_env(), "ENV_PL_EN");
+        assert!(!trig.enabled_parameter_lock_sample_switch(), "SMP_PL_SW");
+        assert!(!trig.enabled_parameter_lock_sample(), "SMP_PL_EN");
+        assert!(!trig.enabled_parameter_lock_lfo_switch(), "LFO_PL_SW");
+        assert!(!trig.enabled_parameter_lock_lfo(), "LFO_PL_EN");
+        assert!(!trig.enabled_parameter_lock_synth(), "SYN_PL_EN");
+        assert!(!trig.enabled_parameter_lock_synth_switch(), "SYN_PL_SW");
+        assert_eq!(trig.raw_trig_flags(), 0x0001, "ENABLE only, no plock flags");
+    }
+
+    #[test]
+    fn parameter_lock_op_marks_only_the_pattern_changed() {
+        // A p-lock lives in the pattern's plock pool. It must NOT mark the kit
+        // (or any other object) changed — a spurious kit re-send would reset the
+        // track level and silence the whole voice on hardware.
+        let mut capture = StateCapture {
+            project: RytmProject::try_default().unwrap(),
+            pattern_raw: Vec::new(),
+            kit_raw: Vec::new(),
+            global_raw: Vec::new(),
+            settings_raw: Vec::new(),
+            song_raw: BTreeMap::from([("work_buffer".to_string(), Vec::new())]),
+        };
+        // Lay down a 4-on-floor so step 8 has an enabled trig (plocks only surface
+        // in the summary on enabled trigs), then plock only step 8.
+        let setup: Vec<PersistentOperation> = serde_json::from_value(json!([
+            { "type": "set_trig", "track": "BD", "step": 0 },
+            { "type": "set_trig", "track": "BD", "step": 4 },
+            { "type": "set_trig", "track": "BD", "step": 8 },
+            { "type": "set_trig", "track": "BD", "step": 12 }
+        ]))
+        .unwrap();
+        apply_persistent_operations(&mut capture, &setup).unwrap();
+
+        let operations: Vec<PersistentOperation> = serde_json::from_value(json!([
+            { "type": "set_parameter_lock", "track": "BD", "step": 8, "parameter": "amp_volume", "value": 6 }
+        ]))
+        .unwrap();
+        let changed = apply_persistent_operations(&mut capture, &operations).unwrap();
+        assert!(changed.pattern, "plock must mark the pattern changed");
+        assert!(!changed.kit, "plock must NOT re-send the kit");
+        assert!(!changed.global);
+        assert!(!changed.settings);
+        assert!(changed.songs.is_empty());
+
+        // The lock is per-step: only step 8 reports amp_volume; the range gate
+        // drops the 0xFF sentinel on the other kicks.
+        let summary = state_summary(&capture.project);
+        for trig in summary["pattern"]["tracks"][0]["trigs"].as_array().unwrap() {
+            let has_lock = trig["locks"].get("amp_volume").is_some();
+            assert_eq!(has_lock, trig["step"] == 8, "only step 8 is locked");
+        }
+    }
+
+    #[test]
+    fn parameter_lock_read_path_surfaces_all_families() {
+        let mut project = RytmProject::try_default().unwrap();
+        {
+            let trig = &mut project.work_buffer_mut().pattern_mut().tracks_mut()[0].trigs_mut()[0];
+            trig.set_trig_enable(true);
+            apply_parameter_lock_set(trig, "amp_volume", &json!(8)).unwrap();
+            apply_parameter_lock_set(trig, "amp_pan", &json!(-20)).unwrap();
+            apply_parameter_lock_set(trig, "sample_loop", &json!(true)).unwrap();
+            apply_parameter_lock_set(trig, "lfo_mode", &json!("Trig")).unwrap();
+        }
+        let summary = pattern_summary(project.work_buffer().pattern());
+        let locks = &summary["tracks"][0]["trigs"][0]["locks"];
+        assert_eq!(locks["amp_volume"], json!(8));
+        assert_eq!(locks["amp_pan"], json!(-20));
+        assert_eq!(locks["sample_loop"], json!(true));
+        assert_eq!(locks["lfo_mode"], json!("Trig"));
+    }
+
+    #[test]
+    fn parameter_lock_rejects_unknown_and_synth_page_parameters() {
+        let mut project = RytmProject::try_default().unwrap();
+        let trig = &mut project.patterns_mut()[0].tracks_mut()[0].trigs_mut()[0];
+
+        // A synth/machine-page parameter points at the rytm-rs gap.
+        let synth = apply_parameter_lock_set(trig, "machine_parameter_1", &json!(64)).unwrap_err();
+        assert!(synth.contains("synth/machine-page"), "message: {synth}");
+        assert!(synth.contains("rytm-rs"), "message: {synth}");
+
+        // A totally unknown parameter errors cleanly.
+        let unknown = apply_parameter_lock_set(trig, "not_a_real_param", &json!(1)).unwrap_err();
+        assert!(
+            unknown.contains("unsupported parameter lock"),
+            "message: {unknown}"
+        );
+
+        // Clear rejects the same way.
+        let cleared = apply_parameter_lock_clear(trig, "machine_parameter_1").unwrap_err();
+        assert!(cleared.contains("synth/machine-page"), "message: {cleared}");
     }
 }

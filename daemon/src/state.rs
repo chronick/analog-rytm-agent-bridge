@@ -89,7 +89,7 @@ pub enum PersistentOperation {
         track: String,
         step: u8,
         parameter: String,
-        value: f64,
+        value: Value,
     },
     ClearParameterLock {
         #[serde(default)]
@@ -446,7 +446,7 @@ struct Trig {
     micro_timing: Option<i8>,
     condition: Option<String>,
     retrig: Option<bool>,
-    locks: BTreeMap<String, f64>,
+    locks: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -1345,7 +1345,7 @@ fn validate_operation(operation: &PersistentOperation) -> Result<(), String> {
             validate_optional_pattern(pattern)?;
             validate_track_step(track, *step)?;
             validate_safe_id(parameter, "parameter")?;
-            validate_finite_range(*value, "value", 0.0, 127.0)?;
+            validate_parameter_lock_value(parameter, value)?;
         }
         PersistentOperation::ClearParameterLock {
             pattern,
@@ -1627,7 +1627,7 @@ fn apply_operations(
                         retrig: None,
                         locks: BTreeMap::new(),
                     });
-                trig.locks.insert(parameter.clone(), *value);
+                trig.locks.insert(parameter.clone(), value.clone());
             }
             PersistentOperation::ClearParameterLock {
                 pattern,
@@ -2341,6 +2341,140 @@ fn validate_control_value(value: &Value, label: &str) -> Result<(), String> {
     }
 }
 
+/// The value shape a given per-trig parameter lock expects.
+///
+/// Ranges mirror the `#[parameter_range]` attributes on the matching
+/// `Trig::plock_set_*` methods in rytm-rs (`f2e8143`), so the daemon rejects
+/// out-of-range locks before they reach the hardware routing in `hardware.rs`.
+enum ParameterLockValueSpec {
+    /// A `usize` control (`plock_set_*` takes `usize`).
+    Unsigned { minimum: u64, maximum: u64 },
+    /// A signed `isize` control (e.g. pan, tune, lfo speed/fade).
+    Signed { minimum: i64, maximum: i64 },
+    /// An `f32` control (sample start/end, lfo depth).
+    Float { minimum: f64, maximum: f64 },
+    /// A boolean control (sample loop switch).
+    Boolean,
+    /// An enum control parsed from a symbolic string (filter type, lfo enums).
+    Enum,
+}
+
+/// Maps a flat p-lock `parameter` name to its expected value shape.
+///
+/// Names are the same flat identifiers used by `voice_macro_parameter_id`
+/// in `hardware.rs` so scene/performance macros and p-locks stay aligned.
+/// Returns `None` for names rytm-rs cannot route as a p-lock (synth/machine
+/// page parameters) or names that are not p-lock targets at all.
+fn parameter_lock_value_spec(parameter: &str) -> Option<ParameterLockValueSpec> {
+    use ParameterLockValueSpec::{Boolean, Enum, Float, Signed, Unsigned};
+    Some(match parameter {
+        // ----- filter page (ENV p-lock family) -----
+        "filter_attack" | "filter_sustain" | "filter_decay" | "filter_release"
+        | "filter_frequency" | "filter_cutoff" | "filter_resonance" => Unsigned {
+            minimum: 0,
+            maximum: 127,
+        },
+        "filter_envelope" => Signed {
+            minimum: -64,
+            maximum: 63,
+        },
+        "filter_type" => Enum,
+        // ----- amp page (ENV p-lock family) -----
+        "amp_attack" | "amp_hold" | "amp_decay" | "amp_overdrive" | "amp_delay_send"
+        | "amp_reverb_send" | "amp_volume" => Unsigned {
+            minimum: 0,
+            maximum: 127,
+        },
+        "amp_pan" => Signed {
+            minimum: -64,
+            maximum: 63,
+        },
+        // ----- lfo page (LFO p-lock family) -----
+        "lfo_speed" | "lfo_fade" => Signed {
+            minimum: -64,
+            maximum: 63,
+        },
+        "lfo_phase" => Unsigned {
+            minimum: 0,
+            maximum: 127,
+        },
+        "lfo_depth" => Float {
+            minimum: -128.0,
+            maximum: 127.99,
+        },
+        "lfo_multiplier" | "lfo_waveform" | "lfo_mode" | "lfo_destination" => Enum,
+        // ----- sample page (SMP p-lock family) -----
+        "sample_tune" => Signed {
+            minimum: -24,
+            maximum: 24,
+        },
+        "sample_fine_tune" => Signed {
+            minimum: -64,
+            maximum: 63,
+        },
+        "sample_number" | "sample_bit_reduction" | "sample_level" => Unsigned {
+            minimum: 0,
+            maximum: 127,
+        },
+        "sample_start" | "sample_end" => Float {
+            minimum: 0.0,
+            maximum: 120.0,
+        },
+        "sample_loop" => Boolean,
+        _ => return None,
+    })
+}
+
+/// Error text for a p-lock `parameter` name the bridge cannot route, with a
+/// pointer at the rytm-rs gap for synth/machine-page parameters.
+pub fn unsupported_parameter_lock_message(parameter: &str) -> String {
+    if parameter.starts_with("machine_parameter_") {
+        format!(
+            "parameter lock {parameter:?} targets a synth/machine-page parameter, which rytm-rs \
+             (f2e8143) does not expose as a p-lock; wiring it needs a rytm-rs fork change"
+        )
+    } else {
+        format!(
+            "unsupported parameter lock {parameter:?}; supported: filter_*, amp_*, lfo_*, sample_* \
+             sound-page parameters"
+        )
+    }
+}
+
+/// Validates a p-lock value against the range and sign of its parameter.
+fn validate_parameter_lock_value(parameter: &str, value: &Value) -> Result<(), String> {
+    let Some(spec) = parameter_lock_value_spec(parameter) else {
+        return Err(unsupported_parameter_lock_message(parameter));
+    };
+    match spec {
+        ParameterLockValueSpec::Unsigned { minimum, maximum } => {
+            validate_u64_range(value_u64(value, "value")?, "value", minimum, maximum)?;
+        }
+        ParameterLockValueSpec::Signed { minimum, maximum } => {
+            let number = value
+                .as_i64()
+                .ok_or_else(|| "value must be an integer".to_string())?;
+            if !(minimum..=maximum).contains(&number) {
+                return Err(format!(
+                    "value must be an integer between {minimum} and {maximum}"
+                ));
+            }
+        }
+        ParameterLockValueSpec::Float { minimum, maximum } => {
+            validate_finite_range(value_f64(value, "value")?, "value", minimum, maximum)?;
+        }
+        ParameterLockValueSpec::Boolean => {
+            if !value.is_boolean() {
+                return Err("value must be a boolean".to_string());
+            }
+        }
+        ParameterLockValueSpec::Enum => {
+            validate_safe_atom(value_string(value, "value")?, "value")?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_u64_range(value: u64, label: &str, minimum: u64, maximum: u64) -> Result<u64, String> {
     if !(minimum..=maximum).contains(&value) {
         return Err(format!(
@@ -2528,6 +2662,74 @@ mod tests {
         ]));
         assert_eq!(validation["valid"], false);
         assert_eq!(validation["errors"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn parameter_lock_validation_accepts_full_value_surface() {
+        assert!(validate_parameter_lock_value("filter_cutoff", &json!(84)).is_ok());
+        assert!(validate_parameter_lock_value("amp_pan", &json!(-30)).is_ok());
+        assert!(validate_parameter_lock_value("lfo_speed", &json!(-64)).is_ok());
+        assert!(validate_parameter_lock_value("sample_start", &json!(60.0)).is_ok());
+        assert!(validate_parameter_lock_value("sample_loop", &json!(true)).is_ok());
+        assert!(validate_parameter_lock_value("filter_type", &json!("Hp1")).is_ok());
+        assert!(validate_parameter_lock_value("lfo_mode", &json!("Trig")).is_ok());
+    }
+
+    #[test]
+    fn parameter_lock_validation_rejects_out_of_range_and_wrong_kind() {
+        // pan is signed -64..=63, so 100 is out of range
+        assert!(validate_parameter_lock_value("amp_pan", &json!(100)).is_err());
+        // unsigned params reject over-range and negatives
+        assert!(validate_parameter_lock_value("filter_cutoff", &json!(200)).is_err());
+        assert!(validate_parameter_lock_value("filter_cutoff", &json!(-1)).is_err());
+        // float out of 0..=120
+        assert!(validate_parameter_lock_value("sample_start", &json!(200.0)).is_err());
+        // wrong value kinds
+        assert!(validate_parameter_lock_value("sample_loop", &json!(1)).is_err());
+        assert!(validate_parameter_lock_value("filter_type", &json!(3)).is_err());
+    }
+
+    #[test]
+    fn parameter_lock_validation_reports_unknown_and_synth_gap() {
+        let synth = validate_parameter_lock_value("machine_parameter_1", &json!(64)).unwrap_err();
+        assert!(synth.contains("synth/machine-page"), "message: {synth}");
+        assert!(synth.contains("rytm-rs"), "message: {synth}");
+        let unknown = validate_parameter_lock_value("not_a_param", &json!(1)).unwrap_err();
+        assert!(
+            unknown.contains("unsupported parameter lock"),
+            "message: {unknown}"
+        );
+    }
+
+    #[test]
+    fn set_parameter_lock_operation_accepts_signed_value() {
+        // Regression: the previous blanket 0..=127 check rejected negative locks.
+        let operation: PersistentOperation = serde_json::from_value(json!({
+            "type": "set_parameter_lock", "track": "BD", "step": 0,
+            "parameter": "amp_pan", "value": -40
+        }))
+        .unwrap();
+        assert!(validate_operation(&operation).is_ok());
+    }
+
+    #[test]
+    fn mock_backend_stores_full_parameter_lock_value_surface() {
+        let mut state = MockBridgeState::default();
+        state
+            .apply_now(&json!({
+                "expectedRevision": 0,
+                "operations": [
+                    { "type": "set_parameter_lock", "track": "BD", "step": 0, "parameter": "amp_pan", "value": -40 },
+                    { "type": "set_parameter_lock", "track": "BD", "step": 0, "parameter": "sample_loop", "value": true },
+                    { "type": "set_parameter_lock", "track": "BD", "step": 0, "parameter": "filter_type", "value": "Hp1" },
+                ],
+            }))
+            .unwrap();
+        let state_json = state.inspect_state();
+        let locks = &state_json["activePattern"]["trigs"][0]["locks"];
+        assert_eq!(locks["amp_pan"], json!(-40));
+        assert_eq!(locks["sample_loop"], json!(true));
+        assert_eq!(locks["filter_type"], json!("Hp1"));
     }
 
     #[test]

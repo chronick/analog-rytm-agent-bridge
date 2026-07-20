@@ -160,7 +160,7 @@ export type RytmPersistentOperation =
       track: RytmTrackId;
       step: number;
       parameter: string;
-      value: number;
+      value: number | boolean | string;
     }
   | {
       type: "clear_parameter_lock";
@@ -362,7 +362,7 @@ export interface RytmPatternTrigSummary {
   microTiming?: number;
   condition?: string;
   retrig?: boolean;
-  locks: Record<string, number>;
+  locks: Record<string, number | boolean | string>;
 }
 
 export interface RytmPatternSummary {

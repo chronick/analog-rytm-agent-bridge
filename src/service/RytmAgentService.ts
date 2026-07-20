@@ -51,7 +51,7 @@ interface InternalTrig {
   microTiming?: number;
   condition?: string;
   retrig?: boolean;
-  locks: Map<string, number>;
+  locks: Map<string, number | boolean | string>;
 }
 
 interface InternalPattern {
@@ -556,7 +556,7 @@ function applyOperationsToPatterns(
           track: operation.track,
           step: operation.step,
           velocity: 100,
-          locks: new Map<string, number>(),
+          locks: new Map<string, number | boolean | string>(),
         };
         trig.locks.set(operation.parameter, operation.value);
         pattern.trigs.set(key, trig);

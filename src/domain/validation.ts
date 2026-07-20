@@ -85,7 +85,9 @@ export function validatePersistentOperation(operation: RytmPersistentOperation, 
       validateTrackStep(operation.track, operation.step);
       if (operation.pattern) assertPatternSlot(operation.pattern);
       assertSafeId(operation.parameter, "parameter");
-      assertFiniteRange(operation.value, "value", 0, 127);
+      // Full p-lock surface carries signed/float/bool/enum-string values; the
+      // Rust daemon does the authoritative per-parameter range validation.
+      assertControlValue(operation.value, "value");
       return;
 
     case "clear_parameter_lock":
