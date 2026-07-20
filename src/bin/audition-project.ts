@@ -22,6 +22,8 @@ const TEMPO: Record<string, number> = {
   // Bank C - ESCAPE VELOCITY: broken, dipping for the breakdown, landing at speed.
   C01: 130, C02: 130, C03: 128, C04: 128, C05: 126, C06: 126, C07: 124, C08: 126,
   C09: 118, C10: 118, C11: 130, C12: 132,
+  // Bank D - TRIBE: drum-circle momentum, building through the ceremony.
+  D01: 128, D02: 130, D03: 132, D04: 130, D05: 132, D06: 134,
 };
 const FILL_SLOTS = new Set<string>(); // Moonshot has no fill-only slots.
 const CAPTURE_MS = 8_000;
