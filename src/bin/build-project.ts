@@ -33,18 +33,61 @@ import type { RytmPersistentOperation } from "../domain/types.ts";
 // machine selection is emitted before its params because set_track_machine
 // resets the machine page to defaults. Ground values in the sound-design
 // corpus (`~/git/vault/corpus/sound-design/`) rather than improvising.
+//
+// Per-track pattern sugar (all step keys are 1-BASED strings, "1" = step 1,
+// matching the `conditions` convention; put these only on trigged steps):
+//
+//   "BD": {
+//     "grid": "X... X... X... X...",  // X=vel120 x=96 o=40, '.'=silent
+//     "length": 16,                    // optional per-track length (polymeter)
+//     "condition": "50%",             // optional whole-track default
+//     "conditions": { "5": "75%" },   // optional per-step override
+//     "microtiming": { "3": -6 },     // -24..24, merged into the step's set_trig
+//     "retrigs": [5, 13],              // 1-based steps -> set_trig retrig:true
+//     "plocks": { "1": { "filter_cutoff": 40 } }  // per-step -> set_parameter_lock
+//   }
+//
+// Emission order per pattern: for each declared track, clears -> set_trigs ->
+// set_track_length; then every track's plock-sugar (as set_parameter_lock, step
+// keys converted 1-based -> 0-based); then the raw `pattern.plocks` passthrough.
+//
+// `clear: true` on a pattern emits clear_trig for every '.' position of every
+// DECLARED track BEFORE that track's set_trigs (declare an all-dots grid to wipe
+// a track). Declare all tracks in every pattern for deterministic rebuilds.
+//
+// The optional `kit` section is a raw set_kit_parameter (etc.) op array applied
+// as one batch after `sounds` and before patterns (e.g. retrig rate/length,
+// track levels). The optional `song` section:
+//
+//   "song": { "name": "MOONSHOT", "rows": [ { "pattern": "A01", "repeats": 2, "mutes": ["BD"] } ] }
+//
+// emits clear_song, then set_song_name (when `name` is set), then one
+// insert_song_row per row (row index 0..n-1), applied after `performances`.
+// Mapping onto the daemon's SongRowInput (state.rs): each flat declaration row
+// becomes a single-position row -> value = { patterns: [{ pattern, mutedTracks:
+// mutes ?? [] }], repeats: repeats ?? 1 }. `mutes` maps to the position's
+// `mutedTracks`; `repeats` is required by the daemon (u16, 1..256) so it
+// defaults to 1; `target` is omitted (defaults to the work-buffer song).
 
-interface TrackDecl {
+export interface TrackDecl {
   grid: string;
   condition?: string;
   conditions?: Record<string, string>;
   length?: number;
+  microtiming?: Record<string, number>; // 1-based step -> -24..24
+  retrigs?: number[]; // 1-based trigged steps to enable retrig on
+  plocks?: Record<string, Record<string, number | boolean | string>>; // 1-based step -> param map
 }
-interface PatternDecl {
+export interface PatternDecl {
   slot: string;
   name: string;
+  clear?: boolean; // wipe every '.' position of every declared track first
   tracks: Record<string, TrackDecl>;
-  plocks?: Array<Record<string, unknown>>;
+  plocks?: Array<Record<string, unknown>>; // raw op passthrough (kept)
+}
+export interface SongDecl {
+  name?: string;
+  rows: Array<{ pattern: string; repeats?: number; mutes?: string[] }>;
 }
 interface SoundDecl {
   machine?: string;
@@ -60,29 +103,44 @@ interface Declaration {
   machines?: Array<{ track: string; machine: string }>;
   patterns: PatternDecl[];
   sounds?: Record<string, SoundDecl>;
+  kit?: Array<Record<string, unknown>>; // raw set_kit_parameter (etc.) passthrough
   scenes?: Array<Record<string, unknown>>;
   performances?: Array<Record<string, unknown>>;
+  song?: SongDecl;
   samples?: Array<{ file: string; track: string; slot: number }>;
   sampleDirectory?: string;
 }
 
 const VELOCITY: Record<string, number> = { X: 120, x: 96, o: 40, ":": 96, c: 96 };
 
-function gridOperations(pattern: PatternDecl): RytmPersistentOperation[] {
+export function gridOperations(pattern: PatternDecl): RytmPersistentOperation[] {
   const operations: RytmPersistentOperation[] = [];
+  // Pass 1 (per track): clears (for a `clear` pattern) -> set_trigs -> length.
+  // microtiming/retrigs merge into the matching trigged step's set_trig.
   for (const [track, decl] of Object.entries(pattern.tracks)) {
     const steps = decl.grid.replace(/\s+/g, "");
+    if (pattern.clear) {
+      for (let index = 0; index < steps.length; index += 1) {
+        if (steps[index] !== ".") continue;
+        operations.push({ type: "clear_trig", pattern: pattern.slot, track, step: index } as RytmPersistentOperation);
+      }
+    }
     for (let index = 0; index < steps.length; index += 1) {
       const symbol = steps[index] as string;
       if (symbol === ".") continue;
-      const condition = decl.conditions?.[String(index + 1)] ?? decl.condition;
+      const key = String(index + 1); // step keys are 1-based
+      const condition = decl.conditions?.[key] ?? decl.condition;
+      const microTiming = decl.microtiming?.[key];
+      const retrig = decl.retrigs?.includes(index + 1);
       operations.push({
         type: "set_trig",
         pattern: pattern.slot,
         track,
         step: index,
         velocity: VELOCITY[symbol] ?? 96,
+        ...(microTiming !== undefined ? { microTiming } : {}),
         ...(condition ? { condition } : {}),
+        ...(retrig ? { retrig: true } : {}),
       } as RytmPersistentOperation);
     }
     if (decl.length !== undefined) {
@@ -94,9 +152,38 @@ function gridOperations(pattern: PatternDecl): RytmPersistentOperation[] {
       } as RytmPersistentOperation);
     }
   }
+  // Pass 2 (per track): plock sugar -> set_parameter_lock, 1-based key -> 0-based step.
+  for (const [track, decl] of Object.entries(pattern.tracks)) {
+    for (const [key, params] of Object.entries(decl.plocks ?? {})) {
+      const step = Number(key) - 1;
+      for (const [parameter, value] of Object.entries(params)) {
+        operations.push({ type: "set_parameter_lock", pattern: pattern.slot, track, step, parameter, value } as RytmPersistentOperation);
+      }
+    }
+  }
+  // Pass 3: raw pattern-level plock op passthrough (unchanged).
   for (const plock of pattern.plocks ?? []) {
     operations.push({ ...plock, pattern: pattern.slot } as unknown as RytmPersistentOperation);
   }
+  return operations;
+}
+
+// Song section -> clear_song, set_song_name (when named), one insert_song_row
+// per row. Each flat declaration row maps onto the daemon's SongRowInput as a
+// single-position row (mutes -> mutedTracks, repeats defaults to 1); target is
+// omitted so it edits the work-buffer song.
+export function songOperations(song: SongDecl): RytmPersistentOperation[] {
+  const operations: RytmPersistentOperation[] = [{ type: "clear_song" } as RytmPersistentOperation];
+  if (song.name !== undefined) {
+    operations.push({ type: "set_song_name", name: song.name } as RytmPersistentOperation);
+  }
+  song.rows.forEach((row, index) => {
+    operations.push({
+      type: "insert_song_row",
+      row: index,
+      value: { patterns: [{ pattern: row.pattern, mutedTracks: row.mutes ?? [] }], repeats: row.repeats ?? 1 },
+    } as RytmPersistentOperation);
+  });
   return operations;
 }
 
@@ -104,7 +191,7 @@ function gridOperations(pattern: PatternDecl): RytmPersistentOperation[] {
 // under page "machine", so set_track_machine can precede them per track).
 const SOUND_PAGES = ["sample", "filter", "amp", "lfo", "settings"] as const;
 
-function soundOperations(sounds: Record<string, SoundDecl>): RytmPersistentOperation[] {
+export function soundOperations(sounds: Record<string, SoundDecl>): RytmPersistentOperation[] {
   const operations: RytmPersistentOperation[] = [];
   for (const [track, decl] of Object.entries(sounds)) {
     // Machine selection first: set_track_machine resets the sound's machine
@@ -197,10 +284,21 @@ export async function runProjectBuild(): Promise<void> {
     if (declaration.sounds && Object.keys(declaration.sounds).length) {
       await applyBatch(client, "sounds", soundOperations(declaration.sounds), execute);
     }
+    if (declaration.kit?.length) {
+      await applyBatch(client, "kit", declaration.kit as unknown as RytmPersistentOperation[], execute);
+    }
+    // Pattern deltas target the work buffer, so each slot must be active
+    // before its operations validate/apply. In validate-only mode nothing is
+    // allowed to touch the device, so instead remap each batch onto whatever
+    // slot is currently active: content checks (tracks, steps, parameters,
+    // ranges) are identical across slots, only the addressing differs.
+    let validateSlot: string | undefined;
+    if (!execute && declaration.patterns.length) {
+      const state = (await client.inspectDeviceState()) as { activePattern?: string | { pattern?: string } };
+      validateSlot = typeof state.activePattern === "object" ? state.activePattern?.pattern : state.activePattern;
+      if (validateSlot) process.stderr.write(`validate-only: remapping pattern batches onto active slot ${validateSlot}\n`);
+    }
     for (const pattern of declaration.patterns) {
-      // Pattern deltas target the work buffer, so each slot must be active
-      // before its operations validate/apply. Realtime pattern change does
-      // not touch the persistent revision.
       if (execute) {
         await client.changePattern({ pattern: pattern.slot, immediate: true });
         for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -210,13 +308,19 @@ export async function runProjectBuild(): Promise<void> {
           await new Promise((resolve) => setTimeout(resolve, 250));
         }
       }
-      await applyBatch(client, `pattern-${pattern.slot}`, gridOperations(pattern), execute);
+      const operations = validateSlot
+        ? gridOperations(pattern).map((op) => ({ ...op, pattern: validateSlot }) as RytmPersistentOperation)
+        : gridOperations(pattern);
+      await applyBatch(client, `pattern-${pattern.slot}`, operations, execute);
     }
     if (declaration.scenes?.length) {
       await applyBatch(client, "scenes", declaration.scenes as unknown as RytmPersistentOperation[], execute);
     }
     if (declaration.performances?.length) {
       await applyBatch(client, "performances", declaration.performances as unknown as RytmPersistentOperation[], execute);
+    }
+    if (declaration.song?.rows?.length) {
+      await applyBatch(client, "song", songOperations(declaration.song), execute);
     }
 
     if (execute && declaration.samples?.length && declaration.sampleDirectory) {
