@@ -1867,12 +1867,16 @@ fn apply_parameter_lock_set(
         "lfo_mode" => trig
             .plock_set_lfo_mode(parse_enum(value, "value")?)
             .map_err(error_string),
+        // lfo_depth is device plock type 0x28, which libanalogrytm/pattern.h
+        // defines as a BASIC single byte (0..127). rytm-rs only exposes it through
+        // its two-slot compound setter, so we drive that setter with an MSB-aligned
+        // value (companion LSB forced to 0x00). See `basic_via_compound_f32`.
         "lfo_depth" => trig
-            .plock_set_lfo_depth(compound_plock_quantize(
+            .plock_set_lfo_depth(basic_via_compound_f32(
                 control_f32(value, "value")?,
                 -128.0,
                 127.99,
-                32767.0,
+                32767,
             ))
             .map_err(error_string),
         // ----- sample page (SMP p-lock family) -----
@@ -1888,20 +1892,23 @@ fn apply_parameter_lock_set(
         "sample_bit_reduction" => trig
             .plock_set_sample_bit_reduction(control_usize(value, "value")?)
             .map_err(error_string),
+        // sample_start / sample_end are device plock types 0x0C / 0x0D, which
+        // pattern.h defines as BASIC single bytes (0..120). Same MSB-aligned
+        // routing as lfo_depth (companion LSB forced to 0x00).
         "sample_start" => trig
-            .plock_set_sample_start(compound_plock_quantize(
+            .plock_set_sample_start(basic_via_compound_f32(
                 control_f32(value, "value")?,
                 0.0,
                 120.0,
-                30720.0,
+                30720,
             ))
             .map_err(error_string),
         "sample_end" => trig
-            .plock_set_sample_end(compound_plock_quantize(
+            .plock_set_sample_end(basic_via_compound_f32(
                 control_f32(value, "value")?,
                 0.0,
                 120.0,
-                30720.0,
+                30720,
             ))
             .map_err(error_string),
         "sample_loop" => trig
@@ -3473,16 +3480,44 @@ fn control_isize(value: &Value, label: &str) -> HardwareResult<isize> {
         .ok_or_else(|| format!("{label} must be an integer"))
 }
 
-// The device keeps only the low 7 bits of a compound parameter lock's
-// companion (LSB) pool slot: raw values whose LSB has bit 7 set read back
-// with that bit cleared (observed on hardware: 0x6080 -> 0x6000). Quantize
-// to the nearest encodable value below (max error 128/32767 of full scale,
-// inaudible) so the written state round-trips byte-exact. Applies to the
-// compound (two-slot) locks only: lfo_depth, sample_start, sample_end.
-fn compound_plock_quantize(value: f32, in_min: f32, in_max: f32, out_max: f32) -> f32 {
-    let raw = ((value - in_min) * (out_max / (in_max - in_min))) as u16;
-    let safe = raw & !0x0080u16;
-    (f32::from(safe) + 0.5) * ((in_max - in_min) / out_max) + in_min
+// libanalogrytm/pattern.h defines LFO_DEPTH (0x28), SMP_START (0x0C) and
+// SMP_END (0x0D) as BASIC single-byte p-locks (depth 0..127, start/end 0..120).
+// The pinned rytm-rs, however, stores them as TWO-slot *compound* locks: a value
+// MSB slot at the real type, plus a device-invalid companion slot tagged
+// track_nr = type = 128 carrying an LSB. The device puts the value in the MSB slot
+// and ignores the companion for playback, so the *effective* device value is the
+// high byte alone. rytm-rs exposes no public basic setter reachable from the daemon
+// on this pin (the pool is `pub(crate)`), so we keep using the compound setter but
+// choose the f32 so that:
+//   * the high (device) byte equals the byte the device already stores for this
+//     value (identical to prior hardware state — no re-authoring), and
+//   * the low (companion) byte is exactly 0x00.
+//
+// Forcing LSB = 0x00 makes the write round-trip byte-exact and retires the old
+// `compound_plock_quantize` band-aid, which existed only because a companion LSB
+// with bit 7 set read back with that bit cleared (0x6080 -> 0x6000, i.e. 1.0 low).
+// With LSB = 0 there is no bit 7 to lose. `scale_f32_to_u16` is an exact inverse of
+// `scale_u16_to_f32` at integer targets, so the returned f32 encodes to exactly
+// `high_byte << 8`, and the compound *getter* used by the read path decodes it back
+// to a stable in-range value (read path stays symmetric — no change needed there).
+//
+// Residual: the companion slot still exists in the pool (a rytm-rs artifact); it is
+// now all-zero and the device ignores it. Removing it entirely (true single-slot,
+// per pattern.h) requires routing these three types through `set_basic_plock` /
+// `get_basic_plock`, which needs a small change in the pinned rytm-rs fork — see the
+// audit writeup. `out_max` is the compound full-scale (32767 for lfo_depth, 30720
+// for sample start/end).
+fn basic_via_compound_f32(value: f32, in_min: f32, in_max: f32, out_max: u16) -> f32 {
+    let span = in_max - in_min;
+    let factor = f32::from(out_max) / span;
+    // Same rounding rytm-rs's `scale_f32_to_u16` applies, then take the device high
+    // byte (the value the hardware actually plays).
+    let raw = ((value - in_min) * factor)
+        .round()
+        .clamp(0.0, f32::from(out_max)) as u16;
+    let high_byte = raw >> 8;
+    let aligned = high_byte << 8; // companion (low) byte forced to 0x00
+    in_min + (f32::from(aligned) / f32::from(out_max)) * span
 }
 
 fn control_f32(value: &Value, label: &str) -> HardwareResult<f32> {
@@ -4141,26 +4176,111 @@ mod tests {
         assert!(cleared.contains("synth/machine-page"), "message: {cleared}");
     }
 
+    /// Recompute the raw compound u16 the way rytm-rs does, so we can assert on the
+    /// exact MSB (device byte) and LSB (companion byte) a compound f32 encodes to.
+    fn compound_raw(value: f32, in_min: f32, in_max: f32, out_max: u16) -> u16 {
+        ((value - in_min) * (f32::from(out_max) / (in_max - in_min))).round() as u16
+    }
+
     #[test]
-    fn compound_plock_quantize_yields_bit7_clear_stable_raws() {
-        // lfo_depth scale: -128.0..=127.99 <-> 0..=32767 (truncating encode).
-        for i in -128..=127 {
-            let v = compound_plock_quantize(i as f32, -128.0, 127.99, 32767.0);
-            let raw = ((v + 128.0) * (32767.0 / 255.99)) as u16;
-            assert_eq!(raw & 0x0080, 0, "depth {i} -> raw {raw:#06x} keeps LSB bit 7");
-            let v2 = compound_plock_quantize(v, -128.0, 127.99, 32767.0);
-            let raw2 = ((v2 + 128.0) * (32767.0 / 255.99)) as u16;
-            assert_eq!(raw, raw2, "depth {i} not a fixed point");
-            assert!((v - i as f32).abs() <= 1.01, "depth {i} quantized too far: {v}");
+    fn basic_via_compound_forces_companion_lsb_zero_and_keeps_device_high_byte() {
+        // lfo_depth (device plock type 0x28): -128.0..=127.99 <-> 0..=32767.
+        // Every integer depth must encode to a companion LSB of 0x00 (so the
+        // 0x6080->0x6000 readback hazard cannot occur) while the device high byte
+        // matches the naive/legacy compound MSB (== prior hardware state).
+        for depth in -128..=127 {
+            let f = basic_via_compound_f32(depth as f32, -128.0, 127.99, 32767);
+            let raw = compound_raw(f, -128.0, 127.99, 32767);
+            assert_eq!(raw & 0x00FF, 0x0000, "lfo_depth {depth}: LSB not zero ({raw:#06x})");
+            let legacy_msb = compound_raw(depth as f32, -128.0, 127.99, 32767) >> 8;
+            assert_eq!(raw >> 8, legacy_msb, "lfo_depth {depth}: device byte drifted");
         }
-        // sample_start/end scale: 0.0..=120.0 <-> 0..=30720; integer positions
-        // encode to LSB 0 and must survive essentially unchanged.
-        for i in 0..=120 {
-            let v = compound_plock_quantize(i as f32, 0.0, 120.0, 30720.0);
-            let raw = (v * 256.0) as u16;
-            assert_eq!(raw & 0x0080, 0);
-            assert_eq!(raw, (i as u16) * 256, "integer position {i} must encode exactly");
-            assert!((v - i as f32).abs() < 0.01, "integer position {i} drifted: {v}");
+        // sample_start / sample_end (types 0x0C / 0x0D): 0.0..=120.0 <-> 0..=30720
+        // (scale factor 256 => integer positions are already MSB-exact, LSB 0).
+        for pos in 0..=120 {
+            let f = basic_via_compound_f32(pos as f32, 0.0, 120.0, 30720);
+            let raw = compound_raw(f, 0.0, 120.0, 30720);
+            assert_eq!(raw, (pos as u16) << 8, "sample pos {pos} must encode MSB-exact, LSB 0");
         }
+        // A fractional sample position snaps down to the device-representable byte
+        // with a zero companion (no bit-7 in the LSB).
+        let f = basic_via_compound_f32(95.5, 0.0, 120.0, 30720);
+        let raw = compound_raw(f, 0.0, 120.0, 30720);
+        assert_eq!(raw & 0x00FF, 0, "fractional sample pos must still zero the companion LSB");
+        assert_eq!(raw >> 8, 95, "fractional sample pos snaps to the low device byte");
+    }
+
+    #[test]
+    fn lfo_depth_bank_b_values_match_captured_device_bytes() {
+        // Regression pin to the device-saved capture state-B05: bank B authored
+        // lfo_depth as integers and the CY track stored high bytes 89 / 109 for
+        // declared 50 / 90 (contract kept as f32 -128..127.99, byte = MSB of the
+        // compound). The corrected encoder must reproduce those exact device bytes.
+        for (declared, device_byte) in [(50.0f32, 89u16), (90.0, 109), (30.0, 79), (0.0, 64)] {
+            let f = basic_via_compound_f32(declared, -128.0, 127.99, 32767);
+            let raw = compound_raw(f, -128.0, 127.99, 32767);
+            assert_eq!(raw >> 8, device_byte, "lfo_depth {declared} -> byte {device_byte}");
+            assert_eq!(raw & 0x00FF, 0, "lfo_depth {declared}: companion LSB must be 0");
+        }
+    }
+
+    #[test]
+    fn compound_locks_round_trip_symmetrically_through_the_read_path() {
+        // Write lfo_depth / sample_start / sample_end through the daemon apply path,
+        // encode via the exact sysex path the daemon sends, re-decode, and read back
+        // through `collect_trig_plocks` (the compound getter). LSB=0 makes the read
+        // path exact and stable without any read-path change.
+        let mut project = RytmProject::try_default().unwrap();
+        {
+            let trig = &mut project.work_buffer_mut().pattern_mut().tracks_mut()[0].trigs_mut()[0];
+            trig.set_trig_enable(true);
+            apply_parameter_lock_set(trig, "lfo_depth", &json!(50)).unwrap();
+            apply_parameter_lock_set(trig, "sample_start", &json!(95)).unwrap();
+            apply_parameter_lock_set(trig, "sample_end", &json!(120)).unwrap();
+        }
+        let bytes = project.work_buffer().pattern().as_sysex().expect("as_sysex");
+        let mut reparsed = RytmProject::try_default().unwrap();
+        reparsed.update_from_sysex_response(&bytes).expect("decode");
+        let trig = &reparsed.work_buffer().pattern().tracks()[0].trigs()[0];
+        let locks = collect_trig_plocks(trig);
+
+        // lfo_depth reads back within one device-byte quantum of the declared value
+        // (device resolution is ~2 depth units per byte) and inside the gate.
+        let depth = locks["lfo_depth"].as_f64().expect("lfo_depth present");
+        assert!((depth - 50.0).abs() < 2.0, "lfo_depth read back {depth}");
+        let start = locks["sample_start"].as_f64().expect("sample_start present");
+        assert!((start - 95.0).abs() < 1.0, "sample_start read back {start}");
+        let end = locks["sample_end"].as_f64().expect("sample_end present");
+        assert!((end - 120.0).abs() < 1.0, "sample_end read back {end}");
+    }
+
+    #[test]
+    fn midpoint_encoded_locks_match_pattern_h_byte_semantics() {
+        // pattern.h byte semantics for the midpoint (64-centered) families:
+        //   AMP_PAN 0x1E     0(left)..64(ctr)..127(right)
+        //   FLT_ENV 0x17     0(-64)..64(0)..127(+63)
+        //   SMP_TUNE 0x08    0x40=0, 0x28=-24, 0x58=+24
+        //   LFO_SPEED 0x21   64(0), +/-1 per unit
+        // rytm-rs encodes byte = value + 64; we assert the round-safe subset and the
+        // negative extremes that the CH hard-left forensics turned on.
+        let project = set_plock("amp_pan", json!(-64));
+        assert_eq!(head_trig(&project).plock_get_amplitude_pan().unwrap(), Some(-64)); // byte 0x00 (hard left)
+        let project = set_plock("amp_pan", json!(-20));
+        assert_eq!(head_trig(&project).plock_get_amplitude_pan().unwrap(), Some(-20)); // byte 0x2C = 44
+        let project = set_plock("amp_pan", json!(20));
+        assert_eq!(head_trig(&project).plock_get_amplitude_pan().unwrap(), Some(20)); // byte 0x54 = 84
+
+        let project = set_plock("filter_envelope", json!(-64));
+        assert_eq!(head_trig(&project).plock_get_filter_envelope_amount().unwrap(), Some(-64));
+        let project = set_plock("filter_envelope", json!(63));
+        assert_eq!(head_trig(&project).plock_get_filter_envelope_amount().unwrap(), Some(63));
+
+        let project = set_plock("sample_tune", json!(-24));
+        assert_eq!(head_trig(&project).plock_get_sample_tune().unwrap(), Some(-24)); // byte 0x28 = 40
+        let project = set_plock("sample_tune", json!(24));
+        assert_eq!(head_trig(&project).plock_get_sample_tune().unwrap(), Some(24)); // byte 0x58 = 88
+
+        let project = set_plock("lfo_speed", json!(-63));
+        assert_eq!(head_trig(&project).plock_get_lfo_speed().unwrap(), Some(-63));
     }
 }
