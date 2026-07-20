@@ -5,19 +5,25 @@ import { RustDaemonClient } from "../rpc/RustDaemonClient.ts";
 
 // Closed-loop pattern audition: for each slot, activate the pattern, run the
 // sequencer from the daemon's generated clock at the pattern's tempo, capture
-// a bounded stereo WAV, and verify the sidecar analysis. FILL-conditioned
-// fill slots (x07/x08) are EXPECTED silent in normal playback; arrangement
-// slots must be audible.
+// a bounded stereo WAV, and verify the sidecar analysis. Every Moonshot slot
+// carries its own base groove (FILL conditions only gate extra tears), so
+// every slot must be audible.
 //
-//   npm run audition:project                      all 24 Techno Sessions slots
+//   npm run audition:project                      all 36 Moonshot slots
 //   npm run audition:project -- A01 B04 C02      specific slots
 
 const TEMPO: Record<string, number> = {
-  A01: 134, A02: 134, A03: 138, A04: 138, A05: 138, A06: 130, A07: 134, A08: 138,
-  B01: 140, B02: 140, B03: 136, B04: 132, B05: 138, B06: 142, B07: 138, B08: 134,
-  C01: 128, C02: 128, C03: 126, C04: 126, C05: 120, C06: 120, C07: 128, C08: 126,
+  // Bank A - IGNITION: driving, rising through the peak, easing into the break.
+  A01: 132, A02: 132, A03: 134, A04: 134, A05: 136, A06: 136, A07: 138, A08: 138,
+  A09: 132, A10: 128, A11: 132, A12: 132,
+  // Bank B - ORBIT: steady hypnotic pocket.
+  B01: 132, B02: 132, B03: 132, B04: 132, B05: 130, B06: 130, B07: 130, B08: 130,
+  B09: 132, B10: 134, B11: 132, B12: 132,
+  // Bank C - ESCAPE VELOCITY: broken, dipping for the breakdown, landing at speed.
+  C01: 130, C02: 130, C03: 128, C04: 128, C05: 126, C06: 126, C07: 124, C08: 126,
+  C09: 118, C10: 118, C11: 130, C12: 132,
 };
-const FILL_SLOTS = new Set(["A07", "A08", "B07", "B08", "C07", "C08"]);
+const FILL_SLOTS = new Set<string>(); // Moonshot has no fill-only slots.
 const CAPTURE_MS = 8_000;
 
 interface CaptureResult {
