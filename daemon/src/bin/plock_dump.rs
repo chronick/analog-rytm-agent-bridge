@@ -172,37 +172,32 @@ fn dump_capture(path: &str) {
         "  --- {used} used slots ({companions} compound-companion LSB slots, track_nr=128/type=128) ---"
     );
 
-    // Adjacency check for compound locks: every companion should sit at exactly
-    // one index after a real compound-typed slot (get_compound_plock's i+1 assumption).
-    let mut adjacency_issues = Vec::new();
+    // Layout report for the historically-compound types (0x28 LFO_DEPTH,
+    // 0x0C SMP_START, 0x0D SMP_END). pattern.h defines all three as BASIC
+    // single-byte locks; the patched rytm-rs fork writes them that way (no
+    // companion). A trailing track_nr=128/type=128 companion at i+1 marks a
+    // slot written by the legacy two-slot compound path.
     for (i, slot) in inner.iter().enumerate() {
         let track_nr = slot["track_nr"].as_u64().unwrap_or(0xFF) as u8;
         let plock_type = slot["plock_type"].as_u64().unwrap_or(0xFF) as u8;
-        let is_compound_type = matches!(plock_type, 0x0C | 0x0D | 0x28);
-        if track_nr <= 12 && is_compound_type {
-            // Expect the next slot to be a companion.
-            let next = inner.get(i + 1);
-            let next_is_companion = next
+        if track_nr <= 12 && matches!(plock_type, 0x0C | 0x0D | 0x28) {
+            let next_is_companion = inner
+                .get(i + 1)
                 .map(|n| {
                     n["track_nr"].as_u64() == Some(COMPOUND_COMPANION_TRACK as u64)
                         && n["plock_type"].as_u64() == Some(COMPOUND_COMPANION_TYPE as u64)
                 })
                 .unwrap_or(false);
-            if !next_is_companion {
-                adjacency_issues.push(format!(
-                    "slot {i} (track {} type 0x{plock_type:02X} {}) has NO companion at i+1",
-                    track_name(track_nr),
-                    plock_type_name(plock_type)
-                ));
-            }
-        }
-    }
-    if adjacency_issues.is_empty() {
-        println!("  adjacency: OK (every compound-typed slot has an i+1 companion, or none present)");
-    } else {
-        println!("  adjacency: BROKEN");
-        for issue in &adjacency_issues {
-            println!("    !! {issue}");
+            let layout = if next_is_companion {
+                "LEGACY compound (companion LSB at i+1)"
+            } else {
+                "basic single-byte (per pattern.h)"
+            };
+            println!(
+                "  layout: slot {i} (track {} type 0x{plock_type:02X} {}) -> {layout}",
+                track_name(track_nr),
+                plock_type_name(plock_type)
+            );
         }
     }
 
