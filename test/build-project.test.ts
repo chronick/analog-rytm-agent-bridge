@@ -76,16 +76,20 @@ test("plock sugar emits set_parameter_lock with 1-based key -> 0-based step, aft
   assert.ok(firstLock > lastTrig, "plock ops must follow all set_trig ops");
 });
 
-test("clear:true emits clear_trig for '.' positions before each track's set_trigs, grouped per track", () => {
+test("clear:true emits clear_pattern_plocks first, then clear_trig for '.' positions before each track's set_trigs", () => {
   const ops = gridOperations({
     slot: "C03",
     name: "clear",
     clear: true,
     tracks: { BD: { grid: "X." }, SD: { grid: ".X" } },
   });
-  // Per-track grouping: BD clears+trigs, then SD clears+trigs.
+  // Pool-rebuild purge is the FIRST op of the pattern batch: the declaration's
+  // locks are the complete intended set, so the p-lock pool is rebuilt from
+  // scratch (also retires legacy zero-fill ghosts / orphaned companions).
+  assert.deepEqual(ops[0], { type: "clear_pattern_plocks", pattern: "C03" });
+  // Then per-track grouping: BD clears+trigs, then SD clears+trigs.
   assert.deepEqual(
-    ops.map((op) => [op.type, (op as { track: string }).track, (op as { step: number }).step]),
+    ops.slice(1).map((op) => [op.type, (op as { track: string }).track, (op as { step: number }).step]),
     [
       ["clear_trig", "BD", 1], // BD '.' at index 1
       ["set_trig", "BD", 0], // BD 'X' at index 0
@@ -95,9 +99,10 @@ test("clear:true emits clear_trig for '.' positions before each track's set_trig
   );
 });
 
-test("without clear, no clear_trig ops are emitted", () => {
+test("without clear, no clear_trig or clear_pattern_plocks ops are emitted", () => {
   const ops = gridOperations({ slot: "A04", name: "noclear", tracks: { BD: { grid: "X..." } } });
   assert.equal(ops.filter((op) => op.type === "clear_trig").length, 0);
+  assert.equal(ops.filter((op) => op.type === "clear_pattern_plocks").length, 0);
 });
 
 test("track length and raw pattern.plocks passthrough are preserved and ordered last", () => {

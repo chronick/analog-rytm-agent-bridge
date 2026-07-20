@@ -130,6 +130,7 @@ const OPERATION_FIELDS: Record<string, { required: string[]; optional: string[] 
   clear_trig: { required: ["track", "step"], optional: ["pattern"] },
   set_parameter_lock: { required: ["track", "step", "parameter", "value"], optional: ["pattern"] },
   clear_parameter_lock: { required: ["track", "step", "parameter"], optional: ["pattern"] },
+  clear_pattern_plocks: { required: [], optional: ["pattern"] },
   set_track_length: { required: ["track", "steps"], optional: ["pattern"] },
   set_track_machine: { required: ["track", "machine"], optional: ["pattern"] },
   copy_pattern: { required: ["sourcePattern", "targetPattern"], optional: [] },

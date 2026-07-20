@@ -869,6 +869,15 @@ fn apply_persistent_operation(
                 .ok_or_else(|| format!("step {step} must be between 0 and 63"))?;
             apply_parameter_lock_clear(trig, parameter)
         }
+        PersistentOperation::ClearPatternPlocks { pattern } => {
+            // Full pool purge (all 72 slots -> unset sentinel, slots released).
+            // This is the only path that retires slot debris granular clears
+            // cannot reach: v1 zero-fill ghosts (0x00 columns baked in by the
+            // pre-sentinel-fill claim path, audible as e.g. pan hard-left) and
+            // orphaned legacy track_nr=128 compound companions.
+            work_buffer_pattern_mut(project, pattern)?.clear_all_plocks();
+            Ok(())
+        }
         PersistentOperation::SetTrackLength {
             pattern,
             track,
@@ -4231,6 +4240,63 @@ mod tests {
                 trig["step"]
             );
         }
+    }
+
+    #[test]
+    fn clear_pattern_plocks_purges_the_whole_pool_and_marks_the_pattern_changed() {
+        // Pool-rebuild semantics: the op must release every pool slot (sentinel
+        // reset), retiring debris no granular clear reaches — v1 zero-fill
+        // ghosts inside claimed slots and orphaned legacy compound companions.
+        let mut capture = StateCapture {
+            project: RytmProject::try_default().unwrap(),
+            pattern_raw: Vec::new(),
+            kit_raw: Vec::new(),
+            global_raw: Vec::new(),
+            settings_raw: Vec::new(),
+            song_raw: BTreeMap::from([("work_buffer".to_string(), Vec::new())]),
+        };
+        let setup: Vec<PersistentOperation> = serde_json::from_value(json!([
+            { "type": "set_trig", "track": "BD", "step": 0 },
+            { "type": "set_trig", "track": "CH", "step": 1 },
+            { "type": "set_parameter_lock", "track": "BD", "step": 0, "parameter": "filter_cutoff", "value": 84 },
+            { "type": "set_parameter_lock", "track": "CH", "step": 1, "parameter": "amp_pan", "value": -20 },
+            { "type": "set_parameter_lock", "track": "CH", "step": 1, "parameter": "lfo_depth", "value": 50 }
+        ]))
+        .unwrap();
+        apply_persistent_operations(&mut capture, &setup).unwrap();
+        assert!(!used_pool_slots(&capture.project).is_empty());
+
+        let purge: Vec<PersistentOperation> =
+            serde_json::from_value(json!([{ "type": "clear_pattern_plocks" }])).unwrap();
+        let changed = apply_persistent_operations(&mut capture, &purge).unwrap();
+        assert!(changed.pattern, "pool purge must mark the pattern changed");
+        assert!(!changed.kit, "pool purge must not re-send the kit");
+
+        // Every slot released and fully sentinel-reset.
+        assert!(used_pool_slots(&capture.project).is_empty());
+        let value = serde_json::to_value(capture.project.work_buffer().pattern()).unwrap();
+        for slot in value["parameter_lock_pool"]["inner"].as_array().unwrap() {
+            assert!(slot["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|byte| byte.as_u64() == Some(0xFF)));
+        }
+
+        // Trigs survive; the summary reports no locks anywhere.
+        let summary = state_summary(&capture.project);
+        let mut enabled_trigs = 0;
+        for track in summary["pattern"]["tracks"].as_array().unwrap() {
+            for trig in track["trigs"].as_array().unwrap() {
+                enabled_trigs += 1;
+                assert_eq!(trig["locks"], json!({}), "no locks may survive the purge");
+            }
+        }
+        assert_eq!(enabled_trigs, 2, "trigs themselves survive the pool purge");
+
+        // Idempotent: purging an already-clean pool reports no pattern change.
+        let changed = apply_persistent_operations(&mut capture, &purge).unwrap();
+        assert!(!changed.pattern, "second purge must be a no-op");
     }
 
     #[test]

@@ -32,6 +32,8 @@ test("validates core persistent operations", () => {
     operations: [
       { type: "set_trig", pattern: "A01", track: "BD", step: 0, velocity: 110, condition: "1:2" },
       { type: "set_parameter_lock", track: "BD", step: 0, parameter: "filter_frequency", value: 88 },
+      { type: "clear_pattern_plocks", pattern: "A01" },
+      { type: "clear_pattern_plocks" },
       { type: "set_track_length", track: "CH", steps: 15 },
       { type: "set_sound_parameter", track: "BD", page: "filter", parameter: "filter_type", value: "Lp2" },
       { type: "set_fx_parameter", effect: "delay", parameter: "ping_pong", value: true },

@@ -47,13 +47,18 @@ import type { RytmPersistentOperation } from "../domain/types.ts";
 //     "plocks": { "1": { "filter_cutoff": 40 } }  // per-step -> set_parameter_lock
 //   }
 //
-// Emission order per pattern: for each declared track, clears -> set_trigs ->
-// set_track_length; then every track's plock-sugar (as set_parameter_lock, step
-// keys converted 1-based -> 0-based); then the raw `pattern.plocks` passthrough.
+// Emission order per pattern: for a `clear` pattern, one clear_pattern_plocks
+// FIRST (full p-lock pool purge — the declaration's locks are the complete
+// intended set, so the pool is rebuilt from scratch; this also retires legacy
+// pool debris such as zero-fill ghosts and orphaned compound companion slots);
+// then for each declared track, clears -> set_trigs -> set_track_length; then
+// every track's plock-sugar (as set_parameter_lock, step keys converted
+// 1-based -> 0-based); then the raw `pattern.plocks` passthrough.
 //
-// `clear: true` on a pattern emits clear_trig for every '.' position of every
-// DECLARED track BEFORE that track's set_trigs (declare an all-dots grid to wipe
-// a track). Declare all tracks in every pattern for deterministic rebuilds.
+// `clear: true` on a pattern also emits clear_trig for every '.' position of
+// every DECLARED track BEFORE that track's set_trigs (declare an all-dots grid
+// to wipe a track). Declare all tracks in every pattern for deterministic
+// rebuilds.
 //
 // The optional `kit` section is a raw set_kit_parameter (etc.) op array applied
 // as one batch after `sounds` and before patterns (e.g. retrig rate/length,
@@ -117,6 +122,12 @@ const VELOCITY: Record<string, number> = { X: 120, x: 96, o: 40, ":": 96, c: 96 
 
 export function gridOperations(pattern: PatternDecl): RytmPersistentOperation[] {
   const operations: RytmPersistentOperation[] = [];
+  // Pass 0: for a `clear` pattern, purge the whole p-lock pool FIRST so the
+  // batch rebuilds it from scratch (the declaration's locks are the complete
+  // intended set; the purge also retires legacy pool debris).
+  if (pattern.clear) {
+    operations.push({ type: "clear_pattern_plocks", pattern: pattern.slot } as RytmPersistentOperation);
+  }
   // Pass 1 (per track): clears (for a `clear` pattern) -> set_trigs -> length.
   // microtiming/retrigs merge into the matching trigged step's set_trig.
   for (const [track, decl] of Object.entries(pattern.tracks)) {

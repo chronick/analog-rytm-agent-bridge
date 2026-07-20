@@ -98,6 +98,16 @@ pub enum PersistentOperation {
         step: u8,
         parameter: String,
     },
+    /// Full parameter-lock pool purge for one pattern (all tracks, all steps).
+    ///
+    /// Pool-rebuild primitive: resets every pool slot to the unset sentinel,
+    /// which also retires slot debris no per-step clear can reach (v1 zero-fill
+    /// ghosts baked into claimed slots, orphaned legacy compound companions).
+    /// Declarative rebuilds emit this first, then re-author the intended locks.
+    ClearPatternPlocks {
+        #[serde(default)]
+        pattern: Option<String>,
+    },
     SetTrackLength {
         #[serde(default)]
         pattern: Option<String>,
@@ -1357,6 +1367,9 @@ fn validate_operation(operation: &PersistentOperation) -> Result<(), String> {
             validate_track_step(track, *step)?;
             validate_safe_id(parameter, "parameter")?;
         }
+        PersistentOperation::ClearPatternPlocks { pattern } => {
+            validate_optional_pattern(pattern)?;
+        }
         PersistentOperation::SetTrackLength {
             pattern,
             track,
@@ -1641,6 +1654,16 @@ fn apply_operations(
                         .get_mut(&trig_key(track, *step))
                 {
                     trig.locks.remove(parameter);
+                }
+            }
+            PersistentOperation::ClearPatternPlocks { pattern } => {
+                // The pool holds only lock values; trigs themselves survive a
+                // pool purge (mirrors the hardware pattern.clear_all_plocks()).
+                for trig in ensure_pattern(patterns, pattern.as_deref().unwrap_or(active_pattern))
+                    .trigs
+                    .values_mut()
+                {
+                    trig.locks.clear();
                 }
             }
             PersistentOperation::SetTrackLength {
@@ -2730,6 +2753,53 @@ mod tests {
         assert_eq!(locks["amp_pan"], json!(-40));
         assert_eq!(locks["sample_loop"], json!(true));
         assert_eq!(locks["filter_type"], json!("Hp1"));
+    }
+
+    #[test]
+    fn clear_pattern_plocks_validates_and_purges_all_locks_but_keeps_trigs() {
+        // validate/apply parity for the pool-rebuild op: the mock mirrors the
+        // hardware semantics (pool purge clears every lock in the pattern while
+        // the trigs themselves survive).
+        let mut state = MockBridgeState::default();
+        state
+            .apply_now(&json!({
+                "expectedRevision": 0,
+                "operations": [
+                    { "type": "set_trig", "track": "BD", "step": 0 },
+                    { "type": "set_trig", "track": "CH", "step": 1 },
+                    { "type": "set_parameter_lock", "track": "BD", "step": 0, "parameter": "filter_cutoff", "value": 84 },
+                    { "type": "set_parameter_lock", "track": "CH", "step": 1, "parameter": "amp_pan", "value": -20 },
+                ],
+            }))
+            .unwrap();
+        state
+            .apply_now(&json!({
+                "expectedRevision": 1,
+                "operations": [
+                    { "type": "clear_pattern_plocks" },
+                ],
+            }))
+            .unwrap();
+        let state_json = state.inspect_state();
+        let trigs = state_json["activePattern"]["trigs"].as_array().unwrap();
+        assert_eq!(trigs.len(), 2, "trigs must survive the pool purge");
+        for trig in trigs {
+            assert_eq!(
+                trig["locks"],
+                json!({}),
+                "all locks must be purged for trig {trig}"
+            );
+        }
+
+        // Explicit pattern slots validate too; junk slots are rejected.
+        let accepted: PersistentOperation =
+            serde_json::from_value(json!({ "type": "clear_pattern_plocks", "pattern": "A01" }))
+                .unwrap();
+        validate_operation(&accepted).unwrap();
+        let rejected: PersistentOperation =
+            serde_json::from_value(json!({ "type": "clear_pattern_plocks", "pattern": "nope" }))
+                .unwrap();
+        validate_operation(&rejected).unwrap_err();
     }
 
     #[test]

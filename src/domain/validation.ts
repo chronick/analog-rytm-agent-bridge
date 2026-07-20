@@ -97,6 +97,11 @@ export function validatePersistentOperation(operation: RytmPersistentOperation, 
       assertSafeId(operation.parameter, "parameter");
       return;
 
+    case "clear_pattern_plocks":
+      requireCapability(capabilities.patternEdit, "patternEdit");
+      if (operation.pattern) assertPatternSlot(operation.pattern);
+      return;
+
     case "set_track_length":
       requireCapability(capabilities.patternEdit, "patternEdit");
       assertTrackId(operation.track);

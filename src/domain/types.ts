@@ -170,6 +170,13 @@ export type RytmPersistentOperation =
       parameter: string;
     }
   | {
+      // Full parameter-lock pool purge for one pattern (all tracks, all steps).
+      // Pool-rebuild primitive: also retires slot debris granular clears cannot
+      // reach (legacy zero-fill ghosts, orphaned compound companion slots).
+      type: "clear_pattern_plocks";
+      pattern?: RytmPatternSlot;
+    }
+  | {
       type: "set_track_length";
       pattern?: RytmPatternSlot;
       track: RytmTrackId;
