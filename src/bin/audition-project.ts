@@ -24,6 +24,13 @@ const TEMPO: Record<string, number> = {
   C09: 118, C10: 118, C11: 130, C12: 132,
   // Bank D - TRIBE: drum-circle momentum, building through the ceremony.
   D01: 128, D02: 130, D03: 132, D04: 130, D05: 132, D06: 134,
+  // Bank E - DRIFT: compositional drummy ambient (kit 2, Dm swamp lean).
+  // NB: commanded tempos are labels only - the device self-clocks (see memory).
+  E01: 120, E02: 120, E03: 120, E04: 120, E05: 118, E06: 120,
+  E07: 120, E08: 122, E09: 118, E10: 122, E11: 122, E12: 122,
+  // Bank F - EMBER: the floor re-emerges through the ambience (kit 2, Am).
+  F01: 118, F02: 120, F03: 120, F04: 122, F05: 122, F06: 124,
+  F07: 124, F08: 126, F09: 124, F10: 124, F11: 124, F12: 122,
 };
 const FILL_SLOTS = new Set<string>(); // Moonshot has no fill-only slots.
 const CAPTURE_MS = 8_000;
