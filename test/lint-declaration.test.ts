@@ -95,6 +95,28 @@ test("condition string typo is an error (per-step and whole-track)", () => {
   assert.match(errors(lintPatterns([wholeTrack]))[0].message, /"FILL" is not an accepted trig condition/);
 });
 
+test("a per-step velocities override on trigged steps lints clean", () => {
+  const pattern = cleanPattern();
+  track(pattern, "BD").velocities = { "1": 127, "5": 64 }; // both trigged steps
+  assert.deepEqual(lintPatterns([pattern]), []);
+});
+
+test("velocities on an untrigged step is an error; out-of-range value too", () => {
+  const untrigged = cleanPattern();
+  track(untrigged, "BD").velocities = { "2": 100 }; // step 2 is '.'
+  const found = errors(lintPatterns([untrigged]));
+  assert.equal(found.length, 1);
+  assert.match(found[0].message, /velocities\["2"\]: step 2 is not trigged/);
+
+  const range = cleanPattern();
+  track(range, "BD").velocities = { "1": 200 };
+  assert.match(errors(lintPatterns([range]))[0].message, /velocities\["1"\]: must be an integer between 1 and 127/);
+
+  const zero = cleanPattern();
+  track(zero, "BD").velocities = { "1": 0 };
+  assert.match(errors(lintPatterns([zero]))[0].message, /between 1 and 127/);
+});
+
 test("microtiming on an untrigged step is an error; out-of-range is too", () => {
   const untrigged = cleanPattern();
   track(untrigged, "BD").microtiming = { "2": -6 }; // step 2 is '.'

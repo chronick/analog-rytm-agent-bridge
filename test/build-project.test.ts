@@ -45,6 +45,20 @@ test("microtiming and retrig merge into the matching trigged step's set_trig", (
   assert.equal(step3.retrig, true);
 });
 
+test("velocities override the grid symbol's velocity for the matching step's set_trig", () => {
+  const ops = gridOperations({
+    slot: "A05",
+    name: "vel",
+    tracks: { SD: { grid: "x..o x..o", velocities: { "1": 127, "4": 20 } } },
+  });
+  const trigs = setTrigs(ops) as Array<Extract<RytmPersistentOperation, { type: "set_trig" }>>;
+  // step 1 (grid 'x' -> default 96) overridden to 127; step 4 (grid 'o' -> 40) to 20.
+  assert.equal(trigs.find((op) => op.step === 0)!.velocity, 127);
+  assert.equal(trigs.find((op) => op.step === 3)!.velocity, 20);
+  // step 5 ('x') keeps the grid-symbol default (no override).
+  assert.equal(trigs.find((op) => op.step === 4)!.velocity, 96);
+});
+
 test("plock sugar emits set_parameter_lock with 1-based key -> 0-based step, after all trigs", () => {
   const ops = gridOperations({
     slot: "B02",

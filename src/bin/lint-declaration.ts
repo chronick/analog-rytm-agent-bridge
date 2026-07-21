@@ -34,7 +34,7 @@ const CANONICAL_TRACKS = ["BD", "SD", "RS", "CP", "BT", "LT", "MT", "HT", "CY", 
 const PATTERN_SLOT = /^[A-H](0[1-9]|1[0-6])$/;
 const GRID_LENGTHS = new Set([16, 32, 48, 64]);
 const PATTERN_KEYS = new Set(["slot", "name", "clear", "tracks", "plocks"]);
-const TRACK_KEYS = new Set(["grid", "condition", "conditions", "length", "microtiming", "retrigs", "plocks"]);
+const TRACK_KEYS = new Set(["grid", "condition", "conditions", "length", "microtiming", "velocities", "retrigs", "plocks"]);
 const SOUND_KEYS = new Set(["machine", "machineParams", "sample", "filter", "amp", "lfo", "settings"]);
 const DECLARATION_KEYS = new Set([
   "project", "machines", "patterns", "sounds", "kit", "scenes", "performances", "song", "samples", "sampleDirectory",
@@ -386,6 +386,17 @@ export function lintPattern(pattern: unknown, index: number): LintFinding[] {
         for (const [key, value] of Object.entries(decl.microtiming)) {
           if (typeof value !== "number" || !Number.isInteger(value) || value < -24 || value > 24) {
             error(`${track}.microtiming["${key}"]: must be an integer between -24 and 24, got ${JSON.stringify(value)}`);
+          }
+        }
+      }
+    }
+    if (decl.velocities !== undefined) {
+      if (!isRecord(decl.velocities)) error(`${track}: velocities must be an object of 1-based steps`);
+      else {
+        findings.push(...lintStepKeys(section, track, "velocities", decl.velocities, grid.length, trigged));
+        for (const [key, value] of Object.entries(decl.velocities)) {
+          if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 127) {
+            error(`${track}.velocities["${key}"]: must be an integer between 1 and 127, got ${JSON.stringify(value)}`);
           }
         }
       }

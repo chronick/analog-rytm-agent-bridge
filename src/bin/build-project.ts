@@ -43,6 +43,8 @@ import type { RytmPersistentOperation } from "../domain/types.ts";
 //     "condition": "50%",             // optional whole-track default
 //     "conditions": { "5": "75%" },   // optional per-step override
 //     "microtiming": { "3": -6 },     // -24..24, merged into the step's set_trig
+//     "velocities": { "5": 112 },     // 1-based step -> 1..127, overrides the grid
+//                                      //   symbol's velocity for that step's set_trig
 //     "retrigs": [5, 13],              // 1-based steps -> set_trig retrig:true
 //     "plocks": { "1": { "filter_cutoff": 40 } }  // per-step -> set_parameter_lock
 //   }
@@ -80,6 +82,7 @@ export interface TrackDecl {
   conditions?: Record<string, string>;
   length?: number;
   microtiming?: Record<string, number>; // 1-based step -> -24..24
+  velocities?: Record<string, number>; // 1-based trigged step -> 1..127, overrides the grid symbol's velocity
   retrigs?: number[]; // 1-based trigged steps to enable retrig on
   plocks?: Record<string, Record<string, number | boolean | string>>; // 1-based step -> param map
 }
@@ -145,12 +148,16 @@ export function gridOperations(pattern: PatternDecl): RytmPersistentOperation[] 
       const condition = decl.conditions?.[key] ?? decl.condition;
       const microTiming = decl.microtiming?.[key];
       const retrig = decl.retrigs?.includes(index + 1);
+      // A per-step `velocities` override (1..127) wins over the grid symbol's
+      // default velocity for that step; the grid symbol still decides whether
+      // there is a trig at all.
+      const velocity = decl.velocities?.[key] ?? VELOCITY[symbol] ?? 96;
       operations.push({
         type: "set_trig",
         pattern: pattern.slot,
         track,
         step: index,
-        velocity: VELOCITY[symbol] ?? 96,
+        velocity,
         ...(microTiming !== undefined ? { microTiming } : {}),
         ...(condition ? { condition } : {}),
         ...(retrig ? { retrig: true } : {}),
