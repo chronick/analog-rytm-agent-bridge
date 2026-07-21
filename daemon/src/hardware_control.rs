@@ -352,15 +352,38 @@ impl HardwareBridgeState {
         let track = required_string(object, "track")?;
         let track_index = track_index(track)?;
         let parameter = required_string(object, "parameter")?;
-        if parameter != "track_level" {
-            return Err("hardware realtime parameter currently supports track_level".to_string());
-        }
+        // Map the live parameter id to its MIDI address. Both parameters live in
+        // APPENDIX C.3 GENERAL KIT PARAMETERS / COMMON (p.85) of the OS 1.72 user
+        // manual (docs/manual/Analog-Rytm-MKII-User-Manual_ENG_OS1.72_250130.md,
+        // section "C.3 GENERAL KIT PARAMETERS"), mirrored in docs/reference/rytm.yaml
+        // under kit_parameters:
+        //   Track Level        -> CC 95, NRPN [1, 100]
+        //   Track Mute (seq.)  -> CC 94, NRPN [1, 101]
+        //
+        // VALUE SEMANTICS for track_mute: the C.3 table assigns the CC/NRPN but does
+        // not enumerate per-value meaning. Track Mute (labelled "seq. mute" in C.3)
+        // is a two-state control, so it follows the standard MIDI switch-CC
+        // convention the Rytm uses for on/off parameters: values 0-63 = OFF
+        // (track audible / unmuted), 64-127 = ON (track muted). Callers therefore
+        // send 0 to unmute a track and 127 to mute it. The raw 0-127 value is passed
+        // through unchanged so the response shape is identical to track_level.
+        let (cc, nrpn_msb, nrpn_lsb) = match parameter {
+            "track_level" => (95u8, 1u8, 100u8),
+            "track_mute" => (94u8, 1u8, 101u8),
+            _ => {
+                return Err(
+                    "hardware realtime parameter supports track_level or track_mute".to_string(),
+                )
+            }
+        };
         let value = midi_value(object.get("value"), "value")?;
         let lane = optional_string(object, "lane")?.unwrap_or("cc");
         let channel = self.track_channel(track_index)?;
         match lane {
-            "cc" => self.with_session(|session| send_cc(session, channel, 95, value))?,
-            "nrpn" => self.with_session(|session| send_nrpn(session, channel, 1, 100, value))?,
+            "cc" => self.with_session(|session| send_cc(session, channel, cc, value))?,
+            "nrpn" => {
+                self.with_session(|session| send_nrpn(session, channel, nrpn_msb, nrpn_lsb, value))?
+            }
             _ => return Err("lane must be cc or nrpn".to_string()),
         }
         let result = json!({
@@ -1496,6 +1519,9 @@ fn changed_between(current: &Value, target: &Value) -> ChangedObjects {
         global: current["global"] != target["global"],
         settings: current["settings"] != target["settings"],
         songs: songs.into_iter().collect(),
+        // Reconciliation compares work-buffer summaries only; indexed kits are
+        // resolved per-operation-batch, never in this whole-device diff.
+        kits: Vec::new(),
     }
 }
 

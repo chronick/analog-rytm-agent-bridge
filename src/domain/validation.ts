@@ -114,6 +114,13 @@ export function validatePersistentOperation(operation: RytmPersistentOperation, 
       assertTrackId(operation.track);
       if (operation.pattern) assertPatternSlot(operation.pattern);
       assertSafeId(operation.machine, "machine");
+      assertOptionalKit(operation.kit);
+      return;
+
+    case "set_pattern_kit":
+      requireCapability(capabilities.patternEdit, "patternEdit");
+      if (operation.pattern) assertPatternSlot(operation.pattern);
+      assertKit(operation.kit);
       return;
 
     case "copy_pattern":
@@ -128,6 +135,7 @@ export function validatePersistentOperation(operation: RytmPersistentOperation, 
       if (operation.track) assertTrackId(operation.track);
       assertSafeId(operation.parameter, "parameter");
       assertControlValue(operation.value, "value");
+      assertOptionalKit(operation.kit);
       return;
 
     case "set_sound_parameter":
@@ -138,6 +146,7 @@ export function validatePersistentOperation(operation: RytmPersistentOperation, 
       }
       assertSafeId(operation.parameter, "parameter");
       assertControlValue(operation.value, "value");
+      assertOptionalKit(operation.kit);
       return;
 
     case "set_fx_parameter":
@@ -147,6 +156,7 @@ export function validatePersistentOperation(operation: RytmPersistentOperation, 
       }
       assertSafeId(operation.parameter, "parameter");
       assertControlValue(operation.value, "value");
+      assertOptionalKit(operation.kit);
       return;
 
     case "set_global_parameter":
@@ -165,29 +175,34 @@ export function validatePersistentOperation(operation: RytmPersistentOperation, 
       if (operation.pattern) assertPatternSlot(operation.pattern);
       assertIntegerRange(operation.slot, "slot", 0, 127);
       assertSafeId(operation.sampleId, "sampleId");
+      assertOptionalKit(operation.kit);
       return;
 
     case "set_scene_lock":
       requireCapability(capabilities.sceneMacros, "sceneMacros");
       validateMacroId(operation.scene, "scene");
       validateSceneLock(operation);
+      assertOptionalKit(operation.kit);
       return;
 
     case "replace_scene":
       requireCapability(capabilities.sceneMacros, "sceneMacros");
       validateMacroId(operation.scene, "scene");
       validateMacroLocks(operation.locks, validateSceneLock);
+      assertOptionalKit(operation.kit);
       return;
 
     case "clear_scene":
       requireCapability(capabilities.sceneMacros, "sceneMacros");
       validateMacroId(operation.scene, "scene");
+      assertOptionalKit(operation.kit);
       return;
 
     case "copy_scene":
       requireCapability(capabilities.sceneMacros, "sceneMacros");
       validateMacroId(operation.sourceScene, "sourceScene");
       validateMacroId(operation.targetScene, "targetScene");
+      assertOptionalKit(operation.kit);
       if (operation.sourceScene === operation.targetScene) throw new Error("copy_scene source and target must differ");
       return;
 
@@ -195,23 +210,27 @@ export function validatePersistentOperation(operation: RytmPersistentOperation, 
       requireCapability(capabilities.performanceMacros, "performanceMacros");
       validateMacroId(operation.performance, "performance");
       validatePerformanceLock(operation);
+      assertOptionalKit(operation.kit);
       return;
 
     case "replace_performance":
       requireCapability(capabilities.performanceMacros, "performanceMacros");
       validateMacroId(operation.performance, "performance");
       validateMacroLocks(operation.locks, validatePerformanceLock);
+      assertOptionalKit(operation.kit);
       return;
 
     case "clear_performance":
       requireCapability(capabilities.performanceMacros, "performanceMacros");
       validateMacroId(operation.performance, "performance");
+      assertOptionalKit(operation.kit);
       return;
 
     case "copy_performance":
       requireCapability(capabilities.performanceMacros, "performanceMacros");
       validateMacroId(operation.sourcePerformance, "sourcePerformance");
       validateMacroId(operation.targetPerformance, "targetPerformance");
+      assertOptionalKit(operation.kit);
       if (operation.sourcePerformance === operation.targetPerformance) {
         throw new Error("copy_performance source and target must differ");
       }
@@ -362,6 +381,15 @@ function validateTrackStep(track: string, step: number): void {
 
 function validateMacroId(value: number, label: string): void {
   assertIntegerRange(value, label, 1, 12);
+}
+
+// A 1-based kit index (1..128); device index = kit - 1.
+export function assertKit(value: number): void {
+  assertIntegerRange(value, "kit", 1, 128);
+}
+
+function assertOptionalKit(kit: number | undefined): void {
+  if (kit !== undefined) assertKit(kit);
 }
 
 function validateMacroTrack(track: RytmMacroTrackId): void {

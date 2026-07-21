@@ -21,7 +21,8 @@
     "build:project": "node --experimental-transform-types src/bin/build-project.ts",
     "lint:declaration": "node --experimental-transform-types src/bin/lint-declaration.ts",
     "score:danceability": "node --experimental-transform-types src/bin/score-danceability.ts",
-    "audition:project": "node --experimental-transform-types src/bin/audition-project.ts"
+    "audition:project": "node --experimental-transform-types src/bin/audition-project.ts",
+    "render:score": "node --experimental-transform-types src/bin/render-score.ts"
   },
   "engines": {
     "node": ">=22.14"

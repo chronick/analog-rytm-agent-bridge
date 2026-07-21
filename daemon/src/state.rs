@@ -119,6 +119,16 @@ pub enum PersistentOperation {
         pattern: Option<String>,
         track: String,
         machine: String,
+        /// Optional 1-based kit index (1..=128). Absent = work-buffer kit.
+        #[serde(default)]
+        kit: Option<u8>,
+    },
+    /// Assign a pattern's kit number (which stored kit the pattern loads).
+    /// `kit` is 1-based user-facing (1..=128); device index = kit - 1.
+    SetPatternKit {
+        #[serde(default)]
+        pattern: Option<String>,
+        kit: u8,
     },
     CopyPattern {
         #[serde(rename = "sourcePattern")]
@@ -131,17 +141,23 @@ pub enum PersistentOperation {
         track: Option<String>,
         parameter: String,
         value: Value,
+        #[serde(default)]
+        kit: Option<u8>,
     },
     SetSoundParameter {
         track: String,
         page: String,
         parameter: String,
         value: Value,
+        #[serde(default)]
+        kit: Option<u8>,
     },
     SetFxParameter {
         effect: String,
         parameter: String,
         value: Value,
+        #[serde(default)]
+        kit: Option<u8>,
     },
     SetGlobalParameter {
         section: String,
@@ -157,44 +173,62 @@ pub enum PersistentOperation {
         slot: u8,
         #[serde(rename = "sampleId")]
         sample_id: String,
+        #[serde(default)]
+        kit: Option<u8>,
     },
     SetSceneLock {
         scene: u8,
         track: String,
         parameter: String,
         value: u8,
+        #[serde(default)]
+        kit: Option<u8>,
     },
     ReplaceScene {
         scene: u8,
         locks: Vec<SceneLockInput>,
+        #[serde(default)]
+        kit: Option<u8>,
     },
     ClearScene {
         scene: u8,
+        #[serde(default)]
+        kit: Option<u8>,
     },
     CopyScene {
         #[serde(rename = "sourceScene")]
         source_scene: u8,
         #[serde(rename = "targetScene")]
         target_scene: u8,
+        #[serde(default)]
+        kit: Option<u8>,
     },
     SetPerformanceLock {
         performance: u8,
         track: String,
         parameter: String,
         depth: i8,
+        #[serde(default)]
+        kit: Option<u8>,
     },
     ReplacePerformance {
         performance: u8,
         locks: Vec<PerformanceLockInput>,
+        #[serde(default)]
+        kit: Option<u8>,
     },
     ClearPerformance {
         performance: u8,
+        #[serde(default)]
+        kit: Option<u8>,
     },
     CopyPerformance {
         #[serde(rename = "sourcePerformance")]
         source_performance: u8,
         #[serde(rename = "targetPerformance")]
         target_performance: u8,
+        #[serde(default)]
+        kit: Option<u8>,
     },
     SetSongName {
         #[serde(default)]
@@ -419,6 +453,7 @@ struct SnapshotRecord {
     active_pattern: String,
     transport: TransportState,
     patterns: BTreeMap<String, Pattern>,
+    kits: BTreeMap<u8, Pattern>,
     songs: BTreeMap<String, MockSong>,
 }
 
@@ -434,6 +469,9 @@ pub struct EventEntry {
 struct Pattern {
     slot: String,
     length: u8,
+    /// Device kit index this pattern loads (0-based, 0..=127). User-facing
+    /// (`set_pattern_kit`, summaries) is 1-based: `kit = kit_number + 1`.
+    kit_number: u8,
     track_lengths: BTreeMap<String, u8>,
     machines: BTreeMap<String, String>,
     sample_slots: BTreeMap<String, SampleSlot>,
@@ -472,6 +510,11 @@ pub struct MockBridgeState {
     active_pattern: String,
     transport: TransportState,
     patterns: BTreeMap<String, Pattern>,
+    /// Indexed kits addressed by kit-family ops carrying a 1-based `kit` field.
+    /// Keyed by the 1-based kit index; each value is a `Pattern` reused purely
+    /// as a kit-parameter/macro-lock container (the work-buffer kit lives on the
+    /// active pattern's `kit_parameters`, so indexed kits get their own store).
+    kits: BTreeMap<u8, Pattern>,
     songs: BTreeMap<String, MockSong>,
     operation_sets: Vec<OperationSetRecord>,
     snapshots: Vec<SnapshotRecord>,
@@ -503,6 +546,7 @@ impl Default for MockBridgeState {
                 tempo: 120.0,
             },
             patterns,
+            kits: BTreeMap::new(),
             songs,
             operation_sets: Vec::new(),
             snapshots: Vec::new(),
@@ -538,9 +582,33 @@ impl MockBridgeState {
             },
             "activePattern": self.inspect_pattern(&self.active_pattern).expect("active pattern is valid"),
             "workBufferSong": self.song_summary(&SongTarget::WorkBuffer, false).expect("mock work-buffer Song exists"),
+            // Kits addressed by kit-indexed ops (kit-family ops carrying a
+            // 1-based `kit` field), keyed by that 1-based index. Empty until an
+            // indexed op is applied; work-buffer-kit ops never appear here.
+            "kits": self.indexed_kits_summary(),
             "operationSets": self.operation_sets,
             "snapshots": self.snapshots.iter().map(|record| &record.summary).collect::<Vec<_>>(),
         })
+    }
+
+    fn indexed_kits_summary(&self) -> Value {
+        Value::Object(
+            self.kits
+                .iter()
+                .map(|(index, container)| {
+                    (
+                        index.to_string(),
+                        json!({
+                            "kit": index,
+                            "kitNumber": index - 1,
+                            "kitParameters": container.kit_parameters,
+                            "machines": container.machines,
+                            "sampleSlots": container.sample_slots,
+                        }),
+                    )
+                })
+                .collect(),
+        )
     }
 
     pub fn inspect_pattern(&self, slot: &str) -> Result<Value, String> {
@@ -689,9 +757,11 @@ impl MockBridgeState {
         }
         let operations = parse_operations(raw)?;
         let mut projected_patterns = self.patterns.clone();
+        let mut projected_kits = self.kits.clone();
         let mut projected_songs = self.songs.clone();
         apply_operations(
             &mut projected_patterns,
+            &mut projected_kits,
             &mut projected_songs,
             &operations,
             &pattern,
@@ -1032,6 +1102,7 @@ impl MockBridgeState {
             active_pattern: self.active_pattern.clone(),
             transport: self.transport.clone(),
             patterns: self.patterns.clone(),
+            kits: self.kits.clone(),
             songs: self.songs.clone(),
         });
         self.append_event(json!({ "type": "snapshot.created", "snapshot": summary }));
@@ -1051,6 +1122,7 @@ impl MockBridgeState {
             .cloned()
             .ok_or_else(|| format!("unknown snapshot: {snapshot_id}"))?;
         self.patterns = snapshot.patterns;
+        self.kits = snapshot.kits;
         self.songs = snapshot.songs;
         self.active_pattern = snapshot.active_pattern.clone();
         self.transport = snapshot.transport;
@@ -1121,14 +1193,18 @@ impl MockBridgeState {
 
     fn dry_run(&self, input: &OperationSetInput) -> Result<Value, String> {
         let mut projected_patterns = self.patterns.clone();
+        let mut projected_kits = self.kits.clone();
         let mut projected_songs = self.songs.clone();
         apply_operations(
             &mut projected_patterns,
+            &mut projected_kits,
             &mut projected_songs,
             &input.operations,
             &self.active_pattern,
         )?;
-        let changed = projected_patterns != self.patterns || projected_songs != self.songs;
+        let changed = projected_patterns != self.patterns
+            || projected_kits != self.kits
+            || projected_songs != self.songs;
         let mut result = json!({
             "operationSetId": input.operation_set_id,
             "expectedRevision": input.expected_revision,
@@ -1206,14 +1282,18 @@ impl MockBridgeState {
         let operations = self.operation_sets[index].operations.clone();
         self.samples.validate_assignments(&operations)?;
         let before_patterns = self.patterns.clone();
+        let before_kits = self.kits.clone();
         let before_songs = self.songs.clone();
         apply_operations(
             &mut self.patterns,
+            &mut self.kits,
             &mut self.songs,
             &operations,
             &self.active_pattern,
         )?;
-        let changed = self.patterns != before_patterns || self.songs != before_songs;
+        let changed = self.patterns != before_patterns
+            || self.kits != before_kits
+            || self.songs != before_songs;
         self.revision += u64::from(changed);
         let now = timestamp();
         let id = self.operation_sets[index].operation_set_id.clone();
@@ -1383,10 +1463,16 @@ fn validate_operation(operation: &PersistentOperation) -> Result<(), String> {
             pattern,
             track,
             machine,
+            kit,
         } => {
             validate_optional_pattern(pattern)?;
             validate_track(track)?;
             validate_safe_id(machine, "machine")?;
+            validate_optional_kit(kit)?;
+        }
+        PersistentOperation::SetPatternKit { pattern, kit } => {
+            validate_optional_pattern(pattern)?;
+            validate_kit(*kit)?;
         }
         PersistentOperation::CopyPattern {
             source_pattern,
@@ -1402,18 +1488,21 @@ fn validate_operation(operation: &PersistentOperation) -> Result<(), String> {
             track,
             parameter,
             value,
+            kit,
         } => {
             if let Some(track) = track {
                 validate_track(track)?;
             }
             validate_safe_id(parameter, "parameter")?;
             validate_control_value(value, "value")?;
+            validate_optional_kit(kit)?;
         }
         PersistentOperation::SetSoundParameter {
             track,
             page,
             parameter,
             value,
+            kit,
         } => {
             validate_track(track)?;
             if !["machine", "sample", "filter", "amp", "lfo", "settings"].contains(&page.as_str()) {
@@ -1421,17 +1510,20 @@ fn validate_operation(operation: &PersistentOperation) -> Result<(), String> {
             }
             validate_safe_id(parameter, "parameter")?;
             validate_control_value(value, "value")?;
+            validate_optional_kit(kit)?;
         }
         PersistentOperation::SetFxParameter {
             effect,
             parameter,
             value,
+            kit,
         } => {
             if !["delay", "reverb", "distortion", "compressor", "lfo"].contains(&effect.as_str()) {
                 return Err("unsupported Kit FX effect".to_string());
             }
             validate_safe_id(parameter, "parameter")?;
             validate_control_value(value, "value")?;
+            validate_optional_kit(kit)?;
         }
         PersistentOperation::SetGlobalParameter {
             section,
@@ -1463,33 +1555,43 @@ fn validate_operation(operation: &PersistentOperation) -> Result<(), String> {
             track,
             slot,
             sample_id,
+            kit,
         } => {
             validate_optional_pattern(pattern)?;
             validate_track(track)?;
             validate_u64_range(u64::from(*slot), "slot", 1, 127)?;
             validate_safe_id(sample_id, "sampleId")?;
+            validate_optional_kit(kit)?;
         }
         PersistentOperation::SetSceneLock {
             scene,
             track,
             parameter,
             value,
+            kit,
         } => {
             validate_macro_id(*scene, "scene")?;
             validate_macro_target(track, parameter)?;
             validate_u64_range(u64::from(*value), "value", 0, 127)?;
+            validate_optional_kit(kit)?;
         }
-        PersistentOperation::ReplaceScene { scene, locks } => {
+        PersistentOperation::ReplaceScene { scene, locks, kit } => {
             validate_macro_id(*scene, "scene")?;
             validate_scene_locks(locks)?;
+            validate_optional_kit(kit)?;
         }
-        PersistentOperation::ClearScene { scene } => validate_macro_id(*scene, "scene")?,
+        PersistentOperation::ClearScene { scene, kit } => {
+            validate_macro_id(*scene, "scene")?;
+            validate_optional_kit(kit)?;
+        }
         PersistentOperation::CopyScene {
             source_scene,
             target_scene,
+            kit,
         } => {
             validate_macro_id(*source_scene, "sourceScene")?;
             validate_macro_id(*target_scene, "targetScene")?;
+            validate_optional_kit(kit)?;
             if source_scene == target_scene {
                 return Err("copy_scene source and target must differ".to_string());
             }
@@ -1498,24 +1600,34 @@ fn validate_operation(operation: &PersistentOperation) -> Result<(), String> {
             performance,
             track,
             parameter,
+            kit,
             ..
         } => {
             validate_macro_id(*performance, "performance")?;
             validate_macro_target(track, parameter)?;
+            validate_optional_kit(kit)?;
         }
-        PersistentOperation::ReplacePerformance { performance, locks } => {
+        PersistentOperation::ReplacePerformance {
+            performance,
+            locks,
+            kit,
+        } => {
             validate_macro_id(*performance, "performance")?;
             validate_performance_locks(locks)?;
+            validate_optional_kit(kit)?;
         }
-        PersistentOperation::ClearPerformance { performance } => {
+        PersistentOperation::ClearPerformance { performance, kit } => {
             validate_macro_id(*performance, "performance")?;
+            validate_optional_kit(kit)?;
         }
         PersistentOperation::CopyPerformance {
             source_performance,
             target_performance,
+            kit,
         } => {
             validate_macro_id(*source_performance, "sourcePerformance")?;
             validate_macro_id(*target_performance, "targetPerformance")?;
+            validate_optional_kit(kit)?;
             if source_performance == target_performance {
                 return Err("copy_performance source and target must differ".to_string());
             }
@@ -1573,6 +1685,7 @@ fn validate_operation(operation: &PersistentOperation) -> Result<(), String> {
 
 fn apply_operations(
     patterns: &mut BTreeMap<String, Pattern>,
+    kits: &mut BTreeMap<u8, Pattern>,
     songs: &mut BTreeMap<String, MockSong>,
     operations: &[PersistentOperation],
     active_pattern: &str,
@@ -1675,12 +1788,18 @@ fn apply_operations(
                     .track_lengths
                     .insert(track.clone(), *steps);
             }
+            PersistentOperation::SetPatternKit { pattern, kit } => {
+                // `kit` is 1-based user-facing; device index = kit - 1.
+                ensure_pattern(patterns, pattern.as_deref().unwrap_or(active_pattern))
+                    .kit_number = kit - 1;
+            }
             PersistentOperation::SetTrackMachine {
                 pattern,
                 track,
                 machine,
+                kit,
             } => {
-                ensure_pattern(patterns, pattern.as_deref().unwrap_or(active_pattern))
+                kit_container(patterns, kits, *kit, pattern.as_deref().unwrap_or(active_pattern))
                     .machines
                     .insert(track.clone(), machine.clone());
             }
@@ -1696,11 +1815,12 @@ fn apply_operations(
                 track,
                 parameter,
                 value,
+                kit,
             } => {
                 let key = track
                     .as_ref()
                     .map_or_else(|| parameter.clone(), |track| format!("{track}.{parameter}"));
-                ensure_pattern(patterns, active_pattern)
+                kit_container(patterns, kits, *kit, active_pattern)
                     .kit_parameters
                     .insert(key, value.clone());
             }
@@ -1709,8 +1829,9 @@ fn apply_operations(
                 page,
                 parameter,
                 value,
+                kit,
             } => {
-                ensure_pattern(patterns, active_pattern)
+                kit_container(patterns, kits, *kit, active_pattern)
                     .kit_parameters
                     .insert(format!("sound.{track}.{page}.{parameter}"), value.clone());
             }
@@ -1718,8 +1839,9 @@ fn apply_operations(
                 effect,
                 parameter,
                 value,
+                kit,
             } => {
-                ensure_pattern(patterns, active_pattern)
+                kit_container(patterns, kits, *kit, active_pattern)
                     .kit_parameters
                     .insert(format!("fx.{effect}.{parameter}"), value.clone());
             }
@@ -1744,8 +1866,9 @@ fn apply_operations(
                 track,
                 slot,
                 sample_id,
+                kit,
             } => {
-                ensure_pattern(patterns, pattern.as_deref().unwrap_or(active_pattern))
+                kit_container(patterns, kits, *kit, pattern.as_deref().unwrap_or(active_pattern))
                     .sample_slots
                     .insert(
                         track.clone(),
@@ -1760,14 +1883,15 @@ fn apply_operations(
                 track,
                 parameter,
                 value,
+                kit,
             } => upsert_mock_macro_lock(
-                ensure_pattern(patterns, active_pattern),
+                kit_container(patterns, kits, *kit, active_pattern),
                 "scene",
                 *scene,
                 json!({ "track": track, "parameter": parameter, "value": value }),
             ),
-            PersistentOperation::ReplaceScene { scene, locks } => set_mock_macro_locks(
-                ensure_pattern(patterns, active_pattern),
+            PersistentOperation::ReplaceScene { scene, locks, kit } => set_mock_macro_locks(
+                kit_container(patterns, kits, *kit, active_pattern),
                 "scene",
                 *scene,
                 locks
@@ -1775,8 +1899,8 @@ fn apply_operations(
                     .map(|lock| serde_json::to_value(lock).map_err(error_string))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
-            PersistentOperation::ClearScene { scene } => set_mock_macro_locks(
-                ensure_pattern(patterns, active_pattern),
+            PersistentOperation::ClearScene { scene, kit } => set_mock_macro_locks(
+                kit_container(patterns, kits, *kit, active_pattern),
                 "scene",
                 *scene,
                 Vec::new(),
@@ -1784,8 +1908,9 @@ fn apply_operations(
             PersistentOperation::CopyScene {
                 source_scene,
                 target_scene,
+                kit,
             } => {
-                let pattern = ensure_pattern(patterns, active_pattern);
+                let pattern = kit_container(patterns, kits, *kit, active_pattern);
                 let locks = mock_macro_locks(pattern, "scene", *source_scene);
                 set_mock_macro_locks(pattern, "scene", *target_scene, locks);
             }
@@ -1794,15 +1919,20 @@ fn apply_operations(
                 track,
                 parameter,
                 depth,
+                kit,
             } => upsert_mock_macro_lock(
-                ensure_pattern(patterns, active_pattern),
+                kit_container(patterns, kits, *kit, active_pattern),
                 "performance",
                 *performance,
                 json!({ "track": track, "parameter": parameter, "depth": depth }),
             ),
-            PersistentOperation::ReplacePerformance { performance, locks } => {
+            PersistentOperation::ReplacePerformance {
+                performance,
+                locks,
+                kit,
+            } => {
                 set_mock_macro_locks(
-                    ensure_pattern(patterns, active_pattern),
+                    kit_container(patterns, kits, *kit, active_pattern),
                     "performance",
                     *performance,
                     locks
@@ -1811,8 +1941,8 @@ fn apply_operations(
                         .collect::<Result<Vec<_>, _>>()?,
                 );
             }
-            PersistentOperation::ClearPerformance { performance } => set_mock_macro_locks(
-                ensure_pattern(patterns, active_pattern),
+            PersistentOperation::ClearPerformance { performance, kit } => set_mock_macro_locks(
+                kit_container(patterns, kits, *kit, active_pattern),
                 "performance",
                 *performance,
                 Vec::new(),
@@ -1820,8 +1950,9 @@ fn apply_operations(
             PersistentOperation::CopyPerformance {
                 source_performance,
                 target_performance,
+                kit,
             } => {
-                let pattern = ensure_pattern(patterns, active_pattern);
+                let pattern = kit_container(patterns, kits, *kit, active_pattern);
                 let locks = mock_macro_locks(pattern, "performance", *source_performance);
                 set_mock_macro_locks(pattern, "performance", *target_performance, locks);
             }
@@ -2116,6 +2247,10 @@ fn pattern_summary(pattern: Pattern) -> Value {
     json!({
         "pattern": pattern.slot,
         "length": pattern.length,
+        // 1-based user-facing kit assignment (matches set_pattern_kit); the
+        // 0-based device value is `kitNumber`.
+        "kit": u16::from(pattern.kit_number) + 1,
+        "kitNumber": pattern.kit_number,
         "trackLengths": pattern.track_lengths,
         "machines": pattern.machines,
         "sampleSlots": pattern.sample_slots,
@@ -2130,6 +2265,23 @@ fn empty_pattern(slot: &str) -> Pattern {
         slot: slot.to_string(),
         length: 64,
         ..Pattern::default()
+    }
+}
+
+/// Resolves the kit-parameter container for a kit-family op: the active
+/// pattern's own kit store (work-buffer kit) when `kit` is absent, otherwise a
+/// dedicated indexed-kit container keyed by the 1-based kit index.
+fn kit_container<'a>(
+    patterns: &'a mut BTreeMap<String, Pattern>,
+    kits: &'a mut BTreeMap<u8, Pattern>,
+    kit: Option<u8>,
+    active_pattern: &str,
+) -> &'a mut Pattern {
+    match kit {
+        Some(index) => kits
+            .entry(index)
+            .or_insert_with(|| empty_pattern(&format!("kit-{index}"))),
+        None => ensure_pattern(patterns, active_pattern),
     }
 }
 
@@ -2272,6 +2424,18 @@ fn validate_song_row(row: &SongRowInput) -> Result<(), String> {
 
 fn validate_macro_id(value: u8, label: &str) -> Result<(), String> {
     validate_u64_range(u64::from(value), label, 1, 12).map(|_| ())
+}
+
+/// A 1-based kit index (1..=128); device index = kit - 1.
+fn validate_kit(value: u8) -> Result<(), String> {
+    validate_u64_range(u64::from(value), "kit", 1, 128).map(|_| ())
+}
+
+fn validate_optional_kit(kit: &Option<u8>) -> Result<(), String> {
+    if let Some(kit) = kit {
+        validate_kit(*kit)?;
+    }
+    Ok(())
 }
 
 fn validate_macro_target(track: &str, parameter: &str) -> Result<(), String> {
@@ -2988,5 +3152,102 @@ mod tests {
         assert_eq!(restored["macros"]["scenes"][1]["lockCount"], 0);
         assert_eq!(restored["macros"]["performances"][1]["lockCount"], 0);
         assert_eq!(state.inspect_state()["liveMacros"]["activeScene"], 2);
+    }
+
+    #[test]
+    fn set_pattern_kit_assigns_one_based_kit_number() {
+        let mut state = MockBridgeState::default();
+        // Default pattern reports kit 1 (device kit_number 0).
+        assert_eq!(state.inspect_pattern("A01").unwrap()["kit"], 1);
+        assert_eq!(state.inspect_pattern("A01").unwrap()["kitNumber"], 0);
+        let applied = state
+            .apply_now(&json!({
+                "expectedRevision": 0,
+                "operations": [{ "type": "set_pattern_kit", "pattern": "A01", "kit": 3 }],
+            }))
+            .unwrap();
+        assert_eq!(applied["resultingRevision"], 1);
+        let pattern = state.inspect_pattern("A01").unwrap();
+        assert_eq!(pattern["kit"], 3, "1-based kit reported");
+        assert_eq!(pattern["kitNumber"], 2, "0-based device kit number");
+    }
+
+    #[test]
+    fn set_pattern_kit_and_kit_index_validate_1_to_128() {
+        for kit in [0u64, 129] {
+            let bad = validation_result(&json!([
+                { "type": "set_pattern_kit", "kit": kit },
+            ]));
+            assert_eq!(bad["valid"], false, "kit {kit} must be rejected");
+            let bad_index = validation_result(&json!([
+                { "type": "set_kit_parameter", "parameter": "track_level", "value": 100, "kit": kit },
+            ]));
+            assert_eq!(bad_index["valid"], false, "indexed kit {kit} must be rejected");
+        }
+        let ok = validation_result(&json!([
+            { "type": "set_pattern_kit", "kit": 128 },
+            { "type": "set_kit_parameter", "track": "BD", "parameter": "track_level", "value": 100, "kit": 1 },
+        ]));
+        assert_eq!(ok["valid"], true, "kit 1..=128 accepted: {ok}");
+    }
+
+    #[test]
+    fn indexed_kit_ops_route_to_a_separate_store_from_the_work_buffer() {
+        let mut state = MockBridgeState::default();
+        state
+            .apply_now(&json!({
+                "expectedRevision": 0,
+                "operations": [
+                    // Work-buffer kit op (no kit field).
+                    { "type": "set_kit_parameter", "track": "BD", "parameter": "track_level", "value": 90 },
+                    // Indexed kit op targeting kit 2.
+                    { "type": "set_kit_parameter", "track": "BD", "parameter": "track_level", "value": 40, "kit": 2 },
+                    { "type": "set_scene_lock", "scene": 1, "track": "FX", "parameter": "delay_time", "value": 64, "kit": 2 },
+                ],
+            }))
+            .unwrap();
+        let inspect = state.inspect_state();
+        // Work-buffer kit params live on the active pattern; indexed kit params
+        // live in the separate `kits` store keyed by 1-based index.
+        assert_eq!(
+            inspect["activePattern"]["kitParameters"]["BD.track_level"], 90,
+            "work-buffer op stays on the active pattern"
+        );
+        assert_eq!(
+            inspect["kits"]["2"]["kitParameters"]["BD.track_level"], 40,
+            "indexed op lands in the kit-2 store"
+        );
+        assert_eq!(inspect["kits"]["2"]["kit"], 2);
+        assert_eq!(inspect["kits"]["2"]["kitNumber"], 1);
+        // The work-buffer kit-2 op did not overwrite the work-buffer store.
+        assert!(inspect["kits"]["1"].is_null(), "kit 1 store untouched");
+    }
+
+    #[test]
+    fn indexed_kit_changes_bump_revision_and_survive_rollback() {
+        let mut state = MockBridgeState::default();
+        state.create_snapshot(&json!({ "snapshotId": "pre" })).unwrap();
+        let applied = state
+            .apply_now(&json!({
+                "expectedRevision": 0,
+                "operations": [
+                    { "type": "replace_scene", "scene": 2, "kit": 4,
+                      "locks": [{ "track": "BD", "parameter": "filter_cutoff", "value": 80 }] },
+                ],
+            }))
+            .unwrap();
+        assert_eq!(applied["resultingRevision"], 1, "indexed kit change bumps revision");
+        assert_eq!(
+            state.inspect_state()["kits"]["4"]["kitParameters"]["macros.scene.2"][0]["parameter"],
+            "filter_cutoff"
+        );
+        let rolled_back = state
+            .rollback_snapshot(&json!({ "snapshotId": "pre", "expectedRevision": 1 }))
+            .unwrap();
+        assert_eq!(rolled_back["revision"], 2);
+        assert!(
+            state.inspect_state()["kits"]["4"].is_null(),
+            "rollback restores the empty indexed-kit store"
+        );
     }
 }

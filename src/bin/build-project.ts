@@ -53,9 +53,11 @@ import type { RytmPersistentOperation } from "../domain/types.ts";
 // FIRST (full p-lock pool purge — the declaration's locks are the complete
 // intended set, so the pool is rebuilt from scratch; this also retires legacy
 // pool debris such as zero-fill ghosts and orphaned compound companion slots);
-// then for each declared track, clears -> set_trigs -> set_track_length; then
-// every track's plock-sugar (as set_parameter_lock, step keys converted
-// 1-based -> 0-based); then the raw `pattern.plocks` passthrough.
+// then, when the pattern declares `kit` (1-based, 1..128), one set_pattern_kit
+// assigning which stored kit the pattern loads; then for each declared track,
+// clears -> set_trigs -> set_track_length; then every track's plock-sugar (as
+// set_parameter_lock, step keys converted 1-based -> 0-based); then the raw
+// `pattern.plocks` passthrough.
 //
 // `clear: true` on a pattern also emits clear_trig for every '.' position of
 // every DECLARED track BEFORE that track's set_trigs (declare an all-dots grid
@@ -64,7 +66,19 @@ import type { RytmPersistentOperation } from "../domain/types.ts";
 //
 // The optional `kit` section is a raw set_kit_parameter (etc.) op array applied
 // as one batch after `sounds` and before patterns (e.g. retrig rate/length,
-// track levels). The optional `song` section:
+// track levels), targeting the WORK-BUFFER kit.
+//
+// The optional `kits` section addresses distinct STORED kits, each with its own
+// scene/performance lock-pool budget (48 + 48):
+//
+//   "kits": [ { "kit": 2, "sounds": {..like top-level sounds..},
+//              "ops": [..raw set_kit_parameter/set_fx_parameter..],
+//              "scenes": [..], "performances": [..] } ]
+//
+// Every op a kit entry compiles to is stamped with its 1-based `kit` field so
+// the daemon routes it to project.kits()[kit-1] (send + readback that stored kit
+// object) instead of the work buffer. Applied per-kit after the top-level `kit`
+// section and before patterns. The optional `song` section:
 //
 //   "song": { "name": "MOONSHOT", "rows": [ { "pattern": "A01", "repeats": 2, "mutes": ["BD"] } ] }
 //
@@ -90,6 +104,7 @@ export interface PatternDecl {
   slot: string;
   name: string;
   clear?: boolean; // wipe every '.' position of every declared track first
+  kit?: number; // 1-based kit index (1..128) this pattern loads -> set_pattern_kit
   tracks: Record<string, TrackDecl>;
   plocks?: Array<Record<string, unknown>>; // raw op passthrough (kept)
 }
@@ -106,12 +121,24 @@ interface SoundDecl {
   lfo?: Record<string, unknown>;
   settings?: Record<string, unknown>;
 }
+// One indexed kit (device kit `kit`, 1-based). Its sub-sections mirror the
+// top-level work-buffer sections; every op they compile to is stamped with
+// `kit` so the daemon routes it to project.kits()[kit-1] instead of the work
+// buffer. Each kit carries its own 48-scene / 48-performance lock-pool budget.
+export interface KitDecl {
+  kit: number;
+  sounds?: Record<string, SoundDecl>;
+  ops?: Array<Record<string, unknown>>; // raw kit ops (set_kit_parameter/set_fx_parameter/...)
+  scenes?: Array<Record<string, unknown>>;
+  performances?: Array<Record<string, unknown>>;
+}
 interface Declaration {
   project: string;
   machines?: Array<{ track: string; machine: string }>;
   patterns: PatternDecl[];
   sounds?: Record<string, SoundDecl>;
   kit?: Array<Record<string, unknown>>; // raw set_kit_parameter (etc.) passthrough
+  kits?: KitDecl[]; // per-indexed-kit sounds/ops/scenes/performances (kit stamped in)
   scenes?: Array<Record<string, unknown>>;
   performances?: Array<Record<string, unknown>>;
   song?: SongDecl;
@@ -130,6 +157,12 @@ export function gridOperations(pattern: PatternDecl): RytmPersistentOperation[] 
   // intended set; the purge also retires legacy pool debris).
   if (pattern.clear) {
     operations.push({ type: "clear_pattern_plocks", pattern: pattern.slot } as RytmPersistentOperation);
+  }
+  // Pass 0b: assign the pattern's kit BEFORE any trig/plock op. A pattern's kit
+  // number selects which stored kit it loads; emit it early so downstream ops
+  // (and the on-device audition) see the intended kit.
+  if (pattern.kit !== undefined) {
+    operations.push({ type: "set_pattern_kit", pattern: pattern.slot, kit: pattern.kit } as RytmPersistentOperation);
   }
   // Pass 1 (per track): clears (for a `clear` pattern) -> set_trigs -> length.
   // microtiming/retrigs merge into the matching trigged step's set_trig.
@@ -237,6 +270,28 @@ export function soundOperations(sounds: Record<string, SoundDecl>): RytmPersiste
   return operations;
 }
 
+// One indexed kit -> its sounds/ops/scenes/performances, each stamped with the
+// 1-based `kit` field so the daemon routes them to that stored kit. The
+// sub-sections reuse the same compilers/shapes as the top-level work-buffer
+// sections; only the kit target differs. Emission order mirrors the top-level
+// build order (sounds, then raw kit ops, then scenes, then performances).
+export function kitOperations(entry: KitDecl): RytmPersistentOperation[] {
+  const stamp = (op: RytmPersistentOperation): RytmPersistentOperation =>
+    ({ ...(op as Record<string, unknown>), kit: entry.kit }) as unknown as RytmPersistentOperation;
+  const operations: RytmPersistentOperation[] = [];
+  if (entry.sounds && Object.keys(entry.sounds).length) {
+    operations.push(...soundOperations(entry.sounds).map(stamp));
+  }
+  for (const op of entry.ops ?? []) operations.push(stamp(op as unknown as RytmPersistentOperation));
+  for (const op of entry.scenes ?? []) operations.push(stamp(op as unknown as RytmPersistentOperation));
+  for (const op of entry.performances ?? []) operations.push(stamp(op as unknown as RytmPersistentOperation));
+  return operations;
+}
+
+export function kitsOperations(kits: KitDecl[]): RytmPersistentOperation[] {
+  return kits.flatMap(kitOperations);
+}
+
 async function applyBatch(
   client: RustDaemonClient,
   label: string,
@@ -306,6 +361,12 @@ export async function runProjectBuild(): Promise<void> {
     }
     if (declaration.kit?.length) {
       await applyBatch(client, "kit", declaration.kit as unknown as RytmPersistentOperation[], execute);
+    }
+    // Indexed kits (each an independent stored kit object). Applied per-kit so a
+    // readback failure names the kit; work-buffer sections above are untouched.
+    for (const entry of declaration.kits ?? []) {
+      const operations = kitOperations(entry);
+      if (operations.length) await applyBatch(client, `kit-${entry.kit}`, operations, execute);
     }
     // Pattern deltas target the work buffer, so each slot must be active
     // before its operations validate/apply. In validate-only mode nothing is

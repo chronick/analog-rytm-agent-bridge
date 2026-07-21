@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { gridOperations, songOperations, soundOperations } from "../src/bin/build-project.ts";
+import { gridOperations, kitOperations, kitsOperations, songOperations, soundOperations } from "../src/bin/build-project.ts";
 import { collectOperationValidation } from "../src/domain/validation.ts";
 import type { RytmCapabilities, RytmPersistentOperation } from "../src/domain/types.ts";
 
@@ -186,4 +186,63 @@ test("soundOperations still emits machine selection before its params", () => {
   const machineIndex = ops.findIndex((op) => op.type === "set_track_machine");
   const paramIndex = ops.findIndex((op) => op.type === "set_sound_parameter" && op.page === "machine");
   assert.ok(machineIndex >= 0 && paramIndex > machineIndex, "machine selection precedes its params");
+});
+
+test("pattern kit emits set_pattern_kit after clear_pattern_plocks and before any trig", () => {
+  const ops = gridOperations({
+    slot: "E01",
+    name: "ambient",
+    clear: true,
+    kit: 2,
+    tracks: { BD: { grid: "X..." } },
+  });
+  // clear_pattern_plocks stays first; set_pattern_kit is second (before trig ops).
+  assert.deepEqual(ops[0], { type: "clear_pattern_plocks", pattern: "E01" });
+  assert.deepEqual(ops[1], { type: "set_pattern_kit", pattern: "E01", kit: 2 });
+  const kitIndex = ops.findIndex((op) => op.type === "set_pattern_kit");
+  const firstTrig = ops.findIndex((op) => op.type === "set_trig");
+  assert.ok(kitIndex >= 0 && kitIndex < firstTrig, "set_pattern_kit precedes the first set_trig");
+});
+
+test("a pattern without kit emits no set_pattern_kit", () => {
+  const ops = gridOperations({ slot: "A01", name: "x", tracks: { BD: { grid: "X..." } } });
+  assert.equal(ops.filter((op) => op.type === "set_pattern_kit").length, 0);
+});
+
+test("kitsOperations stamps the 1-based kit into every emitted op and validates clean", () => {
+  const ops = kitsOperations([
+    {
+      kit: 2,
+      sounds: { BD: { machine: "bdhard", filter: { cutoff: 90 } } },
+      ops: [{ type: "set_kit_parameter", track: "BD", parameter: "track_level", value: 100 }],
+      scenes: [{ type: "replace_scene", scene: 1, locks: [{ track: "FX", parameter: "delay_time", value: 64 }] }],
+      performances: [{ type: "clear_performance", performance: 1 }],
+    },
+    { kit: 5, ops: [{ type: "set_fx_parameter", effect: "reverb", parameter: "decay", value: 44 }] },
+  ]);
+  // Every op carries the entry's kit; kit-2 ops precede kit-5 ops.
+  assert.ok(ops.every((op) => "kit" in op), "every op is stamped with kit");
+  const kits = ops.map((op) => (op as { kit: number }).kit);
+  assert.deepEqual([...new Set(kits)], [2, 5]);
+  // Machine selection still precedes its params, both stamped kit 2.
+  const machine = ops.find((op) => op.type === "set_track_machine") as { kit: number };
+  assert.equal(machine.kit, 2);
+  // The stamped ops pass the daemon TS validation surface.
+  const result = collectOperationValidation(ops, capabilities);
+  assert.deepEqual(result.errors, []);
+});
+
+test("kitOperations emits sounds then ops then scenes then performances", () => {
+  const ops = kitOperations({
+    kit: 3,
+    sounds: { BD: { machine: "bdhard" } },
+    ops: [{ type: "set_kit_parameter", track: "BD", parameter: "track_level", value: 90 }],
+    scenes: [{ type: "clear_scene", scene: 1 }],
+    performances: [{ type: "clear_performance", performance: 1 }],
+  });
+  assert.deepEqual(
+    ops.map((op) => op.type),
+    ["set_track_machine", "set_kit_parameter", "clear_scene", "clear_performance"],
+  );
+  assert.ok(ops.every((op) => (op as { kit: number }).kit === 3));
 });

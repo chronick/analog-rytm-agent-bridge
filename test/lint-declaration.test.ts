@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { detectShape, lintInput, lintKitScenes, lintPatterns } from "../src/bin/lint-declaration.ts";
+import { detectShape, lintInput, lintKits, lintKitScenes, lintPatterns } from "../src/bin/lint-declaration.ts";
 import type { LintFinding } from "../src/bin/lint-declaration.ts";
 
 // A contract-clean pattern: all 12 canonical tracks, explicit lengths,
@@ -234,4 +234,68 @@ test("a full declaration lints patterns and sections together", () => {
   });
   assert.equal(shape, "declaration");
   assert.deepEqual(findings, []);
+});
+
+test("a pattern kit in range lints clean; out of range is an error", () => {
+  const ok = cleanPattern();
+  ok.kit = 2;
+  assert.deepEqual(lintPatterns([ok]), []);
+
+  const bad = cleanPattern();
+  bad.kit = 200;
+  assert.match(errors(lintPatterns([bad]))[0].message, /kit must be a 1-based integer between 1 and 128/);
+
+  const fractional = cleanPattern();
+  fractional.kit = 2.5;
+  assert.match(errors(lintPatterns([fractional]))[0].message, /1-based integer between 1 and 128/);
+});
+
+test("a two-kit kits section compiles clean with correct shapes", () => {
+  const findings = lintKits([
+    {
+      kit: 2,
+      sounds: { BD: { machine: "bdhard", machineParams: { tun: -4 } } },
+      ops: [{ type: "set_kit_parameter", track: "BD", parameter: "track_level", value: 100 }],
+      scenes: [{ type: "replace_scene", scene: 1, locks: [{ track: "FX", parameter: "delay_time", value: 64 }] }],
+      performances: [{ type: "clear_performance", performance: 1 }],
+    },
+    { kit: 3, ops: [{ type: "set_fx_parameter", effect: "reverb", parameter: "decay", value: 44 }] },
+  ]);
+  assert.deepEqual(findings, []);
+});
+
+test("kits section: bad range, duplicate index, and unknown key are errors", () => {
+  assert.match(errors(lintKits([{ kit: 0 }]))[0].message, /between 1 and 128/);
+  assert.match(
+    errors(lintKits([{ kit: 2 }, { kit: 2 }])).map((entry) => entry.message).join("\n"),
+    /duplicate kit 2/,
+  );
+  assert.match(errors(lintKits([{ kit: 2, bogus: 1 }]))[0].message, /unknown kit key "bogus"/);
+});
+
+test("kits section: each kit gets its own 48+48 lock-pool budget", () => {
+  // Two scenes of 30 distinct-target locks each = 60 total > 48, without
+  // tripping the per-scene 48-lock cap or duplicate-target check.
+  const locks = (offset: number) =>
+    Array.from({ length: 30 }, (_, index) => ({ track: "FX", parameter: `delay_time_${offset + index}`, value: 64 }));
+  const overBudget = lintKits([
+    {
+      kit: 2,
+      scenes: [
+        { type: "replace_scene", scene: 1, locks: locks(0) },
+        { type: "replace_scene", scene: 2, locks: locks(100) },
+      ],
+    },
+  ]);
+  assert.match(
+    errors(overBudget).map((entry) => entry.message).join("\n"),
+    /scene lock pool uses 60 locks, over the per-kit budget of 48/,
+  );
+
+  // The identical shape on separate kits stays within each kit's own budget.
+  const perKit = lintKits([
+    { kit: 2, scenes: [{ type: "replace_scene", scene: 1, locks: locks(0) }] },
+    { kit: 3, scenes: [{ type: "replace_scene", scene: 1, locks: locks(0) }] },
+  ]);
+  assert.deepEqual(errors(perKit), []);
 });

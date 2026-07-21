@@ -62,6 +62,11 @@ pub struct StateCapture {
     pub global_raw: Vec<u8>,
     pub settings_raw: Vec<u8>,
     pub song_raw: BTreeMap<String, Vec<u8>>,
+    /// Raw sysex for stored kits referenced by kit-indexed ops, keyed by the
+    /// 1-based kit index. Populated lazily by `read_operation_state` for the
+    /// kits an operation batch actually addresses; empty for work-buffer-only
+    /// batches.
+    pub indexed_kits_raw: BTreeMap<u8, Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -72,6 +77,8 @@ pub struct RawState {
     pub settings_raw: Vec<u8>,
     #[serde(default)]
     pub song_raw: BTreeMap<String, Vec<u8>>,
+    #[serde(default)]
+    pub indexed_kits_raw: BTreeMap<u8, Vec<u8>>,
     pub summary: Value,
 }
 
@@ -83,6 +90,7 @@ impl RawState {
             global_raw: capture.global_raw.clone(),
             settings_raw: capture.settings_raw.clone(),
             song_raw: capture.song_raw.clone(),
+            indexed_kits_raw: capture.indexed_kits_raw.clone(),
             summary: capture_summary(capture)?,
         })
     }
@@ -96,11 +104,20 @@ pub struct ChangedObjects {
     pub global: bool,
     pub settings: bool,
     pub songs: Vec<String>,
+    /// 1-based indices of stored kits changed by kit-indexed ops. Distinct from
+    /// `kit`, which is the work-buffer kit.
+    #[serde(default)]
+    pub kits: Vec<u8>,
 }
 
 impl ChangedObjects {
     pub fn any(&self) -> bool {
-        self.pattern || self.kit || self.global || self.settings || !self.songs.is_empty()
+        self.pattern
+            || self.kit
+            || self.global
+            || self.settings
+            || !self.songs.is_empty()
+            || !self.kits.is_empty()
     }
 }
 
@@ -276,6 +293,7 @@ pub fn read_work_buffer_state(session: &mut RytmMidiSession) -> HardwareResult<S
         global_raw,
         settings_raw,
         song_raw,
+        indexed_kits_raw: BTreeMap::new(),
     })
 }
 
@@ -287,7 +305,31 @@ pub fn read_operation_state(
     if let Some(target) = operation_song_target(operations)? {
         populate_song_target(session, &mut capture, &target)?;
     }
+    // Query every stored kit a kit-indexed op targets so the batch mutates the
+    // device's current kit content (not a default), and so change detection and
+    // readback compare against what the hardware actually holds.
+    for kit in referenced_kits(operations) {
+        populate_indexed_kit(session, &mut capture, kit)?;
+    }
     Ok(capture)
+}
+
+fn populate_indexed_kit(
+    session: &mut RytmMidiSession,
+    capture: &mut StateCapture,
+    kit: u8,
+) -> HardwareResult<()> {
+    if capture.indexed_kits_raw.contains_key(&kit) {
+        return Ok(());
+    }
+    let device_index = usize::from(kit) - 1;
+    let raw = query_object(session, &KitQuery::new(device_index).map_err(error_string)?)?;
+    capture
+        .project
+        .update_from_sysex_response(&raw)
+        .map_err(|error| firmware_decode_error("kit", error))?;
+    capture.indexed_kits_raw.insert(kit, raw);
+    Ok(())
 }
 
 pub fn read_snapshot_state(session: &mut RytmMidiSession) -> HardwareResult<StateCapture> {
@@ -349,7 +391,32 @@ pub fn canonical_capture_summary(capture: &StateCapture) -> HardwareResult<Value
         songs.insert(key.clone(), song_summary(&canonical, &target)?);
     }
     summary["songs"] = Value::Object(songs);
+    let mut kits = serde_json::Map::new();
+    for kit in capture.indexed_kits_raw.keys() {
+        kits.insert(
+            kit.to_string(),
+            canonical_indexed_kit_summary(&capture.project, *kit)?,
+        );
+    }
+    summary["kits"] = Value::Object(kits);
     Ok(summary)
+}
+
+/// Round-trips one stored kit through sysex (encode -> default project ->
+/// decode) so its summary is normalized the same way the work-buffer kit is,
+/// making before/after and expected/observed comparisons faithful.
+fn canonical_indexed_kit_summary(project: &RytmProject, kit: u8) -> HardwareResult<Value> {
+    let device_index = usize::from(kit) - 1;
+    let source = project
+        .kits()
+        .get(device_index)
+        .ok_or_else(|| format!("kit {kit} is out of range (1..=128)"))?;
+    let encoded = source.as_sysex().map_err(error_string)?;
+    let mut canonical = RytmProject::try_default().map_err(error_string)?;
+    canonical
+        .update_from_sysex_response(&encoded)
+        .map_err(|error| firmware_decode_error("kit", error))?;
+    Ok(kit_summary(&canonical.kits()[device_index]))
 }
 
 fn song_map_summary<'a>(
@@ -504,12 +571,19 @@ pub fn apply_persistent_operations(
         .filter(|key| before["songs"][*key] != after["songs"][*key])
         .cloned()
         .collect();
+    let kits = capture
+        .indexed_kits_raw
+        .keys()
+        .filter(|kit| before["kits"][kit.to_string()] != after["kits"][kit.to_string()])
+        .copied()
+        .collect();
     Ok(ChangedObjects {
         pattern: before["pattern"] != after["pattern"],
         kit: before["kit"] != after["kit"],
         global: before["global"] != after["global"],
         settings: before["settings"] != after["settings"],
         songs,
+        kits,
     })
 }
 
@@ -550,7 +624,10 @@ fn write_capture_delta_internal(
 
     let write_result: HardwareResult<Value> = (|| {
         send_changed_project(session, &capture.project, changed)?;
-        let observed = inspect_song_targets(session, &changed.songs)?;
+        let mut observed = inspect_song_targets(session, &changed.songs)?;
+        if !changed.kits.is_empty() {
+            observed["kits"] = Value::Object(observe_indexed_kits(session, &changed.kits)?);
+        }
         if force_verification_failure {
             return Err("injected readback verification failure".to_string());
         }
@@ -604,9 +681,39 @@ pub fn restore_raw_state(
         session.send(bytes)?;
         thread::sleep(Duration::from_millis(750));
     }
-    let observed = inspect_song_targets(session, &changed.songs)?;
+    for kit in &changed.kits {
+        let bytes = raw
+            .indexed_kits_raw
+            .get(kit)
+            .ok_or_else(|| format!("rollback snapshot is missing kit {kit}"))?;
+        session.send(bytes)?;
+        thread::sleep(Duration::from_millis(450));
+    }
+    let mut observed = inspect_song_targets(session, &changed.songs)?;
+    if !changed.kits.is_empty() {
+        observed["kits"] = Value::Object(observe_indexed_kits(session, &changed.kits)?);
+    }
     verify_changed_sections(&raw.summary, &observed, changed)?;
     Ok(observed)
+}
+
+/// Queries each changed stored kit back from the device and returns a
+/// 1-based-index-keyed map of kit summaries for readback verification.
+fn observe_indexed_kits(
+    session: &mut RytmMidiSession,
+    kits: &[u8],
+) -> HardwareResult<serde_json::Map<String, Value>> {
+    let mut map = serde_json::Map::new();
+    for &kit in kits {
+        let device_index = usize::from(kit) - 1;
+        let raw = query_object(session, &KitQuery::new(device_index).map_err(error_string)?)?;
+        let mut project = RytmProject::try_default().map_err(error_string)?;
+        project
+            .update_from_sysex_response(&raw)
+            .map_err(|error| firmware_decode_error("kit", error))?;
+        map.insert(kit.to_string(), kit_summary(&project.kits()[device_index]));
+    }
+    Ok(map)
 }
 
 fn send_changed_project(
@@ -656,6 +763,15 @@ fn send_changed_project(
         )?;
         thread::sleep(Duration::from_millis(750));
     }
+    for kit in &changed.kits {
+        let device_index = usize::from(*kit) - 1;
+        let kit_object = project
+            .kits()
+            .get(device_index)
+            .ok_or_else(|| format!("kit {kit} is out of range (1..=128)"))?;
+        session.send(&kit_object.as_sysex().map_err(error_string)?)?;
+        thread::sleep(Duration::from_millis(450));
+    }
     Ok(())
 }
 
@@ -675,6 +791,23 @@ fn verify_changed_sections(
             collect_value_differences(name, &expected[name], &observed[name], &mut differences, 12);
             return Err(format!(
                 "{name} readback did not match the requested state: {}",
+                differences.join("; ")
+            ));
+        }
+    }
+    for kit in &changed.kits {
+        let key = kit.to_string();
+        if expected["kits"][&key] != observed["kits"][&key] {
+            let mut differences = Vec::new();
+            collect_value_differences(
+                &format!("kits.{key}"),
+                &expected["kits"][&key],
+                &observed["kits"][&key],
+                &mut differences,
+                12,
+            );
+            return Err(format!(
+                "kit {kit} readback did not match the requested state: {}",
                 differences.join("; ")
             ));
         }
@@ -744,45 +877,95 @@ fn collect_value_differences(
     }
 }
 
+/// The 1-based kit index a kit-family op targets, or `None` for a work-buffer
+/// op. Non-kit ops (pattern, global, song) return `None`.
+fn operation_kit(operation: &PersistentOperation) -> Option<u8> {
+    match operation {
+        PersistentOperation::SetTrackMachine { kit, .. }
+        | PersistentOperation::SetKitParameter { kit, .. }
+        | PersistentOperation::SetSoundParameter { kit, .. }
+        | PersistentOperation::SetFxParameter { kit, .. }
+        | PersistentOperation::AssignSampleSlot { kit, .. }
+        | PersistentOperation::SetSceneLock { kit, .. }
+        | PersistentOperation::ReplaceScene { kit, .. }
+        | PersistentOperation::ClearScene { kit, .. }
+        | PersistentOperation::CopyScene { kit, .. }
+        | PersistentOperation::SetPerformanceLock { kit, .. }
+        | PersistentOperation::ReplacePerformance { kit, .. }
+        | PersistentOperation::ClearPerformance { kit, .. }
+        | PersistentOperation::CopyPerformance { kit, .. } => *kit,
+        _ => None,
+    }
+}
+
+/// Distinct 1-based indexed kits referenced across an operation batch (kits
+/// addressed via a `kit` field). The work-buffer kit (`kit` absent) is excluded.
+fn referenced_kits(operations: &[PersistentOperation]) -> BTreeSet<u8> {
+    operations.iter().filter_map(operation_kit).collect()
+}
+
+/// Routes a kit-family op to the Kit object it mutates: the work-buffer kit when
+/// `kit` is absent, otherwise the stored kit at device index `kit - 1`. The
+/// stored kit must already be loaded into the project (see `read_operation_state`,
+/// which queries every referenced indexed kit before the batch is applied).
+fn kit_object_mut(project: &mut RytmProject, kit: Option<u8>) -> HardwareResult<&mut Kit> {
+    match kit {
+        None => Ok(project.work_buffer_mut().kit_mut()),
+        Some(index) => {
+            let device_index = usize::from(index) - 1;
+            project
+                .kits_mut()
+                .get_mut(device_index)
+                .ok_or_else(|| format!("kit {index} is out of range (1..=128)"))
+        }
+    }
+}
+
 fn apply_persistent_operation(
     project: &mut RytmProject,
     operation: &PersistentOperation,
 ) -> HardwareResult<()> {
     match operation {
-        PersistentOperation::SetTrackMachine { track, machine, .. } => {
+        PersistentOperation::SetTrackMachine {
+            track, machine, kit, ..
+        } => {
             let track_index = parse_track_index(track)?;
             let machine = MachineType::try_from(machine.as_str()).map_err(error_string)?;
-            let sound = &mut project.work_buffer_mut().kit_mut().sounds_mut()[track_index];
+            let sound = &mut kit_object_mut(project, *kit)?.sounds_mut()[track_index];
             if sound.machine_type() == machine {
                 return Ok(());
             }
             sound.set_machine_type(machine).map_err(error_string)
         }
+        PersistentOperation::SetPatternKit { pattern, kit } => {
+            // `kit` is 1-based user-facing; device index = kit - 1.
+            work_buffer_pattern_mut(project, pattern)?
+                .set_kit_number(usize::from(*kit) - 1)
+                .map_err(error_string)
+        }
         PersistentOperation::SetKitParameter {
             track,
             parameter,
             value,
-        } => apply_kit_parameter(project.work_buffer_mut().kit_mut(), track, parameter, value),
+            kit,
+        } => apply_kit_parameter(kit_object_mut(project, *kit)?, track, parameter, value),
         PersistentOperation::SetSoundParameter {
             track,
             page,
             parameter,
             value,
+            kit,
         } => {
             let track_index = parse_track_index(track)?;
-            let sound = &mut project.work_buffer_mut().kit_mut().sounds_mut()[track_index];
+            let sound = &mut kit_object_mut(project, *kit)?.sounds_mut()[track_index];
             apply_sound_parameter(sound, page, parameter, value)
         }
         PersistentOperation::SetFxParameter {
             effect,
             parameter,
             value,
-        } => apply_fx_parameter(
-            project.work_buffer_mut().kit_mut(),
-            effect,
-            parameter,
-            value,
-        ),
+            kit,
+        } => apply_fx_parameter(kit_object_mut(project, *kit)?, effect, parameter, value),
         PersistentOperation::SetGlobalParameter {
             section,
             parameter,
@@ -896,11 +1079,12 @@ fn apply_persistent_operation(
             pattern,
             track,
             slot,
+            kit,
             ..
         } => {
             work_buffer_pattern_mut(project, pattern)?;
             let track_index = parse_track_index(track)?;
-            project.work_buffer_mut().kit_mut().sounds_mut()[track_index]
+            kit_object_mut(project, *kit)?.sounds_mut()[track_index]
                 .sample_mut()
                 .set_slice_number(usize::from(*slot))
                 .map_err(error_string)
@@ -910,39 +1094,33 @@ fn apply_persistent_operation(
             track,
             parameter,
             value,
+            kit,
         } => {
             let lock = scene_lock(track, parameter, *value)?;
-            project
-                .work_buffer_mut()
-                .kit_mut()
+            kit_object_mut(project, *kit)?
                 .scene_definitions_mut()
                 .set_lock(macro_index(*scene, "scene")?, lock)
                 .map_err(error_string)
         }
-        PersistentOperation::ReplaceScene { scene, locks } => {
+        PersistentOperation::ReplaceScene { scene, locks, kit } => {
             let locks = locks
                 .iter()
                 .map(|lock| scene_lock(&lock.track, &lock.parameter, lock.value))
                 .collect::<HardwareResult<Vec<_>>>()?;
-            project
-                .work_buffer_mut()
-                .kit_mut()
+            kit_object_mut(project, *kit)?
                 .scene_definitions_mut()
                 .replace(macro_index(*scene, "scene")?, &locks)
                 .map_err(error_string)
         }
-        PersistentOperation::ClearScene { scene } => project
-            .work_buffer_mut()
-            .kit_mut()
+        PersistentOperation::ClearScene { scene, kit } => kit_object_mut(project, *kit)?
             .scene_definitions_mut()
             .clear(macro_index(*scene, "scene")?)
             .map_err(error_string),
         PersistentOperation::CopyScene {
             source_scene,
             target_scene,
-        } => project
-            .work_buffer_mut()
-            .kit_mut()
+            kit,
+        } => kit_object_mut(project, *kit)?
             .scene_definitions_mut()
             .copy(
                 macro_index(*source_scene, "sourceScene")?,
@@ -954,39 +1132,37 @@ fn apply_persistent_operation(
             track,
             parameter,
             depth,
+            kit,
         } => {
             let lock = performance_lock(track, parameter, *depth)?;
-            project
-                .work_buffer_mut()
-                .kit_mut()
+            kit_object_mut(project, *kit)?
                 .performance_definitions_mut()
                 .set_lock(macro_index(*performance, "performance")?, lock)
                 .map_err(error_string)
         }
-        PersistentOperation::ReplacePerformance { performance, locks } => {
+        PersistentOperation::ReplacePerformance {
+            performance,
+            locks,
+            kit,
+        } => {
             let locks = locks
                 .iter()
                 .map(|lock| performance_lock(&lock.track, &lock.parameter, lock.depth))
                 .collect::<HardwareResult<Vec<_>>>()?;
-            project
-                .work_buffer_mut()
-                .kit_mut()
+            kit_object_mut(project, *kit)?
                 .performance_definitions_mut()
                 .replace(macro_index(*performance, "performance")?, &locks)
                 .map_err(error_string)
         }
-        PersistentOperation::ClearPerformance { performance } => project
-            .work_buffer_mut()
-            .kit_mut()
+        PersistentOperation::ClearPerformance { performance, kit } => kit_object_mut(project, *kit)?
             .performance_definitions_mut()
             .clear(macro_index(*performance, "performance")?)
             .map_err(error_string),
         PersistentOperation::CopyPerformance {
             source_performance,
             target_performance,
-        } => project
-            .work_buffer_mut()
-            .kit_mut()
+            kit,
+        } => kit_object_mut(project, *kit)?
             .performance_definitions_mut()
             .copy(
                 macro_index(*source_performance, "sourcePerformance")?,
@@ -3070,6 +3246,9 @@ fn pattern_summary(pattern: &Pattern) -> Value {
         "slot": pattern_slot(pattern.index()),
         "structureVersion": pattern.structure_version(),
         "kitNumber": pattern.kit_number(),
+        // 1-based user-facing kit assignment (matches set_pattern_kit); null when
+        // the pattern's kit number is the unset sentinel (>= 128).
+        "kit": if pattern.kit_number() >= 128 { Value::Null } else { json!(pattern.kit_number() + 1) },
         "timeMode": format!("{:?}", pattern.time_mode()),
         "masterLength": pattern.master_length(),
         "masterChange": pattern.master_change(),
@@ -3607,6 +3786,7 @@ mod tests {
             global_raw: Vec::new(),
             settings_raw: Vec::new(),
             song_raw: BTreeMap::from([("work_buffer".to_string(), Vec::new())]),
+            indexed_kits_raw: BTreeMap::new(),
         };
 
         let changed = apply_persistent_operations(&mut capture, &operations).unwrap();
@@ -3633,6 +3813,63 @@ mod tests {
         assert_eq!(summary["global"]["metronome"]["active"], true);
         assert_eq!(summary["settings"]["tempo"], 131.0);
 
+        let second = apply_persistent_operations(&mut capture, &operations).unwrap();
+        assert!(!second.any());
+    }
+
+    #[test]
+    fn kit_indexed_ops_target_the_stored_kit_not_the_work_buffer() {
+        // kit: 2 routes kit-family ops to project.kits()[1]; the work-buffer kit
+        // is left untouched. set_pattern_kit assigns the work-buffer pattern's
+        // kit number. Change detection reports `kits: [2]` and `pattern: true`
+        // while `kit` (work-buffer kit) stays false.
+        let operations: Vec<PersistentOperation> = serde_json::from_value(json!([
+            { "type": "set_pattern_kit", "pattern": "A01", "kit": 3 },
+            { "type": "set_kit_parameter", "track": "BD", "parameter": "track_level", "value": 40, "kit": 2 },
+            { "type": "set_fx_parameter", "effect": "delay", "parameter": "feedback", "value": 77, "kit": 2 },
+            { "type": "replace_scene", "scene": 1, "kit": 2,
+              "locks": [{ "track": "FX", "parameter": "delay_time", "value": 64 }] },
+        ]))
+        .unwrap();
+        let mut capture = StateCapture {
+            project: RytmProject::try_default().unwrap(),
+            pattern_raw: Vec::new(),
+            kit_raw: Vec::new(),
+            global_raw: Vec::new(),
+            settings_raw: Vec::new(),
+            song_raw: BTreeMap::from([("work_buffer".to_string(), Vec::new())]),
+            // Offline stand-in for the device query read_operation_state performs:
+            // kit 2 is "loaded" so change detection tracks it.
+            indexed_kits_raw: BTreeMap::from([(2u8, Vec::new())]),
+        };
+
+        let work_buffer_kit_before = kit_summary(capture.project.work_buffer().kit());
+        let changed = apply_persistent_operations(&mut capture, &operations).unwrap();
+        assert_eq!(changed.kits, vec![2], "only stored kit 2 changed");
+        assert!(!changed.kit, "the work-buffer kit must not be re-sent");
+        assert!(changed.pattern, "set_pattern_kit changes the work-buffer pattern");
+
+        // The stored kit carries the mutations.
+        let kit2 = kit_summary(&capture.project.kits()[1]);
+        assert_eq!(kit2["trackLevels"][0], 40);
+        assert_eq!(kit2["fx"]["delay"]["feedback"], 77);
+        assert_eq!(kit2["macros"]["scenes"][0]["lockCount"], 1);
+        // The work-buffer kit is untouched; the pattern's kit number is 3 (1-based).
+        assert_eq!(
+            kit_summary(capture.project.work_buffer().kit()),
+            work_buffer_kit_before
+        );
+        assert_eq!(
+            capture.project.work_buffer().pattern().kit_number(),
+            2,
+            "device kit_number is 0-based (kit 3 -> 2)"
+        );
+        assert_eq!(
+            pattern_summary(capture.project.work_buffer().pattern())["kit"],
+            3
+        );
+
+        // Idempotent re-apply changes nothing.
         let second = apply_persistent_operations(&mut capture, &operations).unwrap();
         assert!(!second.any());
     }
@@ -3668,6 +3905,7 @@ mod tests {
             global_raw: Vec::new(),
             settings_raw: Vec::new(),
             song_raw: BTreeMap::from([("work_buffer".to_string(), Vec::new())]),
+            indexed_kits_raw: BTreeMap::new(),
         };
 
         let changed = apply_persistent_operations(&mut capture, &operations).unwrap();
@@ -3745,6 +3983,7 @@ mod tests {
             global_raw: Vec::new(),
             settings_raw: Vec::new(),
             song_raw: BTreeMap::from([("work_buffer".to_string(), Vec::new())]),
+            indexed_kits_raw: BTreeMap::new(),
         };
 
         let changed = apply_persistent_operations(&mut capture, &operations).unwrap();
@@ -3811,6 +4050,7 @@ mod tests {
             global_raw: Vec::new(),
             settings_raw: Vec::new(),
             song_raw: BTreeMap::from([("work_buffer".to_string(), Vec::new())]),
+            indexed_kits_raw: BTreeMap::new(),
         };
 
         let changed = apply_persistent_operations(&mut capture, &operations).unwrap();
@@ -3848,6 +4088,7 @@ mod tests {
                 (SongTarget::WorkBuffer.key(), Vec::new()),
                 (target.key(), Vec::new()),
             ]),
+            indexed_kits_raw: BTreeMap::new(),
         };
 
         let summary = canonical_capture_summary(&capture).expect("canonical capture summary");
@@ -4057,6 +4298,7 @@ mod tests {
             global_raw: Vec::new(),
             settings_raw: Vec::new(),
             song_raw: BTreeMap::from([("work_buffer".to_string(), Vec::new())]),
+            indexed_kits_raw: BTreeMap::new(),
         };
         // Lay down a 4-on-floor so step 8 has an enabled trig (plocks only surface
         // in the summary on enabled trigs), then plock only step 8.
@@ -4254,6 +4496,7 @@ mod tests {
             global_raw: Vec::new(),
             settings_raw: Vec::new(),
             song_raw: BTreeMap::from([("work_buffer".to_string(), Vec::new())]),
+            indexed_kits_raw: BTreeMap::new(),
         };
         let setup: Vec<PersistentOperation> = serde_json::from_value(json!([
             { "type": "set_trig", "track": "BD", "step": 0 },

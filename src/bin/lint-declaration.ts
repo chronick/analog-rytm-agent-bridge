@@ -33,11 +33,15 @@ export interface LintFinding {
 const CANONICAL_TRACKS = ["BD", "SD", "RS", "CP", "BT", "LT", "MT", "HT", "CY", "CH", "OH", "CB"] as const;
 const PATTERN_SLOT = /^[A-H](0[1-9]|1[0-6])$/;
 const GRID_LENGTHS = new Set([16, 32, 48, 64]);
-const PATTERN_KEYS = new Set(["slot", "name", "clear", "tracks", "plocks"]);
+const PATTERN_KEYS = new Set(["slot", "name", "clear", "kit", "tracks", "plocks"]);
 const TRACK_KEYS = new Set(["grid", "condition", "conditions", "length", "microtiming", "velocities", "retrigs", "plocks"]);
 const SOUND_KEYS = new Set(["machine", "machineParams", "sample", "filter", "amp", "lfo", "settings"]);
+const KIT_KEYS = new Set(["kit", "sounds", "ops", "scenes", "performances"]);
+// Each stored kit owns its own scene + performance lock pools; the device caps
+// each at 48 locks. Mirrors validation.ts assertKit range + the 48-lock ceiling.
+const KIT_LOCK_POOL_BUDGET = 48;
 const DECLARATION_KEYS = new Set([
-  "project", "machines", "patterns", "sounds", "kit", "scenes", "performances", "song", "samples", "sampleDirectory",
+  "project", "machines", "patterns", "sounds", "kit", "kits", "scenes", "performances", "song", "samples", "sampleDirectory",
 ]);
 
 // Trig condition strings the daemon accepts. Mirror of rytm-rs f2e8143
@@ -132,21 +136,22 @@ const OPERATION_FIELDS: Record<string, { required: string[]; optional: string[] 
   clear_parameter_lock: { required: ["track", "step", "parameter"], optional: ["pattern"] },
   clear_pattern_plocks: { required: [], optional: ["pattern"] },
   set_track_length: { required: ["track", "steps"], optional: ["pattern"] },
-  set_track_machine: { required: ["track", "machine"], optional: ["pattern"] },
+  set_track_machine: { required: ["track", "machine"], optional: ["pattern", "kit"] },
+  set_pattern_kit: { required: ["kit"], optional: ["pattern"] },
   copy_pattern: { required: ["sourcePattern", "targetPattern"], optional: [] },
-  set_kit_parameter: { required: ["parameter", "value"], optional: ["track"] },
-  set_sound_parameter: { required: ["track", "page", "parameter", "value"], optional: [] },
-  set_fx_parameter: { required: ["effect", "parameter", "value"], optional: [] },
+  set_kit_parameter: { required: ["parameter", "value"], optional: ["track", "kit"] },
+  set_sound_parameter: { required: ["track", "page", "parameter", "value"], optional: ["kit"] },
+  set_fx_parameter: { required: ["effect", "parameter", "value"], optional: ["kit"] },
   set_global_parameter: { required: ["section", "parameter", "value"], optional: ["track"] },
-  assign_sample_slot: { required: ["track", "slot", "sampleId"], optional: ["pattern"] },
-  set_scene_lock: { required: ["scene", "track", "parameter", "value"], optional: [] },
-  replace_scene: { required: ["scene", "locks"], optional: [] },
-  clear_scene: { required: ["scene"], optional: [] },
-  copy_scene: { required: ["sourceScene", "targetScene"], optional: [] },
-  set_performance_lock: { required: ["performance", "track", "parameter", "depth"], optional: [] },
-  replace_performance: { required: ["performance", "locks"], optional: [] },
-  clear_performance: { required: ["performance"], optional: [] },
-  copy_performance: { required: ["sourcePerformance", "targetPerformance"], optional: [] },
+  assign_sample_slot: { required: ["track", "slot", "sampleId"], optional: ["pattern", "kit"] },
+  set_scene_lock: { required: ["scene", "track", "parameter", "value"], optional: ["kit"] },
+  replace_scene: { required: ["scene", "locks"], optional: ["kit"] },
+  clear_scene: { required: ["scene"], optional: ["kit"] },
+  copy_scene: { required: ["sourceScene", "targetScene"], optional: ["kit"] },
+  set_performance_lock: { required: ["performance", "track", "parameter", "depth"], optional: ["kit"] },
+  replace_performance: { required: ["performance", "locks"], optional: ["kit"] },
+  clear_performance: { required: ["performance"], optional: ["kit"] },
+  copy_performance: { required: ["sourcePerformance", "targetPerformance"], optional: ["kit"] },
   set_song_name: { required: ["name"], optional: ["target"] },
   replace_song: { required: ["rows"], optional: ["target", "name"] },
   insert_song_row: { required: ["row", "value"], optional: ["target"] },
@@ -326,6 +331,9 @@ export function lintPattern(pattern: unknown, index: number): LintFinding[] {
   if (typeof pattern.name !== "string") error("name is required and must be a string");
   else if (pattern.name.length > 15) error(`name "${pattern.name}" is ${pattern.name.length} chars (max 15)`);
   if (pattern.clear !== true) warn("clear: true is missing — legacy steps in this slot will survive the rebuild");
+  if (pattern.kit !== undefined && (typeof pattern.kit !== "number" || !Number.isInteger(pattern.kit) || pattern.kit < 1 || pattern.kit > 128)) {
+    error(`kit must be a 1-based integer between 1 and 128, got ${JSON.stringify(pattern.kit)}`);
+  }
 
   if (!isRecord(pattern.tracks)) {
     error("tracks is required and must be an object");
@@ -458,8 +466,7 @@ export function lintPatterns(patterns: unknown): LintFinding[] {
   return findings;
 }
 
-function lintSounds(sounds: unknown): LintFinding[] {
-  const section = "sounds";
+function lintSounds(sounds: unknown, section = "sounds"): LintFinding[] {
   if (!isRecord(sounds)) return [{ severity: "error", section, message: "sounds must be an object keyed by track" }];
   const findings: LintFinding[] = [];
   for (const [track, decl] of Object.entries(sounds)) {
@@ -524,6 +531,68 @@ function lintSong(song: unknown): LintFinding[] {
   return findings;
 }
 
+// Static estimate of a kit's scene/performance lock-pool usage from a raw op
+// array. replace_* sets a definition's lock count; set_*_lock increments;
+// clear_* zeroes. copy_* is indeterminate and excluded from the count.
+function macroLockPoolUsage(ops: unknown[], family: "scene" | "performance"): number {
+  const perId = new Map<number, number>();
+  for (const op of ops) {
+    if (!isRecord(op) || typeof op.type !== "string") continue;
+    const id = op[family];
+    if (typeof id !== "number") continue;
+    if (op.type === `replace_${family}`) perId.set(id, Array.isArray(op.locks) ? op.locks.length : 0);
+    else if (op.type === `set_${family}_lock`) perId.set(id, (perId.get(id) ?? 0) + 1);
+    else if (op.type === `clear_${family}`) perId.set(id, 0);
+  }
+  return [...perId.values()].reduce((total, count) => total + count, 0);
+}
+
+// The top-level `kits` section: an array of indexed-kit entries. Each entry
+// mirrors the work-buffer sound/kit/scene/performance shapes but targets a
+// distinct stored kit (1-based `kit`), and each kit owns its own 48+48
+// scene/performance lock-pool budget (counted per kit here).
+export function lintKits(kits: unknown): LintFinding[] {
+  const rootSection = "kits";
+  if (!Array.isArray(kits)) {
+    return [{ severity: "error", section: rootSection, message: "kits must be an array of kit objects" }];
+  }
+  const findings: LintFinding[] = [];
+  const seen = new Set<number>();
+  kits.forEach((entry, index) => {
+    const section = isRecord(entry) && typeof entry.kit === "number" ? `kit ${entry.kit}` : `kits[${index}]`;
+    const error = (message: string) => findings.push({ severity: "error", section, message });
+    if (!isRecord(entry)) {
+      error("kit entry must be a JSON object");
+      return;
+    }
+    for (const key of Object.keys(entry)) {
+      if (!KIT_KEYS.has(key)) error(`unknown kit key "${key}"`);
+    }
+    const kit = entry.kit;
+    if (typeof kit !== "number" || !Number.isInteger(kit) || kit < 1 || kit > 128) {
+      error(`kit must be a 1-based integer between 1 and 128, got ${JSON.stringify(kit)}`);
+    } else if (seen.has(kit)) {
+      error(`duplicate kit ${kit} declared`);
+    } else {
+      seen.add(kit);
+    }
+    if (entry.sounds !== undefined) findings.push(...lintSounds(entry.sounds, `${section} sounds`));
+    if (entry.ops !== undefined) findings.push(...lintRawSection(`${section} ops`, entry.ops));
+    if (entry.scenes !== undefined) findings.push(...lintRawSection(`${section} scenes`, entry.scenes));
+    if (entry.performances !== undefined) findings.push(...lintRawSection(`${section} performances`, entry.performances));
+    // Per-kit lock-pool budgets (each kit gets its own 48 + 48).
+    const sceneUsage = macroLockPoolUsage(Array.isArray(entry.scenes) ? entry.scenes : [], "scene");
+    if (sceneUsage > KIT_LOCK_POOL_BUDGET) {
+      error(`scene lock pool uses ${sceneUsage} locks, over the per-kit budget of ${KIT_LOCK_POOL_BUDGET}`);
+    }
+    const performanceUsage = macroLockPoolUsage(Array.isArray(entry.performances) ? entry.performances : [], "performance");
+    if (performanceUsage > KIT_LOCK_POOL_BUDGET) {
+      error(`performance lock pool uses ${performanceUsage} locks, over the per-kit budget of ${KIT_LOCK_POOL_BUDGET}`);
+    }
+  });
+  return findings;
+}
+
 export function lintKitScenes(fragment: unknown): LintFinding[] {
   if (!isRecord(fragment)) {
     return [{ severity: "error", section: "kit-scenes", message: "kit-scenes fragment must be a JSON object" }];
@@ -565,6 +634,7 @@ export function lintDeclaration(declaration: unknown): LintFinding[] {
     }
   }
   findings.push(...lintPatterns(declaration.patterns));
+  if (declaration.kits !== undefined) findings.push(...lintKits(declaration.kits));
   findings.push(...lintKitScenes({
     ...(declaration.sounds !== undefined ? { sounds: declaration.sounds } : {}),
     ...(declaration.kit !== undefined ? { kit: declaration.kit } : {}),

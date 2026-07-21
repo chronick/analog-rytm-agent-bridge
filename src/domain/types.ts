@@ -187,6 +187,15 @@ export type RytmPersistentOperation =
       pattern?: RytmPatternSlot;
       track: RytmTrackId;
       machine: string;
+      // Optional 1-based kit index (1..128). Absent = work-buffer kit.
+      kit?: number;
+    }
+  | {
+      // Assign which stored kit a pattern loads. `kit` is 1-based (1..128);
+      // device index = kit - 1 (matches the 1-based pattern slot convention).
+      type: "set_pattern_kit";
+      pattern?: RytmPatternSlot;
+      kit: number;
     }
   | {
       type: "copy_pattern";
@@ -198,6 +207,7 @@ export type RytmPersistentOperation =
       track?: RytmTrackId;
       parameter: string;
       value: number | boolean | string;
+      kit?: number;
     }
   | {
       type: "set_sound_parameter";
@@ -205,12 +215,14 @@ export type RytmPersistentOperation =
       page: "machine" | "sample" | "filter" | "amp" | "lfo" | "settings";
       parameter: string;
       value: number | boolean | string;
+      kit?: number;
     }
   | {
       type: "set_fx_parameter";
       effect: "delay" | "reverb" | "distortion" | "compressor" | "lfo";
       parameter: string;
       value: number | boolean | string;
+      kit?: number;
     }
   | {
       type: "set_global_parameter";
@@ -225,6 +237,7 @@ export type RytmPersistentOperation =
       track: RytmTrackId;
       slot: number;
       sampleId: string;
+      kit?: number;
     }
   | {
       type: "set_scene_lock";
@@ -232,20 +245,24 @@ export type RytmPersistentOperation =
       track: RytmMacroTrackId;
       parameter: string;
       value: number;
+      kit?: number;
     }
   | {
       type: "replace_scene";
       scene: number;
       locks: RytmSceneLockInput[];
+      kit?: number;
     }
   | {
       type: "clear_scene";
       scene: number;
+      kit?: number;
     }
   | {
       type: "copy_scene";
       sourceScene: number;
       targetScene: number;
+      kit?: number;
     }
   | {
       type: "set_performance_lock";
@@ -253,20 +270,24 @@ export type RytmPersistentOperation =
       track: RytmMacroTrackId;
       parameter: string;
       depth: number;
+      kit?: number;
     }
   | {
       type: "replace_performance";
       performance: number;
       locks: RytmPerformanceLockInput[];
+      kit?: number;
     }
   | {
       type: "clear_performance";
       performance: number;
+      kit?: number;
     }
   | {
       type: "copy_performance";
       sourcePerformance: number;
       targetPerformance: number;
+      kit?: number;
     }
   | {
       type: "set_song_name";
@@ -337,7 +358,7 @@ export interface QueuedRytmOperationSet {
   rejectionReason?: string;
   resolvedBoundary?: RytmResolvedBoundary;
   changed?: boolean;
-  changedObjects?: Partial<Record<"pattern" | "kit" | "global" | "settings", boolean>> & { songs?: string[] };
+  changedObjects?: Partial<Record<"pattern" | "kit" | "global" | "settings", boolean>> & { songs?: string[]; kits?: number[] };
   writeStatus?: "already-converged" | "applied-and-verified";
   acknowledgement?: "verified" | "not_applied" | "rollback_verified" | "rollback_failed";
 }
