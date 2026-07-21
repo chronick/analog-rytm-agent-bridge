@@ -477,14 +477,19 @@ function buildFindings(metrics: ArrangementMetrics): ArrangementFinding[] {
     });
   }
 
-  for (const track of eventTiers.tracks) {
-    if (track.empty) {
-      findings.push({
-        severity: "warning",
-        section: `EVENT tier ${track.track}`,
-        message: `EVENT tier empty: ${track.onceOnlyCount} once-only gesture(s) (target 2-4)`,
-      });
-    }
+  // The 2-4 target is SCORE-wide (per the skill's "budget 2-4 once-only EVENT
+  // moments per track[-of-the-EP]"), not per instrument-track — a per-track
+  // gate can never pass on a 12-voice machine. Per-track counts stay in the
+  // report data for detail; only the aggregate flags.
+  const scoreWideEvents =
+    eventTiers.tracks.reduce((sum, track) => sum + track.onceOnlyCount, 0) +
+    eventTiers.sceneFlashCount + eventTiers.perfSpikeCount;
+  if (scoreWideEvents <= EVENT_TIER_EMPTY_MAX) {
+    findings.push({
+      severity: "warning",
+      section: "EVENT tier",
+      message: `EVENT tier empty: ${scoreWideEvents} once-only gesture(s) score-wide (target 2-4)`,
+    });
   }
 
   for (const drop of drops) {

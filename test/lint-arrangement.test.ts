@@ -186,7 +186,7 @@ const eventTierFindings = (report: ArrangementReport) => report.findings.filter(
 // content above).
 // ---------------------------------------------------------------------------
 
-test("v1 first-light: missing long-held section, six empty EVENT tiers, build monotony, no silence", () => {
+test("v1 first-light: missing long-held section, score-wide empty EVENT tier, build monotony, no silence", () => {
   const report = lintArrangement(FIRST_LIGHT);
   assert.ok(report.metrics);
   assert.deepEqual(report.metrics!.sectionLengths.lengths, [16, 8, 8, 16, 20, 18, 8]);
@@ -195,8 +195,9 @@ test("v1 first-light: missing long-held section, six empty EVENT tiers, build mo
   assert.equal(report.metrics!.sectionLengths.missingLongHold, true);
   assert.match(sections(report), /missing one long-held section: longest is 20 bars, only 1\.25x the median \(16\)/);
 
-  const empty = eventTierFindings(report).map((f) => f.section.replace("EVENT tier ", ""));
-  assert.deepEqual(empty.sort(), ["BD", "BT", "CH", "LT", "MT", "RS"].sort());
+  const eventFindings = eventTierFindings(report);
+  assert.equal(eventFindings.length, 1);
+  assert.match(eventFindings[0].message, /score-wide/);
 
   assert.equal(report.metrics!.drops.length, 3);
   assert.equal(report.metrics!.drops.every((d) => !d.weak), true); // all 3 stack pattern+mute-family (2 dims)
@@ -206,7 +207,7 @@ test("v1 first-light: missing long-held section, six empty EVENT tiers, build mo
   assert.equal(report.metrics!.unattended.longestGapBars, 12); // well under the 24-bar flag
 });
 
-test("v1 ignition-sequence: eight empty EVENT tiers, a weak one-dimension drop, no section-length flag", () => {
+test("v1 ignition-sequence: score-wide empty EVENT tier, a weak one-dimension drop, no section-length flag", () => {
   const report = lintArrangement(IGNITION_SEQUENCE);
   assert.ok(report.metrics);
   assert.deepEqual(report.metrics!.sectionLengths.lengths, [24, 12, 12, 16, 16, 16, 16, 34]);
@@ -214,7 +215,7 @@ test("v1 ignition-sequence: eight empty EVENT tiers, a weak one-dimension drop, 
   assert.equal(report.metrics!.sectionLengths.missingLongHold, false); // 34 is 2.1x the 16-bar median
   assert.equal(sections(report), "");
 
-  assert.equal(eventTierFindings(report).length, 8);
+  assert.equal(eventTierFindings(report).length, 1); // score-wide aggregate
 
   assert.equal(report.metrics!.drops.length, 2);
   const weak = report.metrics!.drops.find((d) => d.atBar === 16);
@@ -235,7 +236,7 @@ test("v1 ceremony: zero drops detected at all (every pattern change happens at f
   assert.equal(report.metrics!.sectionLengths.missingLongHold, false); // 32 is 2x the 16-bar median
   assert.equal(sections(report), "");
 
-  assert.equal(eventTierFindings(report).length, 6);
+  assert.equal(eventTierFindings(report).length, 1); // score-wide aggregate
   assert.equal(report.metrics!.drops.length, 0);
   assert.equal(report.metrics!.builds.length, 0);
   assert.equal(messages(report).includes("weak drop"), false);
@@ -250,8 +251,8 @@ test("v1 escape-velocity: grid-locked (71% of sections at 16 bars) and a weak un
   assert.equal(report.metrics!.sectionLengths.gridLocked, true);
   assert.match(sections(report), /grid-locked: 71% of 7 sections are 16 bars/);
 
-  assert.equal(eventTierFindings(report).length, 2); // only BD, SD ever touched by mute/unmute
-  assert.deepEqual(eventTierFindings(report).map((f) => f.section), ["EVENT tier BD", "EVENT tier SD"]);
+  assert.equal(eventTierFindings(report).length, 1); // score-wide aggregate (0 once-only gestures)
+  assert.match(eventTierFindings(report)[0].message, /score-wide/);
 
   assert.equal(report.metrics!.drops.length, 2);
   const weak = report.metrics!.drops.find((d) => d.atBar === 122);
@@ -268,8 +269,7 @@ test("v1 ember: the one score with a real once-only gesture (CB:2, not flagged) 
   const cb = report.metrics!.eventTiers.tracks.find((t) => t.track === "CB");
   assert.equal(cb?.onceOnlyCount, 2);
   assert.equal(cb?.empty, false);
-  assert.equal(eventTierFindings(report).some((f) => f.section === "EVENT tier CB"), false);
-  assert.equal(eventTierFindings(report).length, 8); // every other touched track is empty
+  assert.equal(eventTierFindings(report).length, 0); // CB:2 satisfies the score-wide 2-4 target
 
   // modal length 8 occurs in 7/10 sections -- exactly the 0.7 boundary, and
   // the strict `>` means it does NOT trip grid-locked.
