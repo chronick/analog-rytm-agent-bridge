@@ -171,7 +171,8 @@ export type ScheduledSend =
   | { seq: number; offsetMs: number; atBar: number; kind: "scene"; scene: number | null }
   | { seq: number; offsetMs: number; atBar: number; kind: "perf"; performance: number; amount: number }
   | { seq: number; offsetMs: number; atBar: number; kind: "tempo"; tempo: number }
-  | { seq: number; offsetMs: number; atBar: number; kind: "stop" };
+  | { seq: number; offsetMs: number; atBar: number; kind: "stop" }
+  | { seq: number; offsetMs: number; atBar: number; kind: "start"; tempo: number };
 
 export interface Schedule {
   sends: ScheduledSend[];
@@ -502,6 +503,12 @@ export function buildSchedule(score: Score): Schedule {
   const tailMs = tailBars * barMsForTempo(finalTempo);
   const totalMs = leadInMs + barToMs(musicalEndBar, segments) + tailMs;
 
+  // Transport start is itself a scheduled send at the end of the lead-in,
+  // AFTER every bar-0 send (huge seq wins the tie-break): the bar-0 pattern
+  // and mutes must be in place before the sequencer runs, or whatever the
+  // device played last blasts through the lead-in and the downbeat.
+  sends.push({ seq: Number.MAX_SAFE_INTEGER, offsetMs: leadInMs, atBar: 0, kind: "start", tempo: score.tempo });
+
   // Stable sort by absolute time, tie-break on build order.
   sends.sort((a, b) => (a.offsetMs - b.offsetMs) || (a.seq - b.seq));
 
@@ -561,6 +568,7 @@ function payloadFor(send: ScheduledSend): Record<string, unknown> {
     case "perf": return { performance: send.performance, amount: send.amount };
     case "tempo": return { command: "continue", tempo: send.tempo };
     case "stop": return { command: "stop" };
+    case "start": return { command: "start", tempo: send.tempo };
   }
 }
 
@@ -586,6 +594,9 @@ async function dispatch(client: RustDaemonClient, send: ScheduledSend): Promise<
       return;
     case "stop":
       await client.setTransport({ command: "stop" });
+      return;
+    case "start":
+      await client.setTransport({ command: "start", tempo: send.tempo });
       return;
   }
 }
@@ -637,8 +648,9 @@ export async function renderScore(options: RenderOptions): Promise<RenderSummary
     }
     recording = await client.startRecording(startInput);
 
-    // 2. Start transport at the initial tempo; the epoch anchors all scheduling.
-    await client.setTransport({ command: "start", tempo: score.tempo });
+    // 2. The epoch anchors all scheduling at recording start; transport start
+    //    is a scheduled send inside the sequence (end of lead-in, after the
+    //    bar-0 state), so the lead-in records silence, not the last pattern.
     const epoch = Date.now();
 
     // 3. Drift-corrected event loop: each send is timed against the FIXED epoch,

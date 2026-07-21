@@ -32,6 +32,7 @@ const KIND_TO_EVENT: Record<string, string> = {
   perf: "live.performance_sent",
   tempo: "transport.changed",
   stop: "transport.changed",
+  start: "transport.changed",
 };
 
 // --------------------------------------------------------------------------
@@ -224,7 +225,9 @@ test("renders a tiny score end-to-end through the mock daemon", async () => {
     // mute ["BD","BT"] -> two mute sends; unmute ["BD"] -> one mute-kind send.
     const sentKinds = summary.sent.map((s) => s.kind);
     const resetSweep = Array.from({ length: 12 }, () => "mute");
-    assert.deepEqual(sentKinds, [...resetSweep, "pattern", "mute", "mute", "mute", "scene", "level", "perf", "perf", "stop", "scene"]);
+    // Transport start is scheduled AFTER the bar-0 state (leadIn 0 here, so it
+    // sorts behind every offset-0 send: reset sweep + bar-0 pattern/mutes).
+    assert.deepEqual(sentKinds, [...resetSweep, "pattern", "mute", "mute", "start", "mute", "scene", "level", "perf", "perf", "stop", "scene"]);
     assert.ok(
       summary.sent.slice(0, 12).every((s) => {
         const payload = (s as { payload?: { value?: number } }).payload;
@@ -234,13 +237,13 @@ test("renders a tiny score end-to-end through the mock daemon", async () => {
     );
     assert.equal(summary.schedule.sendCount, summary.sent.length);
 
-    // The daemon journal opens with transport.changed (start) and carries the
-    // live events in the exact order they were sent. The score's stop event
-    // cut the sequencer itself (its transport.changed appears in sequence), so
-    // the renderer adds no extra trailing transport stop.
+    // The daemon journal carries the events in the exact order they were sent
+    // (transport start is now IN the sequence, after the bar-0 state). The
+    // score's stop event cut the sequencer itself, so the renderer adds no
+    // extra trailing transport stop.
     const journalTypes = summary.daemonEvents.map((e) => e.type);
-    const expectedMiddle = summary.sent.map((s) => KIND_TO_EVENT[s.kind]);
-    assert.deepEqual(journalTypes, ["transport.changed", ...expectedMiddle]);
+    const expectedAll = summary.sent.map((s) => KIND_TO_EVENT[s.kind]);
+    assert.deepEqual(journalTypes, expectedAll);
 
     // Timestamps are sane (finite) and monotonic non-decreasing (sane ordering).
     const times = summary.daemonEvents.map((e) => parseTs(e.receivedAt));
