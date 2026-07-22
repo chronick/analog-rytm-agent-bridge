@@ -1,0 +1,12 @@
+{
+  "schema": "analog-rytm-analyze-profile.v1",
+  "name": "legacy",
+  "description": "Historical hardcoded repetition bands (perigee-v2 verbatim-loop calibration). Default profile; known to be miscalibrated by broken conducting -- prefer a --calibrate profile from good takes.",
+  "thresholds": {
+    "adjSimFlag": 0.97,
+    "nearIdenticalSim": 0.985,
+    "longestRunFlag": 8,
+    "noveltyStarvedBelow": 0.05,
+    "noveltyFull": 0.2
+  }
+}

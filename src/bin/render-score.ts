@@ -1,4 +1,5 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RustDaemonClient } from "../rpc/RustDaemonClient.ts";
@@ -129,6 +130,32 @@ const PERF_STEP_BARS = 0.25;
 const RECORDING_MIN_MS = 100;
 const RECORDING_MAX_MS = 600_000;
 
+// Dynamic lead-in (see buildSchedule): the bar-0 state block (12-track unmute
+// sweep + bar-0 mutes/pattern/levels) is sent SERIALLY before the transport
+// `start`, and each RPC costs ~150-300ms of wall-clock on hardware (the daemon
+// persists state per send). If the lead-in is shorter than that block, `start`
+// fires late and every later send lands early relative to the music. We size
+// the lead-in to cover the block plus headroom.
+const BAR0_SEND_COST_MS = 300; // budgeted wall-clock cost of one bar-0 RPC send
+const LEAD_IN_HEADROOM_MS = 750; // slack added over the estimated bar-0 block cost
+
+// Budget guard: a score whose expanded send count exceeds this is rejected by
+// validation (drift gestures can balloon a schedule; the RPC loop is serial).
+const MAX_SENDS = 800;
+// Safety cap on a SINGLE drift's expansion, so a pathological untilBar cannot
+// allocate an unbounded array during validation. Far above MAX_SENDS, so the
+// budget guard still fires for anything oversized.
+const DRIFT_STEP_CAP = 100_000;
+const DRIFT_MIN_RESOLUTION_BARS = 0.25;
+
+// Lag self-gate thresholds (post-start sends, |actual - anchored planned|).
+const LAG_GATE_MEDIAN_MS = 60;
+const LAG_GATE_P95_MS = 500;
+
+// State-file preflight: the daemon's persisted hardware state grows over runs;
+// past ~6 MB the per-send persist cost bloats and starves the live schedule.
+const STATE_FILE_MAX_BYTES = 6 * 1024 * 1024;
+
 export interface PerfRamp {
   n: number;
   ramp: Array<[number, number]>;
@@ -137,6 +164,28 @@ export interface PerfRamp {
 export interface LevelChange {
   track: RytmTrackId;
   to: number;
+}
+
+export type DriftShape = "sine" | "triangle";
+
+// A slow, continuous "knob motion" gesture (hand-played feel). Expanded at
+// schedule-build time into per-resolution sends over [atBar, untilBar]:
+//   value = round(center + depth * shape(2*pi*(bar - atBar + phase)/periodBars))
+// clamped 0-127, with consecutive equal values de-duplicated. Targets either a
+// track level (track + param) OR a performance macro (perf), never both.
+export interface DriftGesture {
+  // Track-level target (uses the same live-level mechanism as a `level` event):
+  track?: RytmTrackId;
+  param?: "level";
+  // Performance-macro target (uses the same mechanism as a perf ramp):
+  perf?: number;
+  center: number;
+  depth: number;
+  periodBars: number;
+  untilBar: number;
+  shape?: DriftShape; // default "sine"
+  resolutionBars?: number; // default 0.5; must be >= 0.25
+  phase?: number; // default 0 (in bars)
 }
 
 export interface ScoreEvent {
@@ -152,6 +201,7 @@ export interface ScoreEvent {
   level?: LevelChange;
   tempo?: number;
   stop?: boolean;
+  drift?: DriftGesture;
 }
 
 export interface Score {
@@ -176,7 +226,16 @@ export type ScheduledSend =
 
 export interface Schedule {
   sends: ScheduledSend[];
+  /** Effective lead-in used to place the transport `start` (>= requested). */
   leadInMs: number;
+  /** Lead-in the score asked for (leadInBars * barMs). */
+  requestedLeadInMs: number;
+  /** Same as leadInMs; named explicitly for the events.json metadata. */
+  effectiveLeadInMs: number;
+  /** Count of sends dispatched before `start` (reset sweep + bar-0 events). */
+  bar0SendCount: number;
+  /** Estimated wall-clock cost of the bar-0 block (bar0SendCount * cost). */
+  bar0EstimateMs: number;
   tailMs: number;
   musicalEndBar: number;
   finalTempo: number;
@@ -237,8 +296,11 @@ export function barToMs(bar: number, segments: TempoSegment[]): number {
 // ---------------------------------------------------------------------------
 
 const ACTION_KEYS = [
-  "pattern", "mute", "unmute", "soloKeep", "unmuteAll", "scene", "perf", "level", "tempo", "stop",
+  "pattern", "mute", "unmute", "soloKeep", "unmuteAll", "scene", "perf", "level", "tempo", "stop", "drift",
 ] as const;
+const DRIFT_KEYS = new Set<string>([
+  "track", "param", "perf", "center", "depth", "periodBars", "untilBar", "shape", "resolutionBars", "phase",
+]);
 // Event objects are validated STRICTLY (unknown keys rejected); unknown
 // TOP-LEVEL score keys (metadata: ep, trackNumber, notes, ...) are ignored.
 const EVENT_KEYS = new Set<string>(["atBar", "immediate", ...ACTION_KEYS]);
@@ -402,9 +464,119 @@ export function validateScore(score: unknown): string[] {
         errors.push(`${where}.tempo must be a number between ${TEMPO_MIN} and ${TEMPO_MAX}`);
       }
     }
+
+    if (event.drift !== undefined) {
+      if (typeof event.drift !== "object" || event.drift === null || Array.isArray(event.drift)) {
+        errors.push(`${where}.drift must be an object`);
+      } else {
+        const d = event.drift as Record<string, unknown>;
+        for (const key of Object.keys(d)) {
+          if (!DRIFT_KEYS.has(key)) {
+            errors.push(`${where}.drift has unknown key "${key}" (allowed: ${[...DRIFT_KEYS].join(", ")})`);
+          }
+        }
+        const hasPerf = d.perf !== undefined;
+        const hasTrack = d.track !== undefined || d.param !== undefined;
+        if (hasPerf && hasTrack) {
+          errors.push(`${where}.drift cannot target both perf and track/param; pick one`);
+        } else if (!hasPerf && !hasTrack) {
+          errors.push(`${where}.drift must target either perf (macro) or track (+ param "level")`);
+        } else if (hasPerf) {
+          if (typeof d.perf !== "number" || !Number.isInteger(d.perf) || (d.perf as number) < 1 || (d.perf as number) > 12) {
+            errors.push(`${where}.drift.perf must be an integer 1-12`);
+          }
+        } else {
+          if (typeof d.track !== "string" || !TRACK_SET.has(d.track)) {
+            errors.push(`${where}.drift.track must be a valid track id`);
+          }
+          if (d.param !== undefined && d.param !== "level") {
+            errors.push(`${where}.drift.param must be "level" (the only supported track drift target)`);
+          }
+        }
+        for (const key of ["center", "depth", "periodBars", "untilBar"] as const) {
+          if (typeof d[key] !== "number" || !Number.isFinite(d[key])) {
+            errors.push(`${where}.drift.${key} is required and must be a finite number`);
+          }
+        }
+        if (typeof d.periodBars === "number" && Number.isFinite(d.periodBars) && d.periodBars <= 0) {
+          errors.push(`${where}.drift.periodBars must be > 0`);
+        }
+        if (typeof d.untilBar === "number" && Number.isFinite(d.untilBar) && typeof event.atBar === "number" && d.untilBar <= event.atBar) {
+          errors.push(`${where}.drift.untilBar (${d.untilBar}) must be greater than atBar (${event.atBar})`);
+        }
+        if (d.shape !== undefined && d.shape !== "sine" && d.shape !== "triangle") {
+          errors.push(`${where}.drift.shape must be "sine" or "triangle"`);
+        }
+        if (d.resolutionBars !== undefined) {
+          if (typeof d.resolutionBars !== "number" || !Number.isFinite(d.resolutionBars) || d.resolutionBars < DRIFT_MIN_RESOLUTION_BARS) {
+            errors.push(`${where}.drift.resolutionBars must be a number >= ${DRIFT_MIN_RESOLUTION_BARS}`);
+          }
+        }
+        if (d.phase !== undefined && (typeof d.phase !== "number" || !Number.isFinite(d.phase))) {
+          errors.push(`${where}.drift.phase must be a finite number`);
+        }
+      }
+    }
   });
 
+  // Budget guard: once the score is structurally valid, expand it and reject if
+  // the concrete send count is unmanageable for the serial RPC loop. Drift
+  // gestures are the usual culprit, so name each drift event and its expansion.
+  if (errors.length === 0) {
+    const schedule = buildSchedule(score as Score);
+    if (schedule.sends.length > MAX_SENDS) {
+      const contributors = (score as Score).events
+        .map((event, index) => ({ event, index }))
+        .filter(({ event }) => event.drift !== undefined)
+        .map(({ event, index }) => {
+          const drift = event.drift as DriftGesture;
+          const target = drift.perf !== undefined ? `perf ${drift.perf}` : `${drift.track}.${drift.param ?? "level"}`;
+          return `events[${index}] drift(${target}) -> ${expandDrift(drift, event.atBar).length} sends`;
+        });
+      errors.push(
+        `score expands to ${schedule.sends.length} sends, exceeding the ${MAX_SENDS} budget`
+        + (contributors.length > 0 ? `; drift contributors: ${contributors.join("; ")}` : ""),
+      );
+    }
+  }
+
   return errors;
+}
+
+// ---------------------------------------------------------------------------
+// Drift-gesture expansion
+// ---------------------------------------------------------------------------
+
+/** Unit-amplitude periodic shape in [-1, 1]; both start at 0 rising. */
+function driftShapeValue(shape: DriftShape, x: number): number {
+  if (shape === "triangle") return (2 / Math.PI) * Math.asin(Math.sin(x));
+  return Math.sin(x);
+}
+
+/**
+ * Expand a drift gesture into concrete {bar, value} points on a fixed
+ * resolution grid from atBar to untilBar (inclusive when on-grid), clamping to
+ * 0-127 and de-duplicating consecutive equal values. Pure and side-effect free
+ * so validation can size it and buildSchedule can emit it identically.
+ */
+export function expandDrift(drift: DriftGesture, atBar: number): Array<{ bar: number; value: number }> {
+  const shape = drift.shape ?? "sine";
+  const res = drift.resolutionBars ?? 0.5;
+  const phase = drift.phase ?? 0;
+  const { center, depth, periodBars, untilBar } = drift;
+  const out: Array<{ bar: number; value: number }> = [];
+  const steps = Math.min(DRIFT_STEP_CAP, Math.floor((untilBar - atBar) / res + 1e-9));
+  let last: number | undefined;
+  for (let i = 0; i <= steps; i += 1) {
+    const bar = atBar + i * res;
+    const x = (2 * Math.PI * (bar - atBar + phase)) / periodBars;
+    const raw = center + depth * driftShapeValue(shape, x);
+    const value = Math.max(0, Math.min(127, Math.round(raw)));
+    if (value === last) continue; // dedupe consecutive equal values (no-op sends)
+    last = value;
+    out.push({ bar, value });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -422,27 +594,33 @@ export function buildSchedule(score: Score): Schedule {
   const segments = tempoSegments(score);
   const leadInBars = score.leadInBars ?? 0;
   const tailBars = score.tailBars ?? 0;
-  const leadInMs = leadInBars * barMsForTempo(score.tempo);
+  const requestedLeadInMs = leadInBars * barMsForTempo(score.tempo);
 
-  const sends: ScheduledSend[] = [];
+  // Event sends are first placed on MUSICAL time (offset from bar 0, no
+  // lead-in). We size the lead-in from the bar-0 block cost, THEN shift every
+  // event send by the effective lead-in. The set of sends that must precede
+  // `start` is independent of the lead-in length, so this two-phase build is
+  // exact.
+  const eventSends: ScheduledSend[] = [];
   const muted = new Set<string>();
   let seq = 0;
-  const offsetFor = (atBar: number): number => leadInMs + barToMs(atBar, segments);
+  const musicalOffsetFor = (atBar: number): number => barToMs(atBar, segments);
 
   // The device's sequencer mutes persist across takes (hardware state, not
   // per-pattern), so a previous render's ending mutes silently leak into the
-  // next one. Reset every track to unmuted at recording start — before the
-  // lead-in ends and any bar-0 events fire.
-  for (const track of TRACKS) {
-    sends.push({ seq: seq++, offsetMs: 0, atBar: -leadInBars, kind: "mute", track, muted: false });
-  }
+  // next one. Reset every track to unmuted at recording start (offset 0) —
+  // before the lead-in ends and any bar-0 events fire. Fixed at offset 0 and
+  // NOT shifted by the lead-in. Built first so it keeps the low seq numbers.
+  const resetSweep: ScheduledSend[] = TRACKS.map((track) => ({
+    seq: seq++, offsetMs: 0, atBar: -leadInBars, kind: "mute", track, muted: false,
+  }));
 
   const emitMute = (atBar: number, track: RytmTrackId, shouldMute: boolean): void => {
     const currentlyMuted = muted.has(track);
     if (shouldMute === currentlyMuted) return; // delta only
     if (shouldMute) muted.add(track);
     else muted.delete(track);
-    sends.push({ seq: seq++, offsetMs: offsetFor(atBar), atBar, kind: "mute", track, muted: shouldMute });
+    eventSends.push({ seq: seq++, offsetMs: musicalOffsetFor(atBar), atBar, kind: "mute", track, muted: shouldMute });
   };
 
   let musicalEndBar = 0;
@@ -450,8 +628,8 @@ export function buildSchedule(score: Score): Schedule {
     musicalEndBar = Math.max(musicalEndBar, event.atBar);
 
     if (event.pattern !== undefined) {
-      sends.push({
-        seq: seq++, offsetMs: offsetFor(event.atBar), atBar: event.atBar,
+      eventSends.push({
+        seq: seq++, offsetMs: musicalOffsetFor(event.atBar), atBar: event.atBar,
         kind: "pattern", pattern: event.pattern, immediate: event.immediate ?? false,
       });
     } else if (event.mute !== undefined) {
@@ -464,16 +642,28 @@ export function buildSchedule(score: Score): Schedule {
     } else if (event.unmuteAll === true) {
       for (const track of TRACKS) emitMute(event.atBar, track, false);
     } else if (event.scene !== undefined) {
-      sends.push({ seq: seq++, offsetMs: offsetFor(event.atBar), atBar: event.atBar, kind: "scene", scene: event.scene });
+      eventSends.push({ seq: seq++, offsetMs: musicalOffsetFor(event.atBar), atBar: event.atBar, kind: "scene", scene: event.scene });
     } else if (event.level !== undefined) {
-      sends.push({
-        seq: seq++, offsetMs: offsetFor(event.atBar), atBar: event.atBar,
+      eventSends.push({
+        seq: seq++, offsetMs: musicalOffsetFor(event.atBar), atBar: event.atBar,
         kind: "level", track: event.level.track, value: event.level.to,
       });
     } else if (event.tempo !== undefined) {
-      sends.push({ seq: seq++, offsetMs: offsetFor(event.atBar), atBar: event.atBar, kind: "tempo", tempo: event.tempo });
+      eventSends.push({ seq: seq++, offsetMs: musicalOffsetFor(event.atBar), atBar: event.atBar, kind: "tempo", tempo: event.tempo });
     } else if (event.stop === true) {
-      sends.push({ seq: seq++, offsetMs: offsetFor(event.atBar), atBar: event.atBar, kind: "stop" });
+      eventSends.push({ seq: seq++, offsetMs: musicalOffsetFor(event.atBar), atBar: event.atBar, kind: "stop" });
+    } else if (event.drift !== undefined) {
+      // Slow "knob motion": expand onto the resolution grid, reusing the live
+      // level mechanism (track drift) or the perf-macro mechanism (perf drift).
+      const drift = event.drift;
+      musicalEndBar = Math.max(musicalEndBar, drift.untilBar);
+      for (const { bar, value } of expandDrift(drift, event.atBar)) {
+        if (drift.perf !== undefined) {
+          eventSends.push({ seq: seq++, offsetMs: musicalOffsetFor(bar), atBar: bar, kind: "perf", performance: drift.perf, amount: value });
+        } else {
+          eventSends.push({ seq: seq++, offsetMs: musicalOffsetFor(bar), atBar: bar, kind: "level", track: drift.track as RytmTrackId, value });
+        }
+      }
     } else if (event.perf !== undefined) {
       const { n, ramp } = event.perf;
       // Sample every consecutive segment of the ramp, interpolating linearly.
@@ -483,7 +673,7 @@ export function buildSchedule(score: Score): Schedule {
         lastEmitted = { offset: barOffset, amount };
         const bar = event.atBar + barOffset;
         musicalEndBar = Math.max(musicalEndBar, bar);
-        sends.push({ seq: seq++, offsetMs: offsetFor(bar), atBar: bar, kind: "perf", performance: n, amount });
+        eventSends.push({ seq: seq++, offsetMs: musicalOffsetFor(bar), atBar: bar, kind: "perf", performance: n, amount });
       };
       pushPerf(ramp[0][0], Math.round(ramp[0][1]));
       for (let i = 1; i < ramp.length; i += 1) {
@@ -499,20 +689,139 @@ export function buildSchedule(score: Score): Schedule {
     }
   }
 
-  const finalTempo = segments[segments.length - 1].tempo;
-  const tailMs = tailBars * barMsForTempo(finalTempo);
-  const totalMs = leadInMs + barToMs(musicalEndBar, segments) + tailMs;
+  // Dynamic lead-in: the bar-0 block (reset sweep + every send that lands at or
+  // before the transport start, i.e. atBar 0 on musical time) is dispatched
+  // serially before `start`; size the lead-in to cover it plus headroom so the
+  // start command is not dispatched late.
+  const bar0EventCount = eventSends.filter((send) => send.offsetMs === 0).length;
+  const bar0SendCount = resetSweep.length + bar0EventCount;
+  const bar0EstimateMs = bar0SendCount * BAR0_SEND_COST_MS;
+  const effectiveLeadInMs = Math.max(requestedLeadInMs, bar0EstimateMs + LEAD_IN_HEADROOM_MS);
+
+  // Anchor every event send onto the effective lead-in (the reset sweep stays
+  // at offset 0).
+  for (const send of eventSends) send.offsetMs += effectiveLeadInMs;
 
   // Transport start is itself a scheduled send at the end of the lead-in,
   // AFTER every bar-0 send (huge seq wins the tie-break): the bar-0 pattern
   // and mutes must be in place before the sequencer runs, or whatever the
   // device played last blasts through the lead-in and the downbeat.
-  sends.push({ seq: Number.MAX_SAFE_INTEGER, offsetMs: leadInMs, atBar: 0, kind: "start", tempo: score.tempo });
+  const startSend: ScheduledSend = {
+    seq: Number.MAX_SAFE_INTEGER, offsetMs: effectiveLeadInMs, atBar: 0, kind: "start", tempo: score.tempo,
+  };
 
+  const sends = [...resetSweep, ...eventSends, startSend];
   // Stable sort by absolute time, tie-break on build order.
   sends.sort((a, b) => (a.offsetMs - b.offsetMs) || (a.seq - b.seq));
 
-  return { sends, leadInMs, tailMs, musicalEndBar, finalTempo, totalMs };
+  const finalTempo = segments[segments.length - 1].tempo;
+  const tailMs = tailBars * barMsForTempo(finalTempo);
+  const totalMs = effectiveLeadInMs + barToMs(musicalEndBar, segments) + tailMs;
+
+  return {
+    sends,
+    leadInMs: effectiveLeadInMs,
+    requestedLeadInMs,
+    effectiveLeadInMs,
+    bar0SendCount,
+    bar0EstimateMs,
+    tailMs,
+    musicalEndBar,
+    finalTempo,
+    totalMs,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Lag self-gate + state-file preflight
+// ---------------------------------------------------------------------------
+
+/** Linear-interpolation percentile (numpy default) over a sorted array. */
+function percentileSorted(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0;
+  if (sorted.length === 1) return sorted[0];
+  const rank = (p / 100) * (sorted.length - 1);
+  const lo = Math.floor(rank);
+  const hi = Math.ceil(rank);
+  if (lo === hi) return sorted[lo];
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (rank - lo);
+}
+
+/**
+ * Anchored planned offset for a send: post-start (music-grid) sends are shifted
+ * by the transport re-anchor so they land on the music's actual downbeat; the
+ * bar-0 block and the `start` send itself keep their raw planned offset.
+ */
+export function anchoredPlannedOffset(plannedOffsetMs: number, postStart: boolean, anchorShiftMs: number): number {
+  return postStart ? plannedOffsetMs + anchorShiftMs : plannedOffsetMs;
+}
+
+export interface LagGate {
+  passed: boolean;
+  medianLagMs: number;
+  p95LagMs: number;
+  postStartCount: number;
+  anchorShiftMs: number;
+  thresholds: { medianMs: number; p95Ms: number };
+}
+
+/**
+ * Lag self-gate over POST-START sends: the take passes only if the median and
+ * p95 of |actualOffset - anchoredPlannedOffset| stay under the thresholds.
+ * Pure so it can be unit-tested against synthetic `sent` logs.
+ */
+export function computeLagGate(sent: SentEntry[], anchorShiftMs: number): LagGate {
+  const lags = sent
+    .filter((entry) => entry.postStart)
+    .map((entry) => Math.abs(entry.actualOffsetMs - entry.anchoredPlannedOffsetMs));
+  const sorted = [...lags].sort((a, b) => a - b);
+  const medianLagMs = Math.round(percentileSorted(sorted, 50));
+  const p95LagMs = Math.round(percentileSorted(sorted, 95));
+  const passed = medianLagMs <= LAG_GATE_MEDIAN_MS && p95LagMs <= LAG_GATE_P95_MS;
+  return {
+    passed,
+    medianLagMs,
+    p95LagMs,
+    postStartCount: lags.length,
+    anchorShiftMs: Math.round(anchorShiftMs),
+    thresholds: { medianMs: LAG_GATE_MEDIAN_MS, p95Ms: LAG_GATE_P95_MS },
+  };
+}
+
+/** Absolute path to the daemon's persisted hardware-state file. */
+export function stateFilePath(): string {
+  return join(homedir(), ".analog-rytm-agent-bridge", "hardware-state.json");
+}
+
+export interface StatePreflight {
+  ok: boolean;
+  path: string;
+  sizeBytes: number | null; // null = file absent (fine)
+  maxBytes: number;
+  message?: string;
+}
+
+/**
+ * Preflight the daemon state file: abort when it exceeds the size limit (the
+ * per-send persist cost bloats and starves the live schedule). A missing file
+ * is fine. Pure w.r.t. a supplied path so it is unit-testable.
+ */
+export function preflightStateFile(path: string = stateFilePath(), maxBytes: number = STATE_FILE_MAX_BYTES): StatePreflight {
+  let sizeBytes: number;
+  try {
+    sizeBytes = statSync(path).size;
+  } catch {
+    return { ok: true, path, sizeBytes: null, maxBytes }; // absent = proceed
+  }
+  if (sizeBytes > maxBytes) {
+    const mb = (sizeBytes / 1024 / 1024).toFixed(1);
+    const limitMb = (maxBytes / 1024 / 1024).toFixed(0);
+    return {
+      ok: false, path, sizeBytes, maxBytes,
+      message: `hardware-state.json is ${mb} MB (limit ${limitMb} MB) at ${path}; prune it before rendering, or pass --skip-state-check to override.`,
+    };
+  }
+  return { ok: true, path, sizeBytes, maxBytes };
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +834,8 @@ export interface RenderOptions {
   adapter?: "mock" | "hardware";
   repository?: string;
   requestTimeoutMs?: number;
+  /** Skip the hardware-state.json size preflight (hardware adapter only). */
+  skipStateCheck?: boolean;
 }
 
 export interface SentEntry {
@@ -532,8 +843,28 @@ export interface SentEntry {
   kind: ScheduledSend["kind"];
   atBar: number;
   plannedOffsetMs: number;
+  /** Planned offset after the transport re-anchor (post-start sends only). */
+  anchoredPlannedOffsetMs: number;
   actualOffsetMs: number;
+  /** True for sends dispatched after the transport `start` (music-grid sends). */
+  postStart: boolean;
+  /** actual - anchoredPlanned (signed); the gate measures |lagMs|. */
+  lagMs: number;
   payload: Record<string, unknown>;
+}
+
+export interface ScheduleSummary {
+  totalMs: number;
+  leadInMs: number;
+  requestedLeadInMs: number;
+  effectiveLeadInMs: number;
+  bar0SendCount: number;
+  bar0EstimateMs: number;
+  anchorShiftMs: number;
+  tailMs: number;
+  musicalEndBar: number;
+  finalTempo: number;
+  sendCount: number;
 }
 
 export interface RenderSummary {
@@ -542,7 +873,8 @@ export interface RenderSummary {
   outDir: string;
   wavPath?: string;
   eventsLogPath: string;
-  schedule: { totalMs: number; leadInMs: number; tailMs: number; musicalEndBar: number; finalTempo: number; sendCount: number };
+  schedule: ScheduleSummary;
+  lagGate: LagGate;
   recording: { recordingId: string; status: string; startedAt?: string; stoppedAt?: string };
   sent: SentEntry[];
   daemonEvents: Array<{ cursor: number; receivedAt: string; type: string }>;
@@ -610,6 +942,15 @@ export async function renderScore(options: RenderOptions): Promise<RenderSummary
   const adapter = options.adapter ?? "hardware";
   const repository = options.repository ?? repositoryRoot();
   const schedule = buildSchedule(score);
+
+  // State-file preflight (real hardware only; the mock adapter has no persisted
+  // hardware state). Abort BEFORE any daemon contact if the state file is
+  // bloated, unless explicitly overridden.
+  if (adapter === "hardware" && !options.skipStateCheck) {
+    const preflight = preflightStateFile();
+    if (!preflight.ok) throw new Error(preflight.message);
+  }
+
   mkdirSync(options.outDir, { recursive: true });
 
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -654,22 +995,40 @@ export async function renderScore(options: RenderOptions): Promise<RenderSummary
     const epoch = Date.now();
 
     // 3. Drift-corrected event loop: each send is timed against the FIXED epoch,
-    //    so per-send sleep jitter never accumulates.
+    //    so per-send sleep jitter never accumulates. The bar-0 block races to
+    //    complete before the transport `start`; because each RPC costs real
+    //    wall-clock, `start` can still dispatch LATE. When it does, we capture
+    //    that lateness as anchorShiftMs and shift the target dispatch time of
+    //    every POST-START send by it, so the music-grid sends land on the
+    //    music's actual downbeat rather than the pre-start wall clock.
+    const startPlannedOffsetMs = schedule.sends.find((send) => send.kind === "start")?.offsetMs ?? schedule.effectiveLeadInMs;
+    let anchorShiftMs = 0;
+    let afterStart = false;
     for (const send of schedule.sends) {
-      await sleepUntil(epoch, send.offsetMs);
+      const anchoredPlannedOffsetMs = anchoredPlannedOffset(send.offsetMs, afterStart, anchorShiftMs);
+      await sleepUntil(epoch, anchoredPlannedOffsetMs);
       const actualOffsetMs = Date.now() - epoch;
       await dispatch(client, send);
       sent.push({
         seq: send.seq, kind: send.kind, atBar: send.atBar,
-        plannedOffsetMs: Math.round(send.offsetMs), actualOffsetMs,
+        plannedOffsetMs: Math.round(send.offsetMs),
+        anchoredPlannedOffsetMs: Math.round(anchoredPlannedOffsetMs),
+        actualOffsetMs,
+        postStart: afterStart,
+        lagMs: actualOffsetMs - Math.round(anchoredPlannedOffsetMs),
         payload: payloadFor(send),
       });
+      if (send.kind === "start") {
+        anchorShiftMs = actualOffsetMs - startPlannedOffsetMs;
+        afterStart = true;
+      }
     }
 
-    // 4. Hold for the tail, then stop transport and recording. A score with a
+    // 4. Hold for the tail (shifted onto the anchored grid so the ring-out is
+    //    captured in full), then stop transport and recording. A score with a
     //    stop event already cut the sequencer (EP ending: the tail records the
     //    ring-out), so don't append a second transport stop to the journal.
-    await sleepUntil(epoch, schedule.totalMs);
+    await sleepUntil(epoch, schedule.totalMs + anchorShiftMs);
     if (!schedule.sends.some((send) => send.kind === "stop")) {
       await client.setTransport({ command: "stop" });
     }
@@ -683,6 +1042,26 @@ export async function renderScore(options: RenderOptions): Promise<RenderSummary
       type: (entry.event as { type?: string }).type ?? "unknown",
     }));
 
+    // 6. Lag self-gate over the post-start (music-grid) sends, against the
+    //    ANCHORED plan. Result is always recorded; the caller (CLI) decides the
+    //    exit code. The take is never discarded — a failed gate still keeps its
+    //    WAV for forensics.
+    const lagGate = computeLagGate(sent, anchorShiftMs);
+
+    const scheduleSummary: ScheduleSummary = {
+      totalMs: schedule.totalMs,
+      leadInMs: schedule.leadInMs,
+      requestedLeadInMs: schedule.requestedLeadInMs,
+      effectiveLeadInMs: schedule.effectiveLeadInMs,
+      bar0SendCount: schedule.bar0SendCount,
+      bar0EstimateMs: schedule.bar0EstimateMs,
+      anchorShiftMs: Math.round(anchorShiftMs),
+      tailMs: schedule.tailMs,
+      musicalEndBar: schedule.musicalEndBar,
+      finalTempo: schedule.finalTempo,
+      sendCount: schedule.sends.length,
+    };
+
     const wavPath = stopped.audio?.path;
     const eventsLogPath = join(options.outDir, `${recordingId}.events.json`);
     const log = {
@@ -690,10 +1069,8 @@ export async function renderScore(options: RenderOptions): Promise<RenderSummary
       name: score.name,
       adapter,
       renderedAt: new Date().toISOString(),
-      schedule: {
-        totalMs: schedule.totalMs, leadInMs: schedule.leadInMs, tailMs: schedule.tailMs,
-        musicalEndBar: schedule.musicalEndBar, finalTempo: schedule.finalTempo, sendCount: schedule.sends.length,
-      },
+      schedule: scheduleSummary,
+      lagGate,
       wavPath,
       recording: {
         recordingId,
@@ -712,7 +1089,8 @@ export async function renderScore(options: RenderOptions): Promise<RenderSummary
       outDir: options.outDir,
       wavPath,
       eventsLogPath,
-      schedule: log.schedule,
+      schedule: scheduleSummary,
+      lagGate,
       recording: log.recording,
       sent,
       daemonEvents,
@@ -744,10 +1122,11 @@ interface CliArgs {
   out?: string;
   adapter: "mock" | "hardware";
   dryRun: boolean;
+  skipStateCheck: boolean;
 }
 
 export function parseArgs(argv: string[]): CliArgs {
-  const parsed: CliArgs = { adapter: "hardware", dryRun: false };
+  const parsed: CliArgs = { adapter: "hardware", dryRun: false, skipStateCheck: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--out") { parsed.out = argv[++i]; }
@@ -756,6 +1135,7 @@ export function parseArgs(argv: string[]): CliArgs {
       if (value !== "mock" && value !== "hardware") throw new Error("--adapter must be mock or hardware");
       parsed.adapter = value;
     } else if (arg === "--dry-run") { parsed.dryRun = true; }
+    else if (arg === "--skip-state-check") { parsed.skipStateCheck = true; }
     else if (!arg.startsWith("--") && parsed.scorePath === undefined) { parsed.scorePath = arg; }
     else { throw new Error(`unexpected argument: ${arg}`); }
   }
@@ -765,7 +1145,7 @@ export function parseArgs(argv: string[]): CliArgs {
 export async function main(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
   if (args.scorePath === undefined) {
-    process.stderr.write("usage: render:score -- <score.json> [--out <dir>] [--adapter mock|hardware] [--dry-run]\n");
+    process.stderr.write("usage: render:score -- <score.json> [--out <dir>] [--adapter mock|hardware] [--dry-run] [--skip-state-check]\n");
     process.exitCode = 2;
     return;
   }
@@ -785,8 +1165,11 @@ export async function main(argv: string[]): Promise<void> {
       name: score.name,
       dryRun: true,
       schedule: {
-        totalMs: schedule.totalMs, leadInMs: schedule.leadInMs, tailMs: schedule.tailMs,
-        musicalEndBar: schedule.musicalEndBar, finalTempo: schedule.finalTempo, sendCount: schedule.sends.length,
+        totalMs: schedule.totalMs, leadInMs: schedule.leadInMs,
+        requestedLeadInMs: schedule.requestedLeadInMs, effectiveLeadInMs: schedule.effectiveLeadInMs,
+        bar0SendCount: schedule.bar0SendCount, bar0EstimateMs: schedule.bar0EstimateMs,
+        tailMs: schedule.tailMs, musicalEndBar: schedule.musicalEndBar,
+        finalTempo: schedule.finalTempo, sendCount: schedule.sends.length,
       },
       sends: schedule.sends.map((send) => ({ atBar: send.atBar, offsetMs: Math.round(send.offsetMs), ...payloadFor(send), kind: send.kind })),
     }, null, 2)}\n`);
@@ -796,8 +1179,35 @@ export async function main(argv: string[]): Promise<void> {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const outDir = args.out ?? join(repositoryRoot(), "hardware", "runs", `score-${score.name}-${stamp}`);
 
-  const summary = await renderScore({ score, outDir, adapter: args.adapter });
+  let summary: RenderSummary;
+  try {
+    summary = await renderScore({ score, outDir, adapter: args.adapter, skipStateCheck: args.skipStateCheck });
+  } catch (err) {
+    // State preflight and daemon-startup failures land here: print a clean
+    // operator message rather than an unhandled-rejection stack trace.
+    process.stderr.write(`render aborted: ${(err as Error).message}\n`);
+    process.exitCode = 1;
+    return;
+  }
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+
+  // Lag self-gate: a failed take still produced its WAV (already written), but
+  // the render exits non-zero with a loud summary so automation notices.
+  if (!summary.lagGate.passed) {
+    const g = summary.lagGate;
+    const bar = "=".repeat(64);
+    process.stderr.write(
+      `\n${bar}\n`
+      + `LAG GATE FAILED — post-start sends drifted off the music grid\n`
+      + `  median |lag| = ${g.medianLagMs}ms (limit ${g.thresholds.medianMs}ms)\n`
+      + `  p95    |lag| = ${g.p95LagMs}ms (limit ${g.thresholds.p95Ms}ms)\n`
+      + `  post-start sends: ${g.postStartCount}   anchorShiftMs: ${g.anchorShiftMs}\n`
+      + `  WAV kept for forensics: ${summary.wavPath ?? "(none)"}\n`
+      + `  events log: ${summary.eventsLogPath}\n`
+      + `${bar}\n`,
+    );
+    process.exitCode = 1;
+  }
 }
 
 // import.meta.main is unavailable before Node 22.18/24, where it silently no-ops.

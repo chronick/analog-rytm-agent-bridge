@@ -1,17 +1,22 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  anchoredPlannedOffset,
   barMsForTempo,
   barToMs,
   buildSchedule,
+  computeLagGate,
+  expandDrift,
+  preflightStateFile,
   renderScore,
   tempoSegments,
   validateScore,
   type Score,
+  type SentEntry,
 } from "../src/bin/render-score.ts";
 
 const REPOSITORY = fileURLToPath(new URL("../", import.meta.url));
@@ -181,6 +186,262 @@ test("buildSchedule resolves mute deltas, soloKeep, unmuteAll, and perf sampling
 });
 
 // --------------------------------------------------------------------------
+// Dynamic lead-in sizing
+// --------------------------------------------------------------------------
+
+test("buildSchedule sizes the lead-in to cover the bar-0 block", () => {
+  // leadInBars 0 -> requested 0; bar-0 block = 12 reset sweep + 1 pattern +
+  // 2 mutes = 15 sends -> estimate 15*300 = 4500 -> effective 4500 + 750.
+  const score: Score = {
+    name: "leadin",
+    tempo: 120, // 1 bar = 2000ms
+    leadInBars: 0,
+    events: [
+      { atBar: 0, pattern: "A01" },
+      { atBar: 0, mute: ["BD", "BT"] },
+      { atBar: 4, scene: 1 },
+    ],
+  };
+  const schedule = buildSchedule(score);
+  assert.equal(schedule.bar0SendCount, 15);
+  assert.equal(schedule.bar0EstimateMs, 4500);
+  assert.equal(schedule.requestedLeadInMs, 0);
+  assert.equal(schedule.effectiveLeadInMs, 5250); // 4500 + 750
+  assert.equal(schedule.leadInMs, 5250); // back-compat alias == effective
+
+  // Transport start sits at the effective lead-in, AFTER the bar-0 block.
+  const start = schedule.sends.find((s) => s.kind === "start");
+  assert.ok(start && start.offsetMs === 5250);
+
+  // Post-start (music-grid) sends are anchored onto the effective lead-in:
+  // scene at bar 4 -> 5250 + 4*2000 = 13250.
+  const scene = schedule.sends.find((s) => s.kind === "scene");
+  assert.ok(scene && scene.offsetMs === 13250);
+
+  // The reset sweep stays pinned at offset 0 (fires during the lead-in).
+  const sweep = schedule.sends.filter((s) => s.offsetMs === 0);
+  assert.equal(sweep.length, 12);
+  assert.ok(sweep.every((s) => s.kind === "mute" && s.muted === false));
+});
+
+test("buildSchedule keeps a large requested lead-in when it exceeds the estimate", () => {
+  // leadInBars 8 @120 = 16000ms, well over the bar-0 estimate (13*300+750).
+  const score: Score = {
+    name: "big-leadin",
+    tempo: 120,
+    leadInBars: 8,
+    events: [{ atBar: 0, pattern: "A01" }],
+  };
+  const schedule = buildSchedule(score);
+  assert.equal(schedule.requestedLeadInMs, 16000);
+  assert.equal(schedule.effectiveLeadInMs, 16000);
+  const start = schedule.sends.find((s) => s.kind === "start");
+  assert.ok(start && start.offsetMs === 16000);
+});
+
+// --------------------------------------------------------------------------
+// Drift gestures
+// --------------------------------------------------------------------------
+
+test("expandDrift: sine period, clamp, and consecutive-value dedupe", () => {
+  // center 100, depth 8, period 12, res 1, until 4, sine:
+  // bar0..4 -> 100, 104, 107, 108, 107.
+  const sine = expandDrift(
+    { track: "CH", param: "level", center: 100, depth: 8, periodBars: 12, untilBar: 4, resolutionBars: 1 },
+    0,
+  );
+  assert.deepEqual(sine.map((p) => p.value), [100, 104, 107, 108, 107]);
+  assert.deepEqual(sine.map((p) => p.bar), [0, 1, 2, 3, 4]);
+
+  // Huge depth clamps into 0..127; long runs at the rails collapse via dedupe.
+  const clamped = expandDrift(
+    { perf: 3, center: 64, depth: 200, periodBars: 8, untilBar: 8, resolutionBars: 0.5 },
+    0,
+  );
+  assert.ok(clamped.every((p) => p.value >= 0 && p.value <= 127), "clamped 0..127");
+  assert.deepEqual(clamped.map((p) => p.value), [64, 127, 64, 0, 64], "deduped rail runs");
+
+  // A zero-depth drift is constant -> a single send after dedupe.
+  const flat = expandDrift(
+    { track: "BD", center: 90, depth: 0, periodBars: 4, untilBar: 16, resolutionBars: 0.5 },
+    0,
+  );
+  assert.equal(flat.length, 1);
+  assert.equal(flat[0].value, 90);
+});
+
+test("expandDrift: triangle shape and phase offset", () => {
+  // triangle center 64 depth 64 period 4 res 1: 64, +peak(127 clamped), 64, 0, 64.
+  const tri = expandDrift(
+    { track: "BD", center: 64, depth: 64, periodBars: 4, untilBar: 4, resolutionBars: 1, shape: "triangle" },
+    0,
+  );
+  assert.deepEqual(tri.map((p) => p.value), [64, 127, 64, 0, 64]);
+
+  // phase quarter-period shifts a sine peak to bar 0.
+  const phased = expandDrift(
+    { track: "BD", center: 64, depth: 60, periodBars: 4, untilBar: 1, resolutionBars: 1, phase: 1 },
+    0,
+  );
+  assert.equal(phased[0].value, 124); // sin(2*pi*1/4) = 1 -> 64 + 60
+});
+
+test("buildSchedule expands a track drift onto live level sends and a perf drift onto macro sends", () => {
+  const score: Score = {
+    name: "drift-both",
+    tempo: 240, // 1 bar = 1000ms
+    leadInBars: 0,
+    events: [
+      { atBar: 16, drift: { track: "CH", param: "level", center: 100, depth: 8, periodBars: 12, untilBar: 20, resolutionBars: 1 } },
+      { atBar: 24, drift: { perf: 3, center: 20, depth: 15, periodBars: 16, untilBar: 28, resolutionBars: 1 } },
+    ],
+  };
+  const schedule = buildSchedule(score);
+
+  const levels = schedule.sends.filter((s) => s.kind === "level");
+  assert.ok(levels.length > 0);
+  assert.ok(levels.every((s) => s.kind === "level" && s.track === "CH"));
+  // Track drift starts at atBar 16: first level send is at bar 16.
+  assert.ok(levels.every((s) => s.atBar >= 16 && s.atBar <= 20));
+
+  const perfs = schedule.sends.filter((s) => s.kind === "perf");
+  assert.ok(perfs.length > 0);
+  assert.ok(perfs.every((s) => s.kind === "perf" && s.performance === 3));
+  assert.ok(perfs.every((s) => s.atBar >= 24 && s.atBar <= 28));
+
+  // musicalEndBar extends to the last drift's untilBar so the tail covers it.
+  assert.equal(schedule.musicalEndBar, 28);
+});
+
+test("validateScore drift errors: missing fields, bad range, resolution, target", () => {
+  const err = (event: Record<string, unknown>) =>
+    validateScore({ name: "x", tempo: 120, events: [{ atBar: 0, ...event }] });
+
+  assert.ok(err({ drift: { track: "CH", center: 1, depth: 1, periodBars: 4 } })
+    .some((e) => e.includes("untilBar is required")));
+  assert.ok(err({ drift: { track: "CH", center: 1, depth: 1, untilBar: 8 } })
+    .some((e) => e.includes("periodBars is required")));
+  assert.ok(validateScore({ name: "x", tempo: 120, events: [{ atBar: 8, drift: { track: "CH", center: 1, depth: 1, periodBars: 4, untilBar: 4 } }] })
+    .some((e) => e.includes("must be greater than atBar")));
+  assert.ok(err({ drift: { track: "CH", center: 1, depth: 1, periodBars: 4, untilBar: 8, resolutionBars: 0.1 } })
+    .some((e) => e.includes("resolutionBars must be a number >= 0.25")));
+  assert.ok(err({ drift: { center: 1, depth: 1, periodBars: 4, untilBar: 8 } })
+    .some((e) => e.includes("must target either perf")));
+  assert.ok(err({ drift: { perf: 3, track: "CH", center: 1, depth: 1, periodBars: 4, untilBar: 8 } })
+    .some((e) => e.includes("cannot target both")));
+  assert.ok(err({ drift: { perf: 99, center: 1, depth: 1, periodBars: 4, untilBar: 8 } })
+    .some((e) => e.includes("drift.perf must be an integer 1-12")));
+  assert.ok(err({ drift: { track: "ZZ", center: 1, depth: 1, periodBars: 4, untilBar: 8 } })
+    .some((e) => e.includes("drift.track must be a valid track id")));
+  assert.ok(err({ drift: { track: "CH", param: "pan", center: 1, depth: 1, periodBars: 4, untilBar: 8 } })
+    .some((e) => e.includes('drift.param must be "level"')));
+  assert.ok(err({ drift: { track: "CH", center: 1, depth: 1, periodBars: 4, untilBar: 8, wobble: 2 } })
+    .some((e) => e.includes('unknown key "wobble"')));
+  // drift is an action -> after a stop event it is rejected like other sequenced actions.
+  assert.ok(validateScore({ name: "x", tempo: 120, events: [{ atBar: 0, stop: true }, { atBar: 1, drift: { track: "CH", center: 1, depth: 1, periodBars: 4, untilBar: 8 } }] })
+    .some((e) => e.includes("after stop")));
+  // A well-formed drift validates clean.
+  assert.deepEqual(
+    validateScore({ name: "x", tempo: 120, events: [{ atBar: 16, drift: { track: "CH", param: "level", center: 100, depth: 8, periodBars: 12, untilBar: 60 } }] }),
+    [],
+  );
+});
+
+test("validateScore budget guard rejects oversized drift expansions naming the culprit", () => {
+  // res 0.25 over 400 bars at period 3 -> ~1601 sends, far over the 800 budget.
+  const errors = validateScore({
+    name: "x",
+    tempo: 120,
+    events: [{ atBar: 0, drift: { perf: 3, center: 64, depth: 60, periodBars: 3, untilBar: 400, resolutionBars: 0.25 } }],
+  });
+  const budget = errors.find((e) => e.includes("budget"));
+  assert.ok(budget, "budget guard fires");
+  assert.ok(budget!.includes("events[0]"), "names the offending drift event");
+  assert.ok(budget!.includes("perf 3"), "names the drift target");
+  assert.ok(/exceeding the 800 budget/.test(budget!), "names the limit");
+});
+
+// --------------------------------------------------------------------------
+// Transport re-anchor + lag self-gate
+// --------------------------------------------------------------------------
+
+test("anchoredPlannedOffset shifts only post-start sends", () => {
+  // Pre-start and the start send itself are never shifted.
+  assert.equal(anchoredPlannedOffset(2000, false, 1500), 2000);
+  // Post-start sends slide by the whole anchor shift onto the music grid.
+  assert.equal(anchoredPlannedOffset(6000, true, 1500), 7500);
+  assert.equal(anchoredPlannedOffset(6000, true, 0), 6000);
+});
+
+test("computeLagGate: pass, median failure, p95 failure, and empty post-start", () => {
+  const entry = (postStart: boolean, actual: number, anchored: number): SentEntry => ({
+    seq: 0, kind: "level", atBar: 0, plannedOffsetMs: anchored,
+    anchoredPlannedOffsetMs: anchored, actualOffsetMs: actual, postStart,
+    lagMs: actual - anchored, payload: {},
+  });
+
+  // All post-start lags tiny -> pass. A pre-start outlier is ignored.
+  const pass = computeLagGate([
+    entry(false, 9000, 0), // huge, but pre-start -> excluded
+    entry(true, 102, 100),
+    entry(true, 205, 200),
+    entry(true, 298, 300),
+  ], 3);
+  assert.equal(pass.passed, true);
+  assert.equal(pass.postStartCount, 3);
+  assert.equal(pass.anchorShiftMs, 3);
+  assert.ok(pass.medianLagMs <= 60 && pass.p95LagMs <= 500);
+
+  // Median over threshold -> fail (every post-start lag ~100ms).
+  const medFail = computeLagGate(
+    Array.from({ length: 5 }, () => entry(true, 200, 100)),
+    0,
+  );
+  assert.equal(medFail.medianLagMs, 100);
+  assert.equal(medFail.passed, false);
+
+  // Median fine but a single p95 outlier over 500ms -> fail.
+  const p95Fail = computeLagGate([
+    entry(true, 105, 100),
+    entry(true, 210, 200),
+    entry(true, 900, 300), // 600ms outlier
+  ], 0);
+  assert.ok(p95Fail.medianLagMs <= 60);
+  assert.ok(p95Fail.p95LagMs > 500);
+  assert.equal(p95Fail.passed, false);
+
+  // No post-start sends -> trivially passes.
+  const empty = computeLagGate([entry(false, 500, 0)], 0);
+  assert.equal(empty.passed, true);
+  assert.equal(empty.postStartCount, 0);
+});
+
+// --------------------------------------------------------------------------
+// State-file preflight
+// --------------------------------------------------------------------------
+
+test("preflightStateFile: missing ok, under-limit ok, over-limit aborts with size", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rytm-state-"));
+  try {
+    const missing = preflightStateFile(join(dir, "nope.json"), 6 * 1024 * 1024);
+    assert.equal(missing.ok, true);
+    assert.equal(missing.sizeBytes, null);
+
+    const small = join(dir, "small.json");
+    await writeFile(small, "x".repeat(100));
+    assert.equal(preflightStateFile(small, 6 * 1024 * 1024).ok, true);
+
+    // Use a tiny maxBytes so we don't have to write a 6 MB file.
+    const over = preflightStateFile(small, 10);
+    assert.equal(over.ok, false);
+    assert.equal(over.sizeBytes, 100);
+    assert.ok(over.message && over.message.includes("prune"), "message tells operator to prune");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// --------------------------------------------------------------------------
 // End-to-end against the Rust MOCK daemon
 // --------------------------------------------------------------------------
 
@@ -236,6 +497,60 @@ test("renders a tiny score end-to-end through the mock daemon", async () => {
       "reset sweep unmutes all 12 tracks",
     );
     assert.equal(summary.schedule.sendCount, summary.sent.length);
+
+    // Dynamic lead-in: leadInBars 0 forces the lead-in to cover the bar-0 block
+    // (12 reset + pattern + 2 mutes = 15 sends -> 4500ms estimate + 750ms).
+    assert.equal(summary.schedule.requestedLeadInMs, 0);
+    assert.equal(summary.schedule.bar0SendCount, 15);
+    assert.equal(summary.schedule.bar0EstimateMs, 4500);
+    assert.equal(summary.schedule.effectiveLeadInMs, 5250);
+    assert.equal(summary.schedule.leadInMs, 5250);
+
+    // Transport re-anchor bookkeeping: exactly one start send, flagged
+    // pre-start; the shift is the start send's own lateness.
+    const starts = summary.sent.filter((s) => s.kind === "start");
+    assert.equal(starts.length, 1);
+    assert.equal(starts[0].postStart, false);
+    const anchorShiftMs = starts[0].actualOffsetMs - starts[0].plannedOffsetMs;
+    assert.equal(summary.schedule.anchorShiftMs, Math.round(anchorShiftMs));
+    assert.equal(summary.lagGate.anchorShiftMs, Math.round(anchorShiftMs));
+
+    // Every send carries the additive anchor fields, and the shift is applied
+    // to post-start (music-grid) sends only. Pre-start sends keep raw offsets.
+    let seenStart = false;
+    for (const entry of summary.sent) {
+      assert.equal(typeof entry.postStart, "boolean");
+      assert.equal(entry.lagMs, entry.actualOffsetMs - entry.anchoredPlannedOffsetMs);
+      if (seenStart) {
+        assert.equal(entry.postStart, true, `${entry.kind} after start is post-start`);
+        assert.equal(entry.anchoredPlannedOffsetMs, entry.plannedOffsetMs + Math.round(anchorShiftMs));
+      } else {
+        assert.equal(entry.postStart, false);
+        assert.equal(entry.anchoredPlannedOffsetMs, entry.plannedOffsetMs);
+      }
+      if (entry.kind === "start") seenStart = true;
+    }
+
+    // Lag self-gate is always recorded. With the generous dynamic lead-in the
+    // mock keeps the start on time, so the take passes its own gate.
+    assert.equal(summary.lagGate.thresholds.medianMs, 60);
+    assert.equal(summary.lagGate.thresholds.p95Ms, 500);
+    assert.equal(summary.lagGate.passed, true);
+    assert.ok(summary.lagGate.postStartCount > 0);
+
+    // events.json is additive/back-compat: original schema plus the new blocks.
+    const log = JSON.parse(await readFile(summary.eventsLogPath, "utf8")) as {
+      schema: string;
+      schedule: { effectiveLeadInMs: number; anchorShiftMs: number; bar0SendCount: number };
+      lagGate: { passed: boolean };
+      sent: Array<{ postStart: boolean; anchoredPlannedOffsetMs: number }>;
+    };
+    assert.equal(log.schema, "analog-rytm-score-render.v1");
+    assert.equal(log.schedule.effectiveLeadInMs, 5250);
+    assert.equal(log.schedule.bar0SendCount, 15);
+    assert.equal(typeof log.schedule.anchorShiftMs, "number");
+    assert.equal(log.lagGate.passed, true);
+    assert.ok(log.sent.every((s) => typeof s.postStart === "boolean" && typeof s.anchoredPlannedOffsetMs === "number"));
 
     // The daemon journal carries the events in the exact order they were sent
     // (transport start is now IN the sequence, after the bar-0 state). The
