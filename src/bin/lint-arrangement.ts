@@ -1,7 +1,8 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { extname, join } from "node:path";
+import { basename, extname, join } from "node:path";
 import { validateScore } from "./render-score.ts";
 import type { Score } from "./render-score.ts";
+import { analyzeRenderFile, sidecarTempo, type RenderAnalysis } from "./analyze-render.ts";
 
 // =============================================================================
 // lint-arrangement: an offline, measurable arrangement-quality GATE over a
@@ -452,6 +453,11 @@ export interface ArrangementReport {
   name: string;
   findings: ArrangementFinding[];
   metrics?: ArrangementMetrics;
+  // Bottom-up ground truth, present only in --render mode: the actual rendered
+  // audio's bar-to-bar self-similarity (see analyze-render.ts). The score-level
+  // metrics above conduct at 2-8 bar granularity and are blind to a 1-bar
+  // pattern looping verbatim underneath; this is the layer that catches it.
+  audio?: RenderAnalysis;
 }
 
 function buildFindings(metrics: ArrangementMetrics): ArrangementFinding[] {
@@ -555,8 +561,72 @@ export function lintArrangement(input: unknown): ArrangementReport {
 }
 
 // ---------------------------------------------------------------------------
+// Bottom-up ground-truth gate: attach rendered-audio analysis (--render mode)
+// ---------------------------------------------------------------------------
+// Only the analyzer's REPETITION findings become gate-failing arrangement
+// findings. A tempo mismatch or the raw index are surfaced in the report/summary
+// text but don't themselves fail the gate.
+const AUDIO_GATE_PREFIXES = ["verbatim-loop", "static stretch", "starved"];
+export const AUDIO_REPETITIVE_INDEX = 55; // index at/above this = a "repetitive" render for the EP roll-up
+
+function collectWavs(path: string): string[] {
+  if (isDirectory(path)) {
+    return readdirSync(path)
+      .filter((entry) => extname(entry).toLowerCase() === ".wav")
+      .sort()
+      .map((entry) => join(path, entry));
+  }
+  return [path];
+}
+
+// Match a linted score to its render by name: the score name (e.g.
+// "first-light") appears in the render filename ("score-first-light-...wav").
+function matchRenderForScore(name: string, wavs: string[]): string | undefined {
+  const key = name.toLowerCase().trim().replace(/\s+/g, "-");
+  if (!key) return undefined;
+  return wavs.find((w) => basename(w).toLowerCase().includes(key));
+}
+
+/**
+ * Analyze the render(s) at `renderPath` (a WAV file or a directory of WAVs) and
+ * fold each into the matching score report as `report.audio`, promoting the
+ * analyzer's repetition findings to gate-failing arrangement findings. Tempo per
+ * render: `tempoOverride` if given, else the render's sidecar events.json
+ * `finalTempo`/metadata tempo, else 120. Mutates and returns `reports`.
+ */
+export function attachRenderAnalyses(reports: ArrangementReport[], renderPath: string, tempoOverride?: number): ArrangementReport[] {
+  const wavs = collectWavs(renderPath);
+  // Single score + single render: match unconditionally (names may not align).
+  const forceSingle = reports.length === 1 && wavs.length === 1;
+  for (const report of reports) {
+    const match = forceSingle ? wavs[0] : matchRenderForScore(report.name, wavs);
+    if (!match) continue;
+    const tempo = tempoOverride ?? sidecarTempo(match) ?? 120;
+    const audio = analyzeRenderFile(match, { tempo });
+    report.audio = audio;
+    for (const finding of audio.findings) {
+      if (AUDIO_GATE_PREFIXES.some((prefix) => finding.startsWith(prefix))) {
+        report.findings.push({ severity: "warning", section: "audio", message: finding });
+      }
+    }
+  }
+  return reports;
+}
+
+// ---------------------------------------------------------------------------
 // EP-level summary (directory mode)
 // ---------------------------------------------------------------------------
+export interface AudioEpSummary {
+  rendersAnalyzed: number;
+  meanRepetitivenessIndex: number;
+  maxRepetitivenessIndex: number;
+  verbatimLoopSmellCount: number; // (a) mean-adjacent-similarity flags
+  staticStretchCount: number; // (b) longest-run flags
+  repetitiveRenderCount: number; // index >= AUDIO_REPETITIVE_INDEX, or (a)/(b) flagged
+  worstName?: string;
+  groundTruthFlag: boolean; // the bottom-up gate verdict
+}
+
 export interface EpSummary {
   scoreCount: number;
   silentScoreCount: number;
@@ -565,6 +635,8 @@ export interface EpSummary {
   dominantBuildType?: string;
   dominantBuildFraction: number;
   buildDiversityFlag: boolean;
+  // Present only when --render attached audio to at least one score.
+  audio?: AudioEpSummary;
 }
 
 export function buildEpSummary(reports: ArrangementReport[]): EpSummary {
@@ -595,6 +667,43 @@ export function buildEpSummary(reports: ArrangementReport[]): EpSummary {
     dominantBuildType,
     dominantBuildFraction,
     buildDiversityFlag: totalBuilds >= 2 && dominantBuildFraction > EP_BUILD_DOMINANCE_FRACTION,
+    audio: buildAudioSummary(reports),
+  };
+}
+
+// Roll the per-score audio analyses up into the EP-level ground-truth gate.
+// Returns undefined when no report carries audio (i.e. not in --render mode),
+// keeping the plain Ep summary byte-identical to before.
+export function buildAudioSummary(reports: ArrangementReport[]): AudioEpSummary | undefined {
+  const withAudio = reports.filter((report): report is ArrangementReport & { audio: RenderAnalysis } => report.audio !== undefined);
+  if (withAudio.length === 0) return undefined;
+  const indices = withAudio.map((report) => report.audio.metrics.repetitivenessIndex);
+  const meanRepetitivenessIndex = indices.reduce((a, b) => a + b, 0) / indices.length;
+  let maxRepetitivenessIndex = 0;
+  let worstName: string | undefined;
+  for (const report of withAudio) {
+    if (report.audio.metrics.repetitivenessIndex >= maxRepetitivenessIndex) {
+      maxRepetitivenessIndex = report.audio.metrics.repetitivenessIndex;
+      worstName = report.name;
+    }
+  }
+  const verbatimLoopSmellCount = withAudio.filter((report) => report.audio.metrics.adjacentSimilarityFlag).length;
+  const staticStretchCount = withAudio.filter((report) => report.audio.metrics.longestRunFlag).length;
+  const repetitiveRenderCount = withAudio.filter(
+    (report) =>
+      report.audio.metrics.repetitivenessIndex >= AUDIO_REPETITIVE_INDEX ||
+      report.audio.metrics.adjacentSimilarityFlag ||
+      report.audio.metrics.longestRunFlag,
+  ).length;
+  return {
+    rendersAnalyzed: withAudio.length,
+    meanRepetitivenessIndex,
+    maxRepetitivenessIndex,
+    verbatimLoopSmellCount,
+    staticStretchCount,
+    repetitiveRenderCount,
+    worstName,
+    groundTruthFlag: repetitiveRenderCount > 0 || meanRepetitivenessIndex >= AUDIO_REPETITIVE_INDEX,
   };
 }
 
@@ -634,6 +743,16 @@ function formatReport(report: ArrangementReport): string {
   );
   lines.push(`  unattended: longest gap ${unattended.longestGapBars} bars (from bar ${unattended.atBar})`);
 
+  if (report.audio) {
+    const m = report.audio.metrics;
+    lines.push(
+      `  audio ground-truth: ${report.audio.barCount} bars @ ${report.audio.tempoLocked} BPM` +
+        ` | adj-sim ${m.meanAdjacentSimilarity.toFixed(3)}${m.adjacentSimilarityFlag ? "!" : ""}` +
+        ` | run ${m.longestNearIdenticalRun}${m.longestRunFlag ? "!" : ""}` +
+        ` | novelty ${m.meanNovelty.toFixed(3)} | index ${m.repetitivenessIndex}/100 -> ${report.audio.verdict.toUpperCase()}`,
+    );
+  }
+
   if (report.findings.length === 0) {
     lines.push("  clean: no findings");
   } else {
@@ -658,6 +777,22 @@ function formatEpSummary(summary: EpSummary): string {
       `  FLAG build-type monotony: "${summary.dominantBuildType}" is ${(summary.dominantBuildFraction * 100).toFixed(0)}% of all builds`,
     );
   }
+  if (summary.audio) {
+    const a = summary.audio;
+    lines.push(
+      `  audio ground-truth (bottom-up): ${a.rendersAnalyzed} render(s), mean repetitiveness ${a.meanRepetitivenessIndex.toFixed(0)}/100` +
+        ` (max ${a.maxRepetitivenessIndex}${a.worstName ? ` @ ${a.worstName}` : ""})`,
+    );
+    lines.push(
+      `    (a) verbatim-loop smell: ${a.verbatimLoopSmellCount}/${a.rendersAnalyzed} | (b) static stretch: ${a.staticStretchCount}/${a.rendersAnalyzed} | repetitive renders: ${a.repetitiveRenderCount}/${a.rendersAnalyzed}`,
+    );
+    if (a.groundTruthFlag) {
+      lines.push(
+        `  FLAG audio ground-truth: the rendered audio is repetitive at the bar level -- ` +
+          `patterns loop verbatim beneath the conducting, which the score-level metrics above cannot see`,
+      );
+    }
+  }
   return lines.join("\n");
 }
 
@@ -677,12 +812,21 @@ function isDirectory(path: string): boolean {
   }
 }
 
+function optValue(args: string[], flag: string): string | undefined {
+  const i = args.indexOf(flag);
+  return i >= 0 && args[i + 1] && !args[i + 1].startsWith("--") ? args[i + 1] : undefined;
+}
+
 function runLint(): void {
   const args = process.argv.slice(2);
   const json = args.includes("--json");
-  const path = args.find((arg) => !arg.startsWith("--"));
+  const renderPath = optValue(args, "--render");
+  const tempoArg = optValue(args, "--tempo");
+  const tempoOverride = tempoArg !== undefined ? Number(tempoArg) : undefined;
+  // First non-flag arg that isn't the value of --render/--tempo.
+  const path = args.find((arg, i) => !arg.startsWith("--") && args[i - 1] !== "--render" && args[i - 1] !== "--tempo");
   if (!path) {
-    process.stderr.write("usage: lint-arrangement.ts <score.json|scores-dir> [--json]\n");
+    process.stderr.write("usage: lint-arrangement.ts <score.json|scores-dir> [--json] [--render <wav|renders-dir>] [--tempo <bpm>]\n");
     process.exitCode = 2;
     return;
   }
@@ -695,15 +839,18 @@ function runLint(): void {
     : [path];
 
   const reports = files.map(lintPath);
+  if (renderPath) attachRenderAnalyses(reports, renderPath, tempoOverride);
   const anyFindings = reports.some((report) => report.findings.length > 0);
+  const anyAudio = reports.some((report) => report.audio !== undefined);
+  const showSummary = files.length > 1 || anyAudio;
 
   if (json) {
     const output: { scores: ArrangementReport[]; epSummary?: EpSummary } = { scores: reports };
-    if (files.length > 1) output.epSummary = buildEpSummary(reports);
+    if (showSummary) output.epSummary = buildEpSummary(reports);
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
   } else {
     process.stdout.write(`${reports.map(formatReport).join("\n\n")}\n`);
-    if (files.length > 1) {
+    if (showSummary) {
       process.stdout.write(`\n${formatEpSummary(buildEpSummary(reports))}\n`);
     }
   }

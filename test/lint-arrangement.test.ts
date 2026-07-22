@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildEpSummary, lintArrangement } from "../src/bin/lint-arrangement.ts";
+import { attachRenderAnalyses, buildAudioSummary, buildEpSummary, lintArrangement } from "../src/bin/lint-arrangement.ts";
 import type { ArrangementReport } from "../src/bin/lint-arrangement.ts";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // ---------------------------------------------------------------------------
 // The five PERIGEE v1 exemplars -- the music-production skill's calibration
@@ -453,4 +456,94 @@ test("buildEpSummary flags build-type monotony when one type dominates >70% of d
   assert.equal(summary.buildDiversityFlag, true);
   assert.equal(summary.silentScoreCount, 1);
   assert.equal(summary.silentCoverageFraction, 1);
+});
+
+// ---------------------------------------------------------------------------
+// --render mode: bottom-up audio ground-truth gate
+// ---------------------------------------------------------------------------
+// A minimal verbatim 1-bar kick loop as a PCM16 mono WAV, repeated `bars` times
+// at 120 BPM. Deterministic; used to prove the audio gate fires on a loop that
+// a score-level linter would rate clean.
+function writeLoopWav(path: string, bars = 12, bpm = 120): void {
+  const sr = 48000;
+  const barSamples = Math.round((4 * 60 * sr) / bpm);
+  const total = barSamples * bars;
+  const pcm = new Int16Array(total);
+  for (let b = 0; b < bars; b += 1) {
+    for (let step = 0; step < 4; step += 1) {
+      const start = b * barSamples + Math.floor((step / 4) * barSamples);
+      const len = Math.floor(0.18 * sr);
+      for (let i = 0; i < len; i += 1) {
+        const env = Math.exp(-i / (0.18 * sr * 0.3));
+        pcm[start + i] = Math.max(-32767, Math.min(32767, Math.round(env * Math.sin((2 * Math.PI * 55 * i) / sr) * 0.6 * 32767)));
+      }
+    }
+  }
+  const buf = Buffer.alloc(44 + pcm.length * 2);
+  buf.write("RIFF", 0, "ascii");
+  buf.writeUInt32LE(36 + pcm.length * 2, 4);
+  buf.write("WAVE", 8, "ascii");
+  buf.write("fmt ", 12, "ascii");
+  buf.writeUInt32LE(16, 16);
+  buf.writeUInt16LE(1, 20);
+  buf.writeUInt16LE(1, 22);
+  buf.writeUInt32LE(sr, 24);
+  buf.writeUInt32LE(sr * 2, 28);
+  buf.writeUInt16LE(2, 32);
+  buf.writeUInt16LE(16, 34);
+  buf.write("data", 36, "ascii");
+  buf.writeUInt32LE(pcm.length * 2, 40);
+  for (let i = 0; i < pcm.length; i += 1) buf.writeInt16LE(pcm[i], 44 + i * 2);
+  writeFileSync(path, buf);
+}
+
+test("attachRenderAnalyses: folds a verbatim-loop render into the score report and fails the gate", () => {
+  const dir = mkdtempSync(join(tmpdir(), "arr-render-"));
+  try {
+    writeLoopWav(join(dir, "score-loopy-2026-01-01T00-00-00-000Z.wav"), 12, 120);
+    // A score that passes the score-level metrics can still ride a verbatim loop.
+    const linted = lintArrangement({
+      name: "loopy",
+      tempo: 120,
+      events: [
+        { atBar: 0, pattern: "A01" },
+        { atBar: 8, pattern: "A02" },
+        { atBar: 20, soloKeep: [] },
+        { atBar: 21, unmuteAll: true, scene: 3 },
+        { atBar: 40, stop: true },
+      ],
+    });
+    attachRenderAnalyses([linted], dir, 120);
+    assert.ok(linted.audio, "audio analysis should attach");
+    assert.ok(linted.audio!.metrics.repetitivenessIndex >= 55, `index ${linted.audio!.metrics.repetitivenessIndex}`);
+    assert.ok(
+      linted.findings.some((f) => f.section === "audio"),
+      "an audio repetition finding should be promoted to a gate finding",
+    );
+    const summary = buildAudioSummary([linted]);
+    assert.ok(summary, "audio summary present");
+    assert.equal(summary!.rendersAnalyzed, 1);
+    assert.equal(summary!.groundTruthFlag, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("attachRenderAnalyses: matches renders to scores by name; unmatched scores get no audio", () => {
+  const dir = mkdtempSync(join(tmpdir(), "arr-render-"));
+  try {
+    writeLoopWav(join(dir, "score-alpha-take.wav"), 10, 120);
+    const alpha = lintArrangement({ name: "alpha", tempo: 120, events: [{ atBar: 0, pattern: "A01" }, { atBar: 16, stop: true }] });
+    const beta = lintArrangement({ name: "beta", tempo: 120, events: [{ atBar: 0, pattern: "A01" }, { atBar: 16, stop: true }] });
+    attachRenderAnalyses([alpha, beta], dir, 120);
+    assert.ok(alpha.audio, "alpha matches score-alpha-take.wav");
+    assert.equal(beta.audio, undefined, "beta has no matching render");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("buildEpSummary omits the audio block when no render was attached (plain mode unchanged)", () => {
+  const clean = lintArrangement({ name: "x", tempo: 120, events: [{ atBar: 0, pattern: "A01" }, { atBar: 16, stop: true }] });
+  assert.equal(buildEpSummary([clean]).audio, undefined);
 });
