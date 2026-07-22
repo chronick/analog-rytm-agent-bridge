@@ -396,7 +396,9 @@ impl HardwareBridgeState {
         });
         self.scheduler
             .append_event(json!({ "type": "live.parameter_sent", "input": result }));
-        self.scheduler.persist()?;
+        // Transient performance gesture: in-memory only (trigger_track precedent);
+        // flushed by the next durable persist. Eager fsync here cost ~50-70ms per
+        // send and spread stacked-bar bursts a full second off the grid.
         Ok(result)
     }
 
@@ -472,7 +474,7 @@ impl HardwareBridgeState {
         });
         self.scheduler
             .append_event(json!({ "type": "live.scene_sent", "input": result }));
-        self.scheduler.persist()?;
+        // Transient: no eager persist (see live.parameter_sent).
         Ok(result)
     }
 
@@ -515,7 +517,7 @@ impl HardwareBridgeState {
         });
         self.scheduler
             .append_event(json!({ "type": "live.performance_sent", "input": result }));
-        self.scheduler.persist()?;
+        // Transient: no eager persist (see live.parameter_sent).
         Ok(result)
     }
 
@@ -598,7 +600,8 @@ impl HardwareBridgeState {
             serde_json::to_value(&self.scheduler.state.transport).map_err(error_string)?;
         self.scheduler
             .append_event(json!({ "type": "transport.changed", "transport": transport }));
-        self.scheduler.persist()?;
+        // Transient: no eager persist (see live.parameter_sent). Transport state
+        // is observed/reconstructible; shutdown and durable ops flush it.
         Ok(transport)
     }
 
@@ -624,7 +627,7 @@ impl HardwareBridgeState {
             "channel": channel + 1,
             "transport": transport,
         }));
-        self.scheduler.persist()?;
+        // Transient: no eager persist (see live.parameter_sent).
         Ok(transport)
     }
 
