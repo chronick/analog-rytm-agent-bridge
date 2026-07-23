@@ -19,11 +19,13 @@
     "hardware:songs": "node --experimental-transform-types src/bin/verify-hardware-songs.ts",
     "hardware:scheduler": "node --experimental-transform-types src/bin/verify-hardware-scheduler.ts",
     "gen:bank": "node --experimental-transform-types src/bin/generate-bank.ts",
+    "euclid:gen": "node --experimental-transform-types src/bin/euclid-gen.ts",
     "build:project": "node --experimental-transform-types src/bin/build-project.ts",
     "lint:declaration": "node --experimental-transform-types src/bin/lint-declaration.ts",
     "lint:arrangement": "node --experimental-transform-types src/bin/lint-arrangement.ts",
     "analyze:render": "node --experimental-transform-types src/bin/analyze-render.ts",
     "score:danceability": "node --experimental-transform-types src/bin/score-danceability.ts",
+    "score:idm": "node --experimental-transform-types src/bin/score-idm.ts",
     "audition:project": "node --experimental-transform-types src/bin/audition-project.ts",
     "render:score": "node --experimental-transform-types src/bin/render-score.ts"
   },
