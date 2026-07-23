@@ -1,0 +1,78 @@
+{
+  "schema": "analog-rytm-analyze-profile.v1",
+  "name": "lodestone-idm",
+  "description": "Calibrated from 4 take(s); repetition flag bands pinned to corpus p90.",
+  "thresholds": {
+    "adjSimFlag": 0.9745,
+    "nearIdenticalSim": 0.985,
+    "longestRunFlag": 26,
+    "noveltyStarvedBelow": 0.05,
+    "noveltyFull": 0.2
+  },
+  "provenance": {
+    "calibratedAt": "2026-07-23T09:19:39.779Z",
+    "corpusSize": 4,
+    "skippedCount": 0,
+    "leadIn": {
+      "bars": 2
+    },
+    "bandsPinnedAt": "p90",
+    "corpus": [
+      "score-coercivity-2026-07-23T09-14-24-510Z.wav",
+      "score-remanence-2026-07-23T09-10-54-450Z.wav",
+      "score-saturation-2026-07-23T09-06-18-272Z.wav",
+      "score-virgin-curve-2026-07-23T09-01-56-637Z.wav"
+    ],
+    "distributions": {
+      "meanAdjacentSimilarity": {
+        "p50": 0.9696281724603716,
+        "p75": 0.9696281724603716,
+        "p90": 0.974525210954428,
+        "max": 0.974525210954428,
+        "n": 4
+      },
+      "longestNearIdenticalRun": {
+        "p50": 8,
+        "p75": 8,
+        "p90": 26,
+        "max": 26,
+        "n": 4
+      },
+      "meanNovelty": {
+        "p50": 0.017012045818728734,
+        "p75": 0.017012045818728734,
+        "p90": 0.01851154031978332,
+        "max": 0.01851154031978332,
+        "n": 4
+      },
+      "repetitivenessIndex": {
+        "p50": 56,
+        "p75": 56,
+        "p90": 64,
+        "max": 64,
+        "n": 4
+      },
+      "silentFraction": {
+        "p50": 0.10748896674097763,
+        "p75": 0.10748896674097763,
+        "p90": 0.99920072183699,
+        "max": 0.99920072183699,
+        "n": 4
+      },
+      "anchorOffsetMsAbs": {
+        "p50": 950.9993058447808,
+        "p75": 950.9993058447808,
+        "p90": 1801.6196319018304,
+        "max": 1801.6196319018304,
+        "n": 4
+      },
+      "onGridFraction": {
+        "p50": 0.9747530186608123,
+        "p75": 0.9747530186608123,
+        "p90": 0.9799498746867168,
+        "max": 0.9799498746867168,
+        "n": 4
+      }
+    }
+  }
+}
