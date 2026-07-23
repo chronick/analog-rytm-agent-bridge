@@ -1,0 +1,79 @@
+{
+  "schema": "analog-rytm-analyze-profile.v1",
+  "name": "perigee-sequenced",
+  "description": "Calibrated from 5 take(s); repetition flag bands pinned to corpus p90.",
+  "thresholds": {
+    "adjSimFlag": 0.9805,
+    "nearIdenticalSim": 0.985,
+    "longestRunFlag": 31,
+    "noveltyStarvedBelow": 0.05,
+    "noveltyFull": 0.2
+  },
+  "provenance": {
+    "calibratedAt": "2026-07-23T00:19:54.510Z",
+    "corpusSize": 5,
+    "skippedCount": 0,
+    "leadIn": {
+      "bars": 1
+    },
+    "bandsPinnedAt": "p90",
+    "corpus": [
+      "score-ceremony-2026-07-23T00-07-05-284Z.wav",
+      "score-ember-2026-07-23T00-15-18-343Z.wav",
+      "score-escape-velocity-2026-07-23T00-10-55-826Z.wav",
+      "score-first-light-2026-07-22T23-58-51-072Z.wav",
+      "score-ignition-sequence-2026-07-23T00-02-13-916Z.wav"
+    ],
+    "distributions": {
+      "meanAdjacentSimilarity": {
+        "p50": 0.9776762788768956,
+        "p75": 0.9804527484059217,
+        "p90": 0.9804958971845849,
+        "max": 0.9804958971845849,
+        "n": 5
+      },
+      "longestNearIdenticalRun": {
+        "p50": 12,
+        "p75": 14,
+        "p90": 31,
+        "max": 31,
+        "n": 5
+      },
+      "meanNovelty": {
+        "p50": 0.011501302115858838,
+        "p75": 0.015438685028489501,
+        "p90": 0.019476713329056247,
+        "max": 0.019476713329056247,
+        "n": 5
+      },
+      "repetitivenessIndex": {
+        "p50": 60,
+        "p75": 64,
+        "p90": 68,
+        "max": 68,
+        "n": 5
+      },
+      "silentFraction": {
+        "p50": 0.011064408156944257,
+        "p75": 0.011254612546125808,
+        "p90": 0.02916112493564476,
+        "max": 0.02916112493564476,
+        "n": 5
+      },
+      "anchorOffsetMsAbs": {
+        "p50": 4133.441635585022,
+        "p75": 5668.499652633039,
+        "p90": 5965.496871088859,
+        "max": 5965.496871088859,
+        "n": 5
+      },
+      "onGridFraction": {
+        "p50": 0.9626704953338119,
+        "p75": 0.9655857048312376,
+        "p90": 0.9665024630541872,
+        "max": 0.9665024630541872,
+        "n": 5
+      }
+    }
+  }
+}
