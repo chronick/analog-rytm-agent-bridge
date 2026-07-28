@@ -40,6 +40,18 @@ const MAX_RETAINED_EVENTS: usize = 2000;
 // client would resubmit.
 const MAX_RETAINED_OPERATION_SETS: usize = 500;
 
+// `snapshots` keeps the newest K by creation order (`snapshot_order`). Each
+// `DurableSnapshot` carries a full `RawState` (pattern + kit + global +
+// settings + song + stored songs), so snapshots are by far the heaviest
+// records in the store — and `create_snapshot` persists on every call with no
+// deletion path, so long render/retake sessions (one snapshot per take) were
+// the remaining unbounded growth vector of the incident above. Rollback only
+// ever targets a recent capture; evicting the oldest past the cap loses only
+// stale restore points. `rollback_snapshot` rejects an evicted id with the
+// same clean "unknown snapshotId" error as any other unknown id, and
+// `snapshot_summaries` simply stops listing it.
+const MAX_RETAINED_SNAPSHOTS: usize = 32;
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClockSource {
@@ -415,9 +427,9 @@ impl HardwareScheduler {
     }
 
     pub fn persist(&mut self) -> Result<(), String> {
-        // Bound the append-only logs before we serialize + fsync them, so the
-        // written buffer (and the file it replaces) can never grow without
-        // limit.
+        // Bound the append-only logs and the snapshot store before we
+        // serialize + fsync them, so the written buffer (and the file it
+        // replaces) can never grow without limit.
         self.prune();
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent).map_err(|error| {
@@ -465,9 +477,10 @@ impl HardwareScheduler {
             })
     }
 
-    /// Enforce the retention caps on the two append-only logs. Called from
-    /// `persist` so every growth point (which is always followed by a persist)
-    /// is bounded, without scattering pruning through the call sites.
+    /// Enforce the retention caps on the two append-only logs and the snapshot
+    /// store. Called from `persist` so every growth point (which is always
+    /// followed by a persist) is bounded, without scattering pruning through
+    /// the call sites.
     fn prune(&mut self) {
         // Events: keep only the newest `MAX_RETAINED_EVENTS`, dropping from the
         // front (oldest first). Draining the front leaves `events.last()`
@@ -501,6 +514,21 @@ impl HardwareScheduler {
                     true
                 }
             });
+        }
+
+        // Snapshots: keep only the newest `MAX_RETAINED_SNAPSHOTS` in creation
+        // order. `snapshot_order` is the age authority, so we drain its front
+        // (oldest first) and drop the same ids from the map, keeping the two
+        // views consistent with the newest entries retained.
+        let snapshot_count = self.state.snapshot_order.len();
+        if snapshot_count > MAX_RETAINED_SNAPSHOTS {
+            for id in self
+                .state
+                .snapshot_order
+                .drain(0..snapshot_count - MAX_RETAINED_SNAPSHOTS)
+            {
+                self.state.snapshots.remove(&id);
+            }
         }
     }
 
@@ -698,6 +726,31 @@ mod tests {
         }
     }
 
+    fn snapshot_record(id: &str) -> DurableSnapshot {
+        serde_json::from_value(json!({
+            "label": id,
+            "raw": {
+                "pattern_raw": [],
+                "kit_raw": [],
+                "global_raw": [],
+                "settings_raw": [],
+                "summary": {}
+            },
+            "summary": { "snapshotId": id }
+        }))
+        .unwrap()
+    }
+
+    /// Mirrors `create_snapshot`'s dual write: the id is pushed onto
+    /// `snapshot_order` and the payload inserted into `snapshots`.
+    fn push_snapshot(scheduler: &mut HardwareScheduler, id: &str) {
+        scheduler.state.snapshot_order.push(id.to_string());
+        scheduler
+            .state
+            .snapshots
+            .insert(id.to_string(), snapshot_record(id));
+    }
+
     #[test]
     fn trigger_style_append_stays_in_memory_until_a_durable_persist() {
         let directory = std::env::temp_dir().join(format!(
@@ -809,6 +862,70 @@ mod tests {
             scheduler.state.operation_sets.len(),
             MAX_RETAINED_OPERATION_SETS + 2
         );
+    }
+
+    #[test]
+    fn prune_evicts_the_oldest_snapshots_beyond_the_cap() {
+        let mut scheduler = ephemeral_scheduler();
+        let total = MAX_RETAINED_SNAPSHOTS + 8;
+        for index in 0..total {
+            push_snapshot(&mut scheduler, &format!("snap-{index:04}"));
+        }
+
+        scheduler.prune();
+
+        // Cap enforced: the oldest snapshots are evicted, the newest retained.
+        assert_eq!(scheduler.state.snapshot_order.len(), MAX_RETAINED_SNAPSHOTS);
+        assert_eq!(
+            scheduler.state.snapshot_order.first().unwrap(),
+            &format!("snap-{:04}", total - MAX_RETAINED_SNAPSHOTS)
+        );
+        assert_eq!(
+            scheduler.state.snapshot_order.last().unwrap(),
+            &format!("snap-{:04}", total - 1)
+        );
+        // Map and order stay consistent: same size, every ordered id resolves,
+        // and the evicted payloads are gone from the map (nothing orphaned).
+        assert_eq!(scheduler.state.snapshots.len(), MAX_RETAINED_SNAPSHOTS);
+        for id in &scheduler.state.snapshot_order {
+            assert!(scheduler.state.snapshots.contains_key(id));
+        }
+        assert!(!scheduler.state.snapshots.contains_key("snap-0000"));
+        // Under the cap nothing is touched.
+        scheduler.prune();
+        assert_eq!(scheduler.state.snapshot_order.len(), MAX_RETAINED_SNAPSHOTS);
+    }
+
+    #[test]
+    fn persist_prunes_snapshots_and_the_pruned_store_round_trips() {
+        let directory = std::env::temp_dir().join(format!(
+            "analog-rytm-scheduler-snapshots-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = directory.join("state.json");
+        let mut scheduler = HardwareScheduler::load(&path).unwrap();
+        let total = MAX_RETAINED_SNAPSHOTS + 3;
+        for index in 0..total {
+            push_snapshot(&mut scheduler, &format!("snap-{index:04}"));
+        }
+        scheduler.persist().unwrap();
+
+        let restored = HardwareScheduler::load(&path).unwrap();
+        assert_eq!(restored.state.snapshot_order.len(), MAX_RETAINED_SNAPSHOTS);
+        assert_eq!(restored.state.snapshots.len(), MAX_RETAINED_SNAPSHOTS);
+        assert!(!restored.state.snapshots.contains_key("snap-0000"));
+        assert_eq!(
+            restored.state.snapshot_order.last().unwrap(),
+            &format!("snap-{:04}", total - 1)
+        );
+        for id in &restored.state.snapshot_order {
+            assert!(restored.state.snapshots.contains_key(id));
+        }
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
