@@ -9,8 +9,19 @@ import type { RytmPersistentOperation } from "../domain/types.ts";
 // the hardware daemon with snapshot, validation-first, and readback. The
 // declaration is content (lives in the vault); this file is mechanism.
 //
-//   npm run build:project -- <declaration.json>            validate only
-//   npm run build:project -- <declaration.json> --execute  apply to hardware
+//   npm run build:project -- <declaration.json>              validate only
+//   npm run build:project -- <declaration.json> --execute    apply to hardware
+//   npm run build:project -- <declaration.json> --auto-slots remap conflicted RAM slots
+//
+// A declaration with a `samples` section is preflighted against the device's
+// RAM inventory FIRST (read-only, so it runs in validate-only mode too): every
+// declared slot must be free or already hold that sample's own content. A
+// conflict aborts the run with exit 1 BEFORE any kit/pattern batch is applied
+// (the pre-preflight failure mode was a late `RAM slot N is occupied` from
+// samples.resolve_ram, after every op had already landed). With --auto-slots
+// each conflicted slot is remapped in memory to a free one, sample_number
+// p-locks and kit `slot` fields follow the remap, and the final map is printed
+// to stdout as `{"slotMap": {"<file>": <slot>}}`. See planSampleSlots below.
 //
 // The optional `sounds` section designs each track's kit sound: a machine
 // selection plus per-page parameter locks. Shape (all fields optional):
@@ -132,7 +143,7 @@ export interface KitDecl {
   scenes?: Array<Record<string, unknown>>;
   performances?: Array<Record<string, unknown>>;
 }
-interface Declaration {
+export interface Declaration {
   project: string;
   machines?: Array<{ track: string; machine: string }>;
   patterns: PatternDecl[];
@@ -292,6 +303,193 @@ export function kitsOperations(kits: KitDecl[]): RytmPersistentOperation[] {
   return kits.flatMap(kitOperations);
 }
 
+// ---------------------------------------------------------------------------
+// RAM-slot preflight
+// ---------------------------------------------------------------------------
+// The subset of RytmSampleRamSlot (domain/types.ts, as returned by
+// samples.inspect -> `ram.slots`) the planner reads. Kept structural so tests
+// can build an inventory without the daemon.
+export interface RamSlotView {
+  slot: number;
+  occupied: boolean;
+  devicePath?: string;
+  sampleId?: string;
+  usedByTrack?: boolean;
+}
+
+// Why a declared slot cannot be used as authored. All three are failures the
+// daemon would otherwise raise mid-execute, from samples.resolve_ram:
+//   occupied           - foreign content sits in the declared slot
+//   resident-elsewhere - this sample's own content is already loaded in a
+//                        DIFFERENT slot; resolve_ram matches on device path and
+//                        refuses the duplicate slot (so a free declared slot can
+//                        conflict too). Remaps onto the slot it already occupies,
+//                        which keeps repeated --auto-slots runs idempotent.
+//   unknown-slot       - the declared slot is absent from the RAM inventory
+//                        (out of range / bad authoring). Never auto-remapped:
+//                        that is a declaration bug, not RAM pressure.
+export type SlotConflictReason = "occupied" | "resident-elsewhere" | "unknown-slot";
+
+export interface SampleSlotConflict {
+  file: string;
+  slot: number; // the declared slot
+  expectedPath: string; // /<project>/<basename without extension>
+  reason: SlotConflictReason;
+  occupiedBy?: string; // device path of the squatter (reason "occupied")
+  sampleId?: string; // sample id of the squatter, when the device reports one
+  usedByTrack: boolean; // squatter is referenced by a track (clearing it is louder)
+  residentSlot?: number; // where this sample's content already lives
+  remapTo?: number; // chosen replacement; undefined = unresolvable, must exit 1
+}
+
+export interface SampleSlotPlan {
+  conflicts: SampleSlotConflict[];
+  // Assignable pool: unoccupied slots the declaration does not already claim,
+  // ascending. Remap targets come from here, so they can never collide with a
+  // declared slot (which is what makes the p-lock rewrite a single pass).
+  freeSlots: number[];
+  mapping: Record<number, number>; // declared slot -> final slot (conflicts only)
+  declaration: Declaration; // deep copy, remapped (identical when no conflicts)
+}
+
+// Device path build-project gives an uploaded sample: the deviceDirectory
+// (`/<project>`) joined with the source file's stem. Mirrors daemon/src/samples.rs
+// `upload` (Path::file_stem + join_device_path) — strip the directory and the
+// LAST extension only, no case folding.
+export function sampleDevicePath(project: string, file: string): string {
+  const base = file.split("/").pop() ?? file;
+  const dot = base.lastIndexOf(".");
+  return `/${project}/${dot > 0 ? base.slice(0, dot) : base}`;
+}
+
+// Classify every declared sample slot against the device's RAM inventory and
+// plan a conflict-free assignment. Pure: no daemon, no I/O.
+//
+// Per declared sample, the slot is one of
+//   free     - the inventory reports it unoccupied            -> used as authored
+//   ours     - occupied by this sample's own device path      -> used as authored
+//   conflict - anything else                                  -> remapped (see
+//              SlotConflictReason; `occupied` takes the lowest free slot,
+//              skipping declared and already-chosen ones)
+//
+// The returned declaration is a deep copy in which samples[].slot, every
+// `sample_number` p-lock value (per-track sugar AND the raw pattern.plocks
+// passthrough) and every `slot` field of the raw kit op arrays (`kit`,
+// `kits[].ops` — in practice assign_sample_slot) that referenced a REMAPPED
+// declared slot are rewritten. Slots that are not declared here (external
+// material a pattern p-locks into) are left untouched.
+export function planSampleSlots(declaration: Declaration, ramSlots: RamSlotView[]): SampleSlotPlan {
+  const samples = declaration.samples ?? [];
+  const bySlot = new Map(ramSlots.map((entry) => [entry.slot, entry]));
+  const declaredSlots = new Set(samples.map((sample) => sample.slot));
+  const pool = ramSlots
+    .filter((entry) => !entry.occupied && !declaredSlots.has(entry.slot))
+    .map((entry) => entry.slot)
+    .sort((left, right) => left - right);
+
+  const conflicts: SampleSlotConflict[] = [];
+  const mapping: Record<number, number> = {};
+  const chosen = new Set<number>();
+
+  for (const sample of samples) {
+    const expectedPath = sampleDevicePath(declaration.project, sample.file);
+    const occupant = bySlot.get(sample.slot);
+    if (occupant?.occupied && occupant.devicePath === expectedPath) continue; // ours
+    // resolve_ram matches an already-loaded sample by device path, so where our
+    // own content sits matters even when the declared slot itself looks fine.
+    const resident = ramSlots.find((entry) => entry.occupied && entry.devicePath === expectedPath);
+    if (resident === undefined && occupant !== undefined && !occupant.occupied) continue; // free
+    const shared = { file: sample.file, slot: sample.slot, expectedPath };
+    let conflict: SampleSlotConflict;
+    if (resident !== undefined) {
+      conflict = {
+        ...shared,
+        reason: "resident-elsewhere",
+        usedByTrack: resident.usedByTrack === true,
+        residentSlot: resident.slot,
+        remapTo: resident.slot,
+      };
+    } else if (occupant === undefined) {
+      conflict = { ...shared, reason: "unknown-slot", usedByTrack: false };
+    } else {
+      // A slot declared twice reuses its first allocation, so the report and the
+      // remapped declaration agree (a duplicate declaration is still a bug).
+      const next = mapping[sample.slot] ?? pool.find((slot) => !chosen.has(slot));
+      if (next !== undefined) chosen.add(next);
+      conflict = {
+        ...shared,
+        reason: "occupied",
+        ...(occupant.devicePath !== undefined ? { occupiedBy: occupant.devicePath } : {}),
+        ...(occupant.sampleId !== undefined ? { sampleId: occupant.sampleId } : {}),
+        usedByTrack: occupant.usedByTrack === true,
+        ...(next !== undefined ? { remapTo: next } : {}),
+      };
+    }
+    conflicts.push(conflict);
+    if (conflict.remapTo !== undefined) mapping[sample.slot] = conflict.remapTo;
+  }
+
+  // Rewrite the copy in ONE pass keyed on the ORIGINAL slot values: remap
+  // targets are never themselves declared slots (except a resident slot, which
+  // is only ever reached from its own declaration entry), so no chaining.
+  const remapped = structuredClone(declaration);
+  const remap = (value: unknown): number | undefined =>
+    typeof value === "number" && mapping[value] !== undefined ? mapping[value] : undefined;
+  for (const sample of remapped.samples ?? []) {
+    const next = remap(sample.slot);
+    if (next !== undefined) sample.slot = next;
+  }
+  for (const pattern of remapped.patterns ?? []) {
+    for (const track of Object.values(pattern.tracks ?? {})) {
+      for (const params of Object.values(track.plocks ?? {})) {
+        const next = remap(params.sample_number);
+        if (next !== undefined) params.sample_number = next;
+      }
+    }
+    for (const op of pattern.plocks ?? []) {
+      if (op.parameter !== "sample_number") continue;
+      const next = remap(op.value);
+      if (next !== undefined) op.value = next;
+    }
+  }
+  for (const ops of [remapped.kit, ...(remapped.kits ?? []).map((entry) => entry.ops)]) {
+    for (const op of ops ?? []) {
+      const next = remap(op.slot);
+      if (next !== undefined) op.slot = next;
+    }
+  }
+
+  return { conflicts, freeSlots: pool, mapping, declaration: remapped };
+}
+
+const FREE_SLOTS_SHOWN = 24;
+
+// Conflict report for the abort path: what occupies each declared slot, what it
+// would have become, and the free pool to re-declare into. Only ever reached
+// with nothing applied — either without --auto-slots, or with at least one
+// conflict --auto-slots cannot resolve.
+function writeSlotConflictReport(plan: SampleSlotPlan): void {
+  const lines = [`RAM slot conflicts (${plan.conflicts.length}) — nothing applied:`];
+  for (const conflict of plan.conflicts) {
+    const cause =
+      conflict.reason === "resident-elsewhere"
+        ? `${conflict.expectedPath} is already loaded in RAM slot ${conflict.residentSlot}`
+        : conflict.reason === "unknown-slot"
+          ? "not present in the RAM inventory (out of range?)"
+          : `occupied by ${conflict.occupiedBy ?? "an unresolved sample"}${conflict.usedByTrack ? " (used by a track)" : ""}`;
+    const target = conflict.remapTo !== undefined ? `would remap to ${conflict.remapTo}` : "NO FREE SLOT";
+    lines.push(`  slot ${conflict.slot} ${conflict.file}: ${cause} -> ${target}`);
+  }
+  const shown = plan.freeSlots.slice(0, FREE_SLOTS_SHOWN);
+  lines.push(`  free slots (${shown.length} of ${plan.freeSlots.length}): ${shown.join(", ") || "none"}`);
+  lines.push(
+    plan.conflicts.some((conflict) => conflict.remapTo === undefined)
+      ? "fix: --auto-slots cannot resolve every conflict — free RAM (samples.clear_ram) or re-declare the listed slots"
+      : "fix: re-declare the listed slots, or re-run with --auto-slots to remap them automatically",
+  );
+  process.stderr.write(`${lines.join("\n")}\n`);
+}
+
 async function applyBatch(
   client: RustDaemonClient,
   label: string,
@@ -327,9 +525,11 @@ async function applyBatch(
 
 export async function runProjectBuild(): Promise<void> {
   const declarationPath = process.argv[2];
-  assert.ok(declarationPath, "usage: build-project.ts <declaration.json> [--execute]");
+  assert.ok(declarationPath, "usage: build-project.ts <declaration.json> [--execute] [--auto-slots]");
   const execute = process.argv.includes("--execute");
-  const declaration = JSON.parse(readFileSync(declarationPath, "utf8")) as Declaration;
+  const autoSlots = process.argv.includes("--auto-slots");
+  // Reassigned by the RAM-slot preflight under --auto-slots (remapped copy).
+  let declaration = JSON.parse(readFileSync(declarationPath, "utf8")) as Declaration;
 
   const client = new RustDaemonClient({
     command: "cargo",
@@ -340,6 +540,29 @@ export async function runProjectBuild(): Promise<void> {
   try {
     const health = await client.start();
     assert.equal(health.adapter, "hardware");
+
+    // RAM-slot preflight, before the baseline snapshot and every batch:
+    // samples.inspect is read-only, so it runs in validate-only mode too. A
+    // conflict the run cannot resolve aborts here, with nothing applied.
+    if (declaration.samples?.length) {
+      const declaredCount = declaration.samples.length;
+      const inventory = await client.inspectSamples({});
+      const plan = planSampleSlots(declaration, inventory.ram.slots);
+      const unresolved = plan.conflicts.filter((conflict) => conflict.remapTo === undefined);
+      if (plan.conflicts.length > 0 && (!autoSlots || unresolved.length > 0)) {
+        writeSlotConflictReport(plan);
+        process.exitCode = 1;
+        return;
+      }
+      if (autoSlots) {
+        declaration = plan.declaration;
+        const slotMap = Object.fromEntries((declaration.samples ?? []).map((sample) => [sample.file, sample.slot]));
+        process.stdout.write(`${JSON.stringify({ slotMap })}\n`);
+      }
+      process.stderr.write(
+        `ram preflight: ${declaredCount} declared slots, ${plan.conflicts.length} remapped, ${plan.freeSlots.length} free\n`,
+      );
+    }
 
     let snapshotId: string | undefined;
     if (execute) {

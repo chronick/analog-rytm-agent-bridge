@@ -57,7 +57,7 @@ npm run hardware:samples -- --execute
 npm run hardware:songs
 npm run hardware:songs -- --execute
 npm run hardware:scheduler -- --execute
-npm run build:project -- <declaration.json> [--execute]
+npm run build:project -- <declaration.json> [--execute] [--auto-slots]
 npm run audition:project [-- A01 B04 ...]
 ```
 
@@ -65,6 +65,21 @@ npm run audition:project [-- A01 B04 ...]
 scenes, performance macros, samples) from a JSON declaration with
 validation-first, snapshot, and readback. `audition:project` plays each pattern
 from generated clock and captures a verified bounded recording per slot.
+
+A declaration with a `samples` section is preflighted against the device's RAM
+inventory before anything is applied (read-only, so it also runs in
+validate-only mode): each declared slot must be free or already hold that
+sample's own content. Otherwise the run prints a conflict report — what occupies
+each slot and the free pool — and exits 1 with nothing applied, instead of
+failing late on `RAM slot N is occupied` from `samples.resolve_ram` after every
+kit and pattern batch has landed. `--auto-slots` remaps the conflicted slots in
+memory (lowest free slot first; a sample already loaded elsewhere in RAM follows
+its own slot, so repeat runs are idempotent), rewrites the `sample_number`
+p-locks and kit `slot` fields that referenced them, and prints the final map to
+stdout as one line: `{"slotMap": {"bd-kick-a.wav": 108, ...}}`. P-lock
+references to slots the declaration does not own (external material) are never
+touched, and a declared slot outside the RAM inventory is reported rather than
+remapped.
 
 The optional `sounds` section designs each track's kit sound — a machine
 selection plus per-page parameter locks. Every field is optional; the machine
