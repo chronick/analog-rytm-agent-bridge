@@ -27,7 +27,8 @@
     "score:danceability": "node --experimental-transform-types src/bin/score-danceability.ts",
     "score:idm": "node --experimental-transform-types src/bin/score-idm.ts",
     "audition:project": "node --experimental-transform-types src/bin/audition-project.ts",
-    "render:score": "node --experimental-transform-types src/bin/render-score.ts"
+    "render:score": "node --experimental-transform-types src/bin/render-score.ts",
+    "audition:solo": "node --experimental-transform-types src/bin/audition-solo.ts"
   },
   "engines": {
     "node": ">=22.14"
