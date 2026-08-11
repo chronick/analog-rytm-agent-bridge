@@ -1,94 +1,190 @@
-# Analog Rytm Agent Bridge
+<div align="center">
 
-Standalone control plane for agentic Analog Rytm work.
+# analog-rytm-agent-bridge
 
-## Prerequisites
+**A control plane that lets a coding agent operate an Elektron Analog Rytm MKII
+as an instrument — and undo everything it did.**
 
-- macOS. The daemon depends on CoreMIDI and CoreAudio and does not build on
-  other platforms.
-- Rust ≥ 1.89 (`rustup` recommended). Cargo resolves the daemon dependencies,
-  including the pinned `chronick/rytm-rs` fork revision.
-- Node ≥ 22.14 (24+ recommended), matching the `engines` field. The TypeScript
-  slice runs on Node's native type-stripping; `npm install` is only needed for
-  the dev-time type checker.
-- For sample management: the pinned Elektroid CLI fork — see
-  [docs/HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md).
+*Hardware is stateful, destructive, and has no ctrl-Z. So nothing here is
+fire-and-forget: every persistent change is validated against decoded device
+state, snapshotted, applied at a musical boundary, read back, and rolled back
+byte-exactly if the readback disagrees.*
 
-This repo is intentionally separate from `pd-agent-bridge`. The two tools are meant to run side by side in a larger human/agent performance setup, but the coding agent is the only glue between them. The Rytm bridge should remain useful on its own for inspecting, validating, queueing, and applying Rytm operations.
+[Site](https://chronick.github.io/analog-rytm-agent-bridge/) · [Quick start](#quick-start) · [Safety](#the-safety-model) · [Tools](#the-agent-surface) · [Architecture](#architecture) · [Capabilities](docs/CAPABILITIES.md)
 
-## Shape
+</div>
 
-- TypeScript MCP/API facade for agent-facing semantic tools.
-- Rust daemon boundary for hardware state, SysEx, MIDI, snapshots, rollback, and firmware compatibility.
-- Standard MIDI for realtime gestures.
-- SysEx/state lane for persistent edits.
-- Class-compliant CoreAudio stereo capture for closed-loop analysis and archival.
-- Optional Overbridge CoreAudio multitrack capture, independent of the control plane.
-- Delta operations instead of whole-project regeneration.
-- Compact state summaries for agents.
-
-The repo contains three connected vertical slices:
-
-- a hardware-independent TypeScript control plane with a mock Rytm transport;
-- a Rust/CoreMIDI hardware harness for bidirectional SysEx inspection, realtime MIDI, declarative configuration, verified pattern writes, snapshots, and rollback.
-- a versioned JSON-lines process boundary that connects every TypeScript semantic tool to a long-running Rust mock or hardware daemon.
-
-The Rust mock daemon owns revisioned deltas, dry runs, queue scheduling, snapshots, rollback, realtime state, reconciliation, and event acknowledgements. The original TypeScript mock service remains as a daemon-free fallback and parity reference. The hardware daemon adds a durable queue/event/snapshot store, explicit transport epochs, generated or observed MIDI clock, realtime MIDI, reconnect reconciliation, and semantic readback verification.
-
-## Commands
+---
 
 ```bash
-npm test
-npm run rust:test
-npm run check
 npm run demo
-npm run hardware:control
+```
+
+That runs the whole control plane — inspect, propose, validate, queue, apply,
+snapshot, roll back — against a mock Rytm transport. No hardware, no MIDI
+cable, no risk to a device. It is the honest way to see what the bridge does
+before letting it touch an instrument.
+
+## What this is
+
+An Analog Rytm holds twelve voices, 128 patterns, kits, sounds, scenes,
+performance macros, songs, and 127 sample slots of state that a person edits by
+hand. This bridge exposes that state to a coding agent as a set of semantic
+operations: read a compact summary, propose a delta, validate it, and commit it
+on the next beat.
+
+The hard part is not sending MIDI. It is that an agent that guesses wrong
+overwrites a kit you spent an evening on. So the design is built around a
+single assumption — **the agent will be wrong sometimes** — and everything
+follows from that: validate before dispatch, snapshot raw SysEx before
+mutation, verify by reading the device back, and restore the exact original
+bytes when verification fails.
+
+It is also usable without an agent. The daemon and CLI are ordinary tools for
+inspecting, validating, queueing, and applying Rytm operations.
+
+## The safety model
+
+Read this before pointing it at hardware.
+
+**Nothing mutates without `--execute`.** Every hardware command runs in
+validate-only mode by default: it connects, decodes real device state, checks
+the operation against it, and reports what *would* happen. Adding `--execute`
+is the only way to write.
+
+**Every persistent write is snapshotted first.** The daemon captures the raw
+SysEx of each affected Pattern, Kit, Global, and Settings object before
+touching it, and stores it durably.
+
+**Every write is verified by readback.** After applying, the daemon re-reads
+the object and compares it to what was asked for, canonicalizing
+codec-quantized values first so the comparison is real rather than cosmetic.
+
+**A failed readback rolls back automatically** — restoring the original raw
+bytes, across multiple objects, without ever decrementing the public revision.
+This path is hardware-certified, not just unit tested: see
+[docs/HARDWARE_VALIDATION_2026-07-17_COMPLETE.md](docs/HARDWARE_VALIDATION_2026-07-17_COMPLETE.md).
+
+**What it will still overwrite.** The bridge protects the objects it knows it
+is touching. It does not back up your entire device. Before first use, save
+your projects to +Drive and take an external backup — this is a tool that
+writes to a musical instrument you care about.
+
+**Realtime gestures are deliberately not persistent.** Scene activation,
+performance macro amounts, and live parameter moves go out as transient CC/NRPN
+and never change the persistent revision, matching how the hardware itself
+treats them.
+
+## Requirements
+
+- **macOS.** The daemon depends on CoreMIDI and CoreAudio and does not build
+  elsewhere.
+- **An Analog Rytm MKII.** Certified against OS 1.72; the codecs target
+  firmware 1.70 and unknown-capability operations are gated rather than
+  guessed.
+- **Rust ≥ 1.89** (`File::try_lock`, used for the single-instance state lock).
+- **Node ≥ 22.14** (24+ recommended). The TypeScript side runs on Node's native
+  type-stripping and has **zero runtime dependencies**; `npm install` only
+  provisions the dev-time type checker.
+- **For sample management only:** a pinned Elektroid CLI fork — see
+  [docs/HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md).
+
+## Quick start
+
+### 1. Without hardware
+
+```bash
+git clone https://github.com/chronick/analog-rytm-agent-bridge
+cd analog-rytm-agent-bridge
+npm install          # dev-time typechecker only
+npm run demo
+```
+
+`npm run check` runs the full gate: Node tests, TypeScript typecheck, and the
+Rust daemon's `cargo test`.
+
+Run the mock daemon as a long-lived process to exercise the real RPC boundary:
+
+```bash
+cargo run --manifest-path daemon/Cargo.toml -- serve --adapter mock
+```
+
+### 2. With hardware
+
+Work through [docs/HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md) first — it covers
+MIDI port configuration, the device settings the bridge expects, and the backup
+you should take before any write test.
+
+Confirm the device is visible and identifies itself:
+
+```bash
+cd daemon
+cargo run -- midi-list
+cargo run -- identity
+cargo run -- capture-state ../hardware/runs/baseline
+```
+
+Then run the validation suite. Without `--execute` it only reads:
+
+```bash
+npm run hardware:control            # validate only
 npm run hardware:control -- --execute
 npm run hardware:all -- --execute --phase=core
-npm run hardware:all -- --execute --phase=overbridge
-npm run hardware:macros
-npm run hardware:macros -- --execute
-npm run hardware:overbridge
-npm run hardware:overbridge -- --execute
-npm run hardware:audio
-npm run hardware:audio -- --execute
-npm run hardware:samples
-npm run hardware:samples -- --execute
-npm run hardware:songs
-npm run hardware:songs -- --execute
-npm run hardware:scheduler -- --execute
+```
+
+Start the hardware daemon:
+
+```bash
+cargo run --manifest-path daemon/Cargo.toml -- serve --adapter hardware --clock-source observed
+```
+
+State lives in `~/.analog-rytm-agent-bridge/hardware-state.json` by default;
+`--state-dir` selects an isolated store. Mock and hardware modes speak the same
+request/response/event protocol — see [docs/DAEMON_RPC.md](docs/DAEMON_RPC.md).
+
+## The agent surface
+
+Thirty-two semantic MCP tools, grouped by what they let an agent do:
+
+| Group | Tools |
+|---|---|
+| Inspect | `rytm_inspect_device_state` · `_pattern` · `_song` · `_kit` · `_track_sound` · `_global` · `_samples` · `_overbridge_audio` |
+| Propose & commit | `rytm_propose_pattern_delta` · `rytm_propose_song_delta` · `rytm_validate_operations` · `rytm_queue_operations` · `rytm_apply_operations_now` |
+| Play | `rytm_trigger_track` · `rytm_set_transport` · `rytm_change_pattern` · `rytm_set_live_parameter` · `rytm_set_active_scene` · `rytm_set_performance_macro` |
+| Undo | `rytm_snapshot_state` · `rytm_rollback_snapshot` |
+| Samples | `rytm_upload_sample` · `rytm_resolve_sample_ram` · `rytm_clear_sample_ram` |
+| Listen | `rytm_list_audio_inputs` · `rytm_start_recording` · `rytm_stop_recording` · `rytm_capture_pattern_audio` · `rytm_capture_multitrack_audio` |
+| Meta | `rytm_daemon_health` · `rytm_describe_capabilities` · `rytm_get_events` |
+
+`rytm_describe_capabilities` is the one an agent should call first: it reports
+what the connected device and firmware actually support, so unsupported
+operations fail as a refusal rather than a corrupted object.
+
+## Declarative projects
+
+`build:project` applies a whole project — patterns, machines, sounds, scenes,
+performance macros, samples — from one JSON declaration, validation-first, with
+snapshot and readback:
+
+```bash
 npm run build:project -- <declaration.json> [--execute] [--auto-slots]
 npm run audition:project [-- A01 B04 ...]
 ```
 
-`build:project` applies a declarative project (patterns, machines, sounds,
-scenes, performance macros, samples) from a JSON declaration with
-validation-first, snapshot, and readback. `audition:project` plays each pattern
-from generated clock and captures a verified bounded recording per slot.
-
 A declaration with a `samples` section is preflighted against the device's RAM
-inventory before anything is applied (read-only, so it also runs in
-validate-only mode): each declared slot must be free or already hold that
-sample's own content. Otherwise the run prints a conflict report — what occupies
-each slot and the free pool — and exits 1 with nothing applied, instead of
-failing late on `RAM slot N is occupied` from `samples.resolve_ram` after every
-kit and pattern batch has landed. `--auto-slots` remaps the conflicted slots in
-memory (lowest free slot first; a sample already loaded elsewhere in RAM follows
-its own slot, so repeat runs are idempotent), rewrites the `sample_number`
-p-locks and kit `slot` fields that referenced them, and prints the final map to
-stdout as one line: `{"slotMap": {"bd-kick-a.wav": 108, ...}}`. P-lock
-references to slots the declaration does not own (external material) are never
-touched, and a declared slot outside the RAM inventory is reported rather than
-remapped.
+inventory before anything is applied. Each declared slot must be free or
+already hold that sample's own content; otherwise the run prints a conflict
+report and exits non-zero with nothing applied, rather than failing late after
+every kit and pattern batch has already landed. `--auto-slots` remaps
+conflicting slots in memory (lowest free slot first, and a sample already
+loaded elsewhere follows its own slot, so repeat runs are idempotent), rewrites
+the `sample_number` p-locks and kit `slot` fields that referenced them, and
+prints the final map as one line of JSON. P-lock references to slots the
+declaration does not own are never touched.
 
-The optional `sounds` section designs each track's kit sound — a machine
-selection plus per-page parameter locks. Every field is optional; the machine
-is emitted before its params because `set_track_machine` resets the machine
-page to defaults. Parameter names and enum casing are the daemon's (see
-`daemon/src/hardware.rs` `apply_sound_parameter`); enum values are the CamelCase
-serde variants (`SampleStart`, `Tri`, ...), not the lowercase rytm-rs strings.
-Ground the values in the sound-design corpus
-(`~/git/vault/corpus/sound-design/`) rather than improvising:
+The `sounds` section designs each track's kit sound — a machine selection plus
+per-page parameter locks. Every field is optional. The machine is emitted
+before its parameters, because setting a machine resets its page to defaults:
 
 ```jsonc
 {
@@ -97,7 +193,6 @@ Ground the values in the sound-design corpus
   "sounds": {
     "BD": {
       "machine": "bdplastic",
-      // techniques/layered-kick anchor E1 (verified via set_sound_parameter page:"machine")
       "machineParams": { "tun": -14, "swt": 54, "swd": 21, "dec": 45, "tic": 32, "lev": 110 },
       "filter": { "filter_type": "Pk", "resonance": 40 },
       "amp": { "overdrive": 8 }
@@ -110,111 +205,71 @@ Ground the values in the sound-design corpus
 }
 ```
 
-Each `sounds.<track>` key accepts `machine` (string → `set_track_machine`),
-`machineParams` (→ `set_sound_parameter page:"machine"`), and any of `sample`,
-`filter`, `amp`, `lfo`, `settings` (→ `set_sound_parameter` with `page` = that
-section name). The section is applied as one validated, content-hashed,
-revision-scoped batch — validate-only (no `--execute`) still requires a running
-hardware daemon.
+Parameter names and enum casing are the daemon's — see `apply_sound_parameter`
+in `daemon/src/hardware.rs`. Enum values are the CamelCase serde variants
+(`SampleStart`, `Tri`), not the lowercase `rytm-rs` strings.
+`audition:project` then plays each pattern from generated clock and captures a
+verified bounded recording per slot.
 
-The runtime has zero npm dependencies; `npm install` provisions only the dev-time
-TypeScript checker (`npm run typecheck`, included in `npm run check`). Rust
-dependencies are resolved by Cargo.
+## Architecture
 
-Hardware commands run from `daemon/` and refuse state-changing operations unless `--execute` is present:
-
-```bash
-cargo run -- midi-list
-cargo run -- identity
-cargo run -- capture-state ../hardware/runs/baseline
-cargo run -- configure-midi --execute ../hardware/runs/baseline
-cargo run -- validate-realtime --execute ../hardware/runs/baseline
-cargo run -- create-demo-patterns --execute ../hardware/runs/demo-patterns
-cargo run -- play-demo-patterns --execute ../hardware/runs/baseline
+```text
+Coding agent / MCP host
+  → TypeScript semantic facade          zero runtime deps
+  → versioned JSON-lines RPC over stdio
+  → long-running Rust daemon             revisions, queue, snapshots, rollback
+  → CoreMIDI / SysEx / realtime MIDI
+  → Analog Rytm MKII
+                    ↘ CoreAudio capture (stereo, or Overbridge multitrack)
 ```
 
-Run the long-lived mock daemon directly with:
+Two lanes, deliberately separate: **SysEx** for persistent state, **realtime
+MIDI** for gestures. Two adapters behind one protocol: a **mock** for
+development and a **hardware** adapter that adds a durable queue, explicit
+transport epochs, generated or observed MIDI clock, reconnect reconciliation,
+and semantic readback verification. Deltas rather than whole-project
+regeneration; compact state summaries rather than giant payloads.
 
-```bash
-cargo run --manifest-path daemon/Cargo.toml -- serve --adapter mock
-```
+This repo is intentionally separate from `pd-agent-bridge`, which is the
+reference implementation of the control-plane pattern, not a dependency. They
+are meant to run side by side with the coding agent as the only glue, and each
+should remain useful alone.
 
-Run the hardware-backed daemon with its default CoreMIDI port match:
+## Documentation
 
-```bash
-cargo run --manifest-path daemon/Cargo.toml -- serve --adapter hardware --clock-source observed
-```
+| Doc | What's in it |
+|---|---|
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | The overall design and its rationale |
+| [CAPABILITIES.md](docs/CAPABILITIES.md) | Everything implemented, and what is not |
+| [HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md) | **Read before any write test** |
+| [DAEMON_RPC.md](docs/DAEMON_RPC.md) | The JSON-lines protocol |
+| [AGENT_WORKFLOW.md](docs/AGENT_WORKFLOW.md) | Operation and recovery sequence for an agent |
+| [CONTROL_SURFACE.md](docs/CONTROL_SURFACE.md) | The current control matrix |
+| [OS_1_72_CONTROL_MAP.md](docs/OS_1_72_CONTROL_MAP.md) | Evidence-driven mapping of every manual control family |
+| [AUDIO_CAPTURE.md](docs/AUDIO_CAPTURE.md) | The stereo capture contract |
+| [OVERBRIDGE_AUDIO.md](docs/OVERBRIDGE_AUDIO.md) | Optional synchronized multitrack capture |
+| [SAMPLE_MANAGEMENT.md](docs/SAMPLE_MANAGEMENT.md) | Sample identity, transfer, RAM resolution, rollback boundaries |
+| [UPSTREAM.md](docs/UPSTREAM.md) | The `rytm-rs` fork and its path back upstream |
+| [CODE_REVIEW_2026-07-17.md](docs/CODE_REVIEW_2026-07-17.md) | Second-opinion review findings and dispositions |
 
-Both modes use the same request/response/event protocol. The hardware adapter reconnects its MIDI session as needed and owns its revision, operation-set idempotency, durable queue, raw snapshots, readback verification, rollback, transport epoch, and event journal. Its default store is `~/.analog-rytm-agent-bridge/hardware-state.json`; `--state-dir` selects an isolated store. See [docs/DAEMON_RPC.md](docs/DAEMON_RPC.md).
+The dated `HARDWARE_VALIDATION_*.md` files are certificates: each records a
+suite run against a connected device, with the device restored to its exact
+pre-test state afterward.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the overall design.
-See [docs/HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md) before running write tests.
-See [docs/CODE_REVIEW_2026-07-17.md](docs/CODE_REVIEW_2026-07-17.md) for the second-opinion review findings and their dispositions.
-See [docs/HARDWARE_VALIDATION_2026-07-17_COMPLETE.md](docs/HARDWARE_VALIDATION_2026-07-17_COMPLETE.md) for the complete two-phase OS 1.72 certificate and restored final state.
-See [docs/CONTROL_SURFACE.md](docs/CONTROL_SURFACE.md) for the current control matrix.
-See [docs/OS_1_72_CONTROL_MAP.md](docs/OS_1_72_CONTROL_MAP.md) for the evidence-driven mapping of every manual control family.
-See [docs/AGENT_WORKFLOW.md](docs/AGENT_WORKFLOW.md) for the coding-agent operation and recovery sequence.
-See [docs/AUDIO_CAPTURE.md](docs/AUDIO_CAPTURE.md) for the stereo capture contract and its separation from Overbridge.
-See [docs/OVERBRIDGE_AUDIO.md](docs/OVERBRIDGE_AUDIO.md) for optional synchronized multitrack discovery and capture.
-See [docs/SAMPLE_MANAGEMENT.md](docs/SAMPLE_MANAGEMENT.md) for sample identity, transfer, RAM resolution, assignment, and rollback boundaries.
+## Credits and licensing
 
-## Current Slice
+SysEx codecs come from [`rytm-rs`](https://github.com/alisomay/rytm-rs) by
+alisomay (MIT), pinned to a maintained fork whose changes are being prepared
+for upstream — see [docs/UPSTREAM.md](docs/UPSTREAM.md). Sample transfer uses a
+pinned fork of [Elektroid](https://github.com/dagargo/elektroid) by dagargo.
 
-Implemented:
+`docs/reference/rytm.yaml` is a machine-readable parameter reference distilled
+from Elektron's published documentation. Its descriptions are concise
+paraphrases, not copies. Elektron's manual is copyrighted and is not
+redistributed here; keep your own copy if you want one.
 
-- inspect compact device and pattern state;
-- validate persistent operation deltas;
-- queue operation sets for musical boundaries;
-- simulate transport boundaries with a mock Rytm transport;
-- apply queued operations and emit journaled acknowledgements;
-- create snapshots and rollback with monotonic revisions;
-- send mock realtime MIDI operations;
-- expose a standalone MCP-style adapter surface;
-- start, monitor, and close a long-running Rust daemon from TypeScript;
-- route daemon health and compact state/pattern inspection through versioned JSON-lines RPC;
-- route validation, deltas, queues, realtime gestures, snapshots, rollback, reconciliation, and event reads through Rust in mock mode;
-- emit asynchronous acknowledgement/state events with monotonic cursors;
-- reject in-flight work on daemon disconnect and support a clean process restart;
-- replay identical request IDs and reject conflicting ID reuse;
-- discover the Analog Rytm through CoreMIDI;
-- query and compactly summarize pattern, kit, global, and settings work buffers;
-- reconcile a minimal MIDI receive profile idempotently;
-- send notes, transport, clock, CC, NRPN, and program changes;
-- create and read back trigs, velocities, conditions, microtiming, track lengths, time mode, and filter parameter locks;
-- preserve raw SysEx baselines and verify hardware rollback.
-- inspect complete work-buffer Sound, Kit, FX, Global, routing, MIDI, sequencer, and Settings state;
-- validate and dry-run delta operations against decoded hardware state;
-- apply idempotent Sound, machine, Kit, FX, routing, Global, and Settings deltas immediately;
-- canonicalize codec-quantized values before desired-vs-observed comparisons;
-- snapshot raw Pattern, Kit, Global, and Settings objects and restore them with semantic verification;
-- use an immutable maintained-fork `rytm-rs` revision for validated codecs and firmware fixtures;
-- persist hardware queues, snapshots, revisions, observations, and events across daemon restart;
-- resolve `next_step`, `next_beat`, `next_measure`, `next_pattern`, and pattern-step targets against an explicit transport epoch;
-- generate 24 PPQN clock or follow observed MIDI realtime input without wall-clock boundary guesses;
-- expose hardware queue, track trigger, track-level CC/NRPN, transport, and pattern-change RPC methods;
-- reconcile on reconnect, reject or roll forward stale-epoch work, and clean up transport/notes on shutdown;
-- certify multi-object automatic rollback after an injected readback verification failure.
-- list CoreAudio inputs and report the Rytm's channel, sample-rate, and sample-format capabilities;
-- start, stop, and run bounded 48 kHz stereo WAV captures with atomic finalization and authoritative state sidecars;
-- detect silence, clipping, duration mismatch, dropped callback blocks, disconnects, and stale partial files;
-- expose class-compliant audio through Rust RPC and four semantic MCP tools;
-- certify an audible bounded hardware recording and restore the disposable Pattern/Global baseline.
-- inspect +Drive, all 127 RAM slots, and track sample assignments through the pinned Elektroid fork;
-- validate, upload, download, and content-identify WAV samples without duplicate transfers;
-- resolve managed samples into RAM, assign them declaratively to Sounds, verify readback, roll back the Kit, and clear RAM safely.
-- inspect all 12 Scene and Performance definitions with semantic voice/FX lock targets;
-- declaratively set, replace, copy, and clear Scene and Performance locks through revisioned Kit writes;
-- activate or deactivate Scenes and set Performance amounts through transient CC/NRPN controls without changing persistent revision;
-- certify macro operation-set replay, device readback, and exact raw Kit rollback on Analog Rytm OS 1.72.
-- inspect the work-buffer Song, any stored Song, or all 17 Song objects with optional compact Pattern/Kit references;
-- declaratively name Songs and replace, insert, update, move, copy, remove, or clear rows containing chains, repeats, and per-position track mutes;
-- apply Song deltas immediately or at musical boundaries with revision checks, idempotent IDs, readback, snapshots, and rollback;
-- certify all supported Song row operations, next-beat scheduling, unchanged Pattern activation, and exact raw rollback on Analog Rytm OS 1.72.
-- discover the installed Overbridge provider and capture synchronized Main, eight physical voice-group, and external-input stems from one CoreAudio stream;
-- certify non-silent Main and voice-group stems, exact frame alignment, callback timing, no drops/disconnects, idempotent recording replay, and raw state rollback on Analog Rytm OS 1.72.
+This project is not affiliated with, endorsed by, or supported by Elektron.
+"Analog Rytm" and "Overbridge" are Elektron's trademarks, used here only to
+describe what the software interoperates with.
 
-Not implemented yet:
-
-- Overbridge plug-in hosting and DAW automation.
-
-Those plug-in features remain explicitly unsupported; the optional multitrack provider is hardware-certified. Song tempo/length overrides, jumps, loops, labels, explicit end markers, and Song activation remain unavailable. The current `rytm-rs` adapter targets firmware 1.70; the supported Song and audio workflows are hardware-certified on the connected firmware 1.72 device, but this is not a blanket compatibility guarantee for other firmware.
+Licensed under the [MIT License](LICENSE).

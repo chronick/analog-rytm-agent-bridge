@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>analog-rytm-agent-bridge · a coding agent can play your drum machine, and undo it</title>
+<meta name="description" content="A control plane that lets a coding agent operate an Elektron Analog Rytm MKII: validated deltas, raw SysEx snapshots, readback verification, and byte-exact rollback. macOS, Rust daemon, zero-dependency TypeScript facade. Part of the LEMON house." />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div class="wrap">
+  <header class="site-head">
+    <a class="brand" href="#"><b>analog-rytm-agent-bridge</b> · part of LEMON</a>
+    <nav class="site-nav">
+      <a href="#start">start</a>
+      <a href="#safety">safety</a>
+      <a href="#loop">the loop</a>
+      <a href="#tools">tools</a>
+      <a href="#projects">projects</a>
+      <a href="#scope">scope</a>
+      <a href="https://github.com/chronick/analog-rytm-agent-bridge">GitHub</a>
+    </nav>
+  </header>
+
+  <section class="hero">
+    <h1>rytm-agent-bridge<span class="cursor"></span></h1>
+    <p class="tag">A coding agent can play your drum machine — and undo
+      everything it did.</p>
+    <p class="sub">The bridge exposes an Elektron Analog Rytm MKII to an agent
+      as semantic operations: read a compact summary of the device, propose a
+      change, and commit it on the next beat. Hardware has no ctrl-Z, so the
+      whole design assumes the agent will sometimes be wrong — every persistent
+      write is snapshotted as raw SysEx, verified by reading the device back,
+      and restored byte-exactly when the readback disagrees.</p>
+
+<pre><span class="c">$</span> npm run demo</pre>
+    <p class="translate">In plain words: run the entire control plane —
+      inspect, propose, validate, queue, apply, snapshot, roll back — against a
+      <b>mock</b> device. No hardware, no MIDI cable, nothing at risk. It is
+      the honest way to see what this does before it touches an instrument.</p>
+
+    <div class="cta">
+      <a class="btn" href="#start">Start here</a>
+      <a class="btn ghost" href="https://github.com/chronick/analog-rytm-agent-bridge">GitHub</a>
+      <a class="btn ghost" href="#safety">The safety model</a>
+    </div>
+
+    <p class="house">Part of the LEMON house ·
+      <a href="https://lemon-agent.dev">lemon-agent.dev</a> teaches the agent method ·
+      <a href="https://lemon.audio">lemon.audio</a> is the music side of the house ·
+      sibling tools: <a href="https://chronick.github.io/smpl/">smpl</a> ·
+      <a href="https://chronick.github.io/vox/">vox</a></p>
+
+    <figure class="rig">
+      <svg viewBox="0 0 900 132" role="img" aria-label="Diagram: a sixteen-step sequencer row with four steps lit, and directly beneath it the same row read back from the device, matching step for step.">
+        <!-- commanded pattern -->
+        <text x="20" y="18" fill="#94949f" font-family="ui-monospace, monospace" font-size="11" letter-spacing="0.5">COMMANDED</text>
+        <g>
+          <rect class="pad-lit" x="20"  y="28" width="44" height="30" rx="5" fill="#ff6a2f"/>
+          <rect x="72"  y="28" width="44" height="30" rx="5" fill="#16161a" stroke="#2c2c34"/>
+          <rect x="124" y="28" width="44" height="30" rx="5" fill="#16161a" stroke="#2c2c34"/>
+          <rect x="176" y="28" width="44" height="30" rx="5" fill="#3d2418" stroke="#2c2c34"/>
+          <rect class="pad-lit" x="228" y="28" width="44" height="30" rx="5" fill="#ff6a2f"/>
+          <rect x="280" y="28" width="44" height="30" rx="5" fill="#16161a" stroke="#2c2c34"/>
+          <rect x="332" y="28" width="44" height="30" rx="5" fill="#3d2418" stroke="#2c2c34"/>
+          <rect x="384" y="28" width="44" height="30" rx="5" fill="#16161a" stroke="#2c2c34"/>
+          <rect class="pad-lit" x="436" y="28" width="44" height="30" rx="5" fill="#ff6a2f"/>
+          <rect x="488" y="28" width="44" height="30" rx="5" fill="#16161a" stroke="#2c2c34"/>
+          <rect x="540" y="28" width="44" height="30" rx="5" fill="#16161a" stroke="#2c2c34"/>
+          <rect x="592" y="28" width="44" height="30" rx="5" fill="#3d2418" stroke="#2c2c34"/>
+          <rect class="pad-lit" x="644" y="28" width="44" height="30" rx="5" fill="#ff6a2f"/>
+          <rect x="696" y="28" width="44" height="30" rx="5" fill="#16161a" stroke="#2c2c34"/>
+          <rect x="748" y="28" width="44" height="30" rx="5" fill="#3d2418" stroke="#2c2c34"/>
+          <rect x="800" y="28" width="44" height="30" rx="5" fill="#16161a" stroke="#2c2c34"/>
+        </g>
+        <!-- read back from the device -->
+        <text x="20" y="86" fill="#94949f" font-family="ui-monospace, monospace" font-size="11" letter-spacing="0.5">READ BACK</text>
+        <g fill="none" stroke="#6ea8d8" stroke-width="1.6">
+          <rect x="20"  y="96" width="44" height="24" rx="5"/>
+          <rect x="228" y="96" width="44" height="24" rx="5"/>
+          <rect x="436" y="96" width="44" height="24" rx="5"/>
+          <rect x="644" y="96" width="44" height="24" rx="5"/>
+        </g>
+        <g fill="none" stroke="#2c2c34" stroke-width="1.2" stroke-dasharray="3 4">
+          <rect x="72"  y="96" width="44" height="24" rx="5"/>
+          <rect x="124" y="96" width="44" height="24" rx="5"/>
+          <rect x="176" y="96" width="44" height="24" rx="5"/>
+          <rect x="280" y="96" width="44" height="24" rx="5"/>
+          <rect x="332" y="96" width="44" height="24" rx="5"/>
+          <rect x="384" y="96" width="44" height="24" rx="5"/>
+          <rect x="488" y="96" width="44" height="24" rx="5"/>
+          <rect x="540" y="96" width="44" height="24" rx="5"/>
+          <rect x="592" y="96" width="44" height="24" rx="5"/>
+          <rect x="696" y="96" width="44" height="24" rx="5"/>
+          <rect x="748" y="96" width="44" height="24" rx="5"/>
+          <rect x="800" y="96" width="44" height="24" rx="5"/>
+        </g>
+      </svg>
+      <figcaption>a write is only finished once the device agrees · orange = what was asked for · steel = what the hardware actually reported back</figcaption>
+    </figure>
+  </section>
+
+  <section id="start" class="quickstart">
+    <h2>Run it without hardware first</h2>
+    <p class="lead">Everything below runs against a mock Rytm transport. It
+      needs no drum machine, no MIDI interface, and cannot touch a device.</p>
+
+    <div class="start-step">
+      <p class="start-label"><span>1</span> Clone and install</p>
+      <p>The TypeScript side has <strong>zero runtime dependencies</strong> —
+        <code>npm install</code> provisions only the dev-time type checker.
+        Cargo resolves the Rust daemon.</p>
+      <div class="copy-wrap">
+<pre><span class="c">$</span> git clone https://github.com/chronick/analog-rytm-agent-bridge
+<span class="c">$</span> cd analog-rytm-agent-bridge <span class="p">&amp;&amp;</span> npm install</pre>
+        <button class="copy-btn" data-copy="git clone https://github.com/chronick/analog-rytm-agent-bridge &amp;&amp; cd analog-rytm-agent-bridge &amp;&amp; npm install">copy</button>
+      </div>
+    </div>
+
+    <div class="start-step">
+      <p class="start-label"><span>2</span> Drive the mock device</p>
+      <p>This walks the full lifecycle end to end and prints what each stage
+        decided.</p>
+      <div class="copy-wrap">
+<pre><span class="c">$</span> npm run demo</pre>
+        <button class="copy-btn" data-copy="npm run demo">copy</button>
+      </div>
+    </div>
+
+    <div class="start-step">
+      <p class="start-label"><span>3</span> Run the whole gate</p>
+      <p>Node tests, the TypeScript typecheck, and the Rust daemon's
+        <code>cargo test</code> in one command.</p>
+      <div class="copy-wrap">
+<pre><span class="c">$</span> npm run check</pre>
+        <button class="copy-btn" data-copy="npm run check">copy</button>
+      </div>
+    </div>
+
+    <div class="expected">
+      <span class="chip verified">before you plug anything in</span>
+      <p>Requirements are macOS (the daemon needs CoreMIDI and CoreAudio),
+        Rust ≥ 1.89, and Node ≥ 22.14. When you are ready for the real device,
+        work through
+        <a href="https://github.com/chronick/analog-rytm-agent-bridge/blob/main/docs/HARDWARE_SETUP.md">HARDWARE_SETUP.md</a>
+        first — it covers MIDI port configuration, expected device settings,
+        and the backup to take before any write test.</p>
+    </div>
+  </section>
+
+  <section id="safety">
+    <h2>The safety model</h2>
+    <p class="lead">This is the part worth reading. A drum machine is not a
+      scratch directory — an agent that guesses wrong overwrites a kit you
+      spent an evening building. Four rules follow from that, and they are
+      enforced by the daemon rather than left to the agent's judgement.</p>
+
+    <div class="rule">
+      <p><span class="glyph">→</span> <strong>Nothing mutates without
+        <code>--execute</code>.</strong> Every hardware command runs
+        validate-only by default: it connects, decodes real device state,
+        checks the operation against it, and reports what <em>would</em>
+        happen. The flag is the only way to write.</p>
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <span class="num">01</span>
+        <h3>Validate against real state</h3>
+        <p>Deltas are checked against the decoded contents of the connected
+          device, not against an assumption about it. Unsupported operations
+          fail as a refusal rather than a malformed object — an agent is
+          expected to call <code>rytm_describe_capabilities</code> before
+          anything else.</p>
+      </div>
+      <div class="card">
+        <span class="num">02</span>
+        <h3>Snapshot the raw bytes</h3>
+        <p>Before touching an object, the daemon stores the raw SysEx of each
+          affected Pattern, Kit, Global, and Settings object durably — the
+          original bytes, not a re-encoding of a decode.</p>
+      </div>
+      <div class="card">
+        <span class="num">03</span>
+        <h3>Verify by reading back</h3>
+        <p>After applying, the daemon re-reads the object from the device and
+          compares it to what was asked for, canonicalizing codec-quantized
+          values first so the comparison is real rather than cosmetic.</p>
+      </div>
+      <div class="card">
+        <span class="num">04</span>
+        <h3>Roll back automatically</h3>
+        <p>A failed readback restores the original raw bytes across every
+          affected object, without ever decrementing the public revision. This
+          path is hardware-certified against an injected failure, not just unit
+          tested.</p>
+      </div>
+    </div>
+
+    <div class="rule" style="margin-top:1.4rem">
+      <p><span class="glyph">→</span> <strong>What it will still
+        overwrite.</strong> The bridge protects the objects it knows it is
+        touching. It does not back up your whole device. Save your projects to
+        +Drive and take an external backup before first use.</p>
+      <p><span class="glyph">→</span> <strong>Gestures stay
+        non-persistent.</strong> Scene activation, performance macro amounts,
+        and live parameter moves go out as transient CC/NRPN and never change
+        the persistent revision — matching how the hardware itself treats
+        them.</p>
+    </div>
+  </section>
+
+  <section id="loop">
+    <h2>What one change actually does</h2>
+    <p>Not "send MIDI and hope". A persistent edit moves through five stages,
+      and the device gets the last word.</p>
+
+    <div class="anatomy">
+      <div class="stage">
+        <code>propose</code>
+        <p>The agent describes a delta — trigs, a machine, a kit parameter, a
+          song row — against a compact state summary.</p>
+      </div>
+      <div class="link"><span class="glyph"></span><span class="carry">delta</span></div>
+      <div class="stage">
+        <code>validate</code>
+        <p>Checked against decoded device state and firmware capability. Dry
+          run reports the exact effect.</p>
+      </div>
+      <div class="link"><span class="glyph"></span><span class="carry">+ snapshot</span></div>
+      <div class="stage">
+        <code>queue</code>
+        <p>Held for a musical boundary — next step, beat, measure, or pattern —
+          resolved against an explicit transport epoch.</p>
+      </div>
+      <div class="link"><span class="glyph"></span><span class="carry">on the beat</span></div>
+      <div class="stage verify">
+        <code>apply → read back</code>
+        <p>Written, then re-read from the device and compared. Agreement
+          commits the revision.</p>
+      </div>
+    </div>
+
+    <p class="fallback"><b>on disagreement →</b> the original raw SysEx is
+      restored across every affected object, the revision never moves backward,
+      and the failure is journaled as an event the agent can read.</p>
+
+    <p class="dim" style="margin-top:1.2rem">Boundaries come from real clock,
+      not wall-clock guesses: the daemon either generates 24 PPQN or follows
+      observed MIDI realtime input. It survives its own restart — queues,
+      snapshots, revisions, and events are durable — and reconciles on
+      reconnect, rejecting or rolling forward stale-epoch work.</p>
+  </section>
+
+  <section id="tools">
+    <h2>The agent surface</h2>
+    <p>Thirty-two semantic MCP tools. The vocabulary is deliberately about
+      musical intent rather than SysEx addresses.</p>
+
+    <div class="tool-group">
+      <h3>Inspect <span>— compact summaries, not giant payloads</span></h3>
+      <div class="tools">
+        <div><code>rytm_inspect_device_state</code><span>the whole compact picture</span></div>
+        <div><code>rytm_inspect_pattern</code><span>trigs, locks, lengths</span></div>
+        <div><code>rytm_inspect_kit</code><span>kit and FX state</span></div>
+        <div><code>rytm_inspect_track_sound</code><span>machine and per-page params</span></div>
+        <div><code>rytm_inspect_song</code><span>rows, chains, repeats, mutes</span></div>
+        <div><code>rytm_inspect_samples</code><span>+Drive, 127 RAM slots</span></div>
+      </div>
+    </div>
+
+    <div class="tool-group">
+      <h3>Propose and commit <span>— the guarded path</span></h3>
+      <div class="tools">
+        <div><code>rytm_propose_pattern_delta</code><span>describe a pattern change</span></div>
+        <div><code>rytm_propose_song_delta</code><span>describe a song change</span></div>
+        <div><code>rytm_validate_operations</code><span>check before dispatch</span></div>
+        <div><code>rytm_queue_operations</code><span>hold for a musical boundary</span></div>
+        <div><code>rytm_apply_operations_now</code><span>commit immediately</span></div>
+        <div><code>rytm_describe_capabilities</code><span>call this first</span></div>
+      </div>
+    </div>
+
+    <div class="tool-group">
+      <h3>Play <span>— transient, never persistent</span></h3>
+      <div class="tools">
+        <div><code>rytm_trigger_track</code><span>hit a voice</span></div>
+        <div><code>rytm_set_transport</code><span>start, stop, continue</span></div>
+        <div><code>rytm_change_pattern</code><span>switch on a boundary</span></div>
+        <div><code>rytm_set_live_parameter</code><span>track level, mute</span></div>
+        <div><code>rytm_set_active_scene</code><span>scene on/off</span></div>
+        <div><code>rytm_set_performance_macro</code><span>macro amount</span></div>
+      </div>
+    </div>
+
+    <div class="tool-group">
+      <h3>Undo, samples, and listening</h3>
+      <div class="tools">
+        <div><code>rytm_snapshot_state</code><span>raw SysEx checkpoint</span></div>
+        <div><code>rytm_rollback_snapshot</code><span>byte-exact restore</span></div>
+        <div><code>rytm_upload_sample</code><span>content-identified, no dupes</span></div>
+        <div><code>rytm_resolve_sample_ram</code><span>slot assignment with readback</span></div>
+        <div><code>rytm_capture_pattern_audio</code><span>bounded 48 kHz stereo take</span></div>
+        <div><code>rytm_capture_multitrack_audio</code><span>Overbridge stems, optional</span></div>
+      </div>
+    </div>
+
+    <p class="dim" style="margin-top:1.4rem">Capture is a first-class part of
+      the loop, not an afterthought: the agent can play a pattern, record it,
+      and analyze what came out. Takes are bounded, atomically finalized, and
+      checked for silence, clipping, duration mismatch, dropped callback
+      blocks, and disconnects — so a broken recording is reported rather than
+      quietly analyzed.</p>
+  </section>
+
+  <section id="projects">
+    <h2>A whole project from one declaration</h2>
+    <p>Patterns, machines, sounds, scenes, performance macros, and samples
+      described in JSON and applied validation-first, with snapshot and
+      readback.</p>
+
+    <div class="copy-wrap">
+<pre><span class="c">$</span> npm run build:project <span class="p">--</span> declaration.json <span class="f">--execute</span> <span class="f">--auto-slots</span></pre>
+      <button class="copy-btn" data-copy="npm run build:project -- declaration.json --execute --auto-slots">copy</button>
+    </div>
+
+<pre>{
+  <span class="k">"project"</span>: <span class="s">"layered-kick-demo"</span>,
+  <span class="k">"sounds"</span>: {
+    <span class="k">"BD"</span>: {
+      <span class="k">"machine"</span>: <span class="s">"bdplastic"</span>,
+      <span class="k">"machineParams"</span>: { <span class="k">"tun"</span>: -14, <span class="k">"swt"</span>: 54, <span class="k">"dec"</span>: 45, <span class="k">"lev"</span>: 110 },
+      <span class="k">"filter"</span>: { <span class="k">"filter_type"</span>: <span class="s">"Pk"</span>, <span class="k">"resonance"</span>: 40 },
+      <span class="k">"amp"</span>: { <span class="k">"overdrive"</span>: 8 }
+    }
+  }
+}</pre>
+
+    <p class="translate">The <b>sounds</b> section designs each track's kit
+      sound: a machine plus per-page parameter locks. The machine is emitted
+      before its parameters, because selecting a machine resets its page to
+      defaults — the kind of ordering detail that is invisible until it
+      silently eats your settings.</p>
+
+    <p style="margin-top:1.1rem">A declaration with samples is
+      <strong>preflighted against the device's RAM inventory before anything is
+      applied</strong>. Each declared slot must be free or already hold that
+      sample's own content; otherwise the run prints a conflict report and
+      exits non-zero having changed nothing — instead of failing late, after
+      every kit and pattern batch has already landed.
+      <code>--auto-slots</code> remaps conflicts in memory, rewrites the
+      p-locks and kit fields that referenced them, and stays idempotent across
+      repeat runs. Slots the declaration does not own are never touched.</p>
+
+    <p><code>audition:project</code> then plays each pattern from generated
+      clock and captures a verified bounded recording per slot — so the output
+      of a build is audio you can actually listen to.</p>
+  </section>
+
+  <section id="scope">
+    <h2>Honest scope</h2>
+    <p>What is certified, what merely works, and what is not there. "Certified"
+      means run against a connected Analog Rytm MKII on OS 1.72, verified by
+      readback, with the device restored to its exact pre-test state — the
+      dated validation certificates in the repo are those runs.</p>
+
+    <div class="scope-wrap">
+      <table class="scope">
+        <thead>
+          <tr><th>Area</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Patterns, kits, sounds, machines</td><td>Certified on OS 1.72 — inspect, delta, apply, snapshot, rollback</td></tr>
+          <tr><td>Scenes &amp; performance macros</td><td>Certified — all 12 of each, declarative locks plus transient control</td></tr>
+          <tr><td>Songs</td><td>Certified — rows, chains, repeats, per-position mutes, boundary scheduling</td></tr>
+          <tr><td>Samples</td><td>Certified — transfer, content identity, RAM resolution, kit rollback</td></tr>
+          <tr><td>Stereo audio capture</td><td>Certified — bounded 48 kHz takes with fault detection</td></tr>
+          <tr><td>Overbridge multitrack capture</td><td>Certified — Main, eight voice groups, external in, frame-aligned</td></tr>
+          <tr><td>Overbridge plug-in hosting / DAW automation</td><td><span class="chip off">not implemented</span> explicitly unsupported</td></tr>
+          <tr><td>Song tempo/length overrides, jumps, loops, labels, activation</td><td><span class="chip off">not implemented</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="dim" style="margin-top:1.2rem">The codecs target firmware 1.70
+      and the certificates are from a 1.72 device. Neither is a blanket
+      compatibility guarantee for other firmware — unknown-capability
+      operations are gated rather than guessed at.</p>
+
+    <p style="margin-top:1rem">macOS only. The daemon depends on CoreMIDI and
+      CoreAudio and does not build elsewhere.</p>
+  </section>
+
+  <footer>
+    <p><a href="https://github.com/chronick/analog-rytm-agent-bridge">github.com/chronick/analog-rytm-agent-bridge</a> · MIT</p>
+    <p>SysEx codecs from <a href="https://github.com/alisomay/rytm-rs">rytm-rs</a>
+      by alisomay (MIT), pinned to a maintained fork whose changes are being
+      prepared for upstream · sample transfer via a pinned fork of
+      <a href="https://github.com/dagargo/elektroid">Elektroid</a> by dagargo</p>
+    <p>Part of the LEMON house ·
+      <a href="https://chronick.github.io/smpl/">smpl</a> ·
+      <a href="https://chronick.github.io/vox/">vox</a></p>
+    <p class="disclaim">Not affiliated with, endorsed by, or supported by
+      Elektron. "Analog Rytm" and "Overbridge" are Elektron's trademarks, used
+      here only to describe what this software interoperates with. No Elektron
+      artwork, logos, product imagery, or manual text is reproduced on this
+      site — the diagram above is original geometry. Elektron's user manual is
+      copyrighted and is not redistributed by this project.</p>
+  </footer>
+</div>
+
+<script src="copy.js"></script>
+</body>
+</html>

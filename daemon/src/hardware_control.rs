@@ -353,9 +353,8 @@ impl HardwareBridgeState {
         let track_index = track_index(track)?;
         let parameter = required_string(object, "parameter")?;
         // Map the live parameter id to its MIDI address. Both parameters live in
-        // APPENDIX C.3 GENERAL KIT PARAMETERS / COMMON (p.85) of the OS 1.72 user
-        // manual (docs/manual/Analog-Rytm-MKII-User-Manual_ENG_OS1.72_250130.md,
-        // section "C.3 GENERAL KIT PARAMETERS"), mirrored in docs/reference/rytm.yaml
+        // APPENDIX C.3 GENERAL KIT PARAMETERS / COMMON (p.85) of the Elektron
+        // Analog Rytm MKII OS 1.72 user manual, mirrored in docs/reference/rytm.yaml
         // under kit_parameters:
         //   Track Level        -> CC 95, NRPN [1, 100]
         //   Track Mute (seq.)  -> CC 94, NRPN [1, 101]

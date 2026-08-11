@@ -5,3 +5,8 @@ target/
 hardware/runs/
 *.partial
 .DS_Store
+
+# Elektron's user manual is copyrighted and is never redistributed here.
+# Keep a local copy in docs/manual/ if you want one; docs/reference/rytm.yaml
+# carries the distilled, paraphrased facts the bridge actually uses.
+docs/manual/

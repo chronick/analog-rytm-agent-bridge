@@ -12,14 +12,14 @@ description = "Rust hardware daemon boundary for the Analog Rytm agent bridge."
 cpal = "0.18.1"
 hound = "3.5.1"
 midir = "0.11.0"
-rytm-rs = { git = "https://github.com/chronick/rytm-rs.git", rev = "f2e8143f4f92f3ba2241dd65753d50f63a906aeb" }
+# Maintained fork of alisomay/rytm-rs, pinned to an immutable revision so the
+# codecs and firmware fixtures a build resolves are exactly the ones certified
+# against hardware. The fork carries typed Song/Scene/Performance codecs, the
+# round-trip and active-low routing fixes, and the p-lock pool corrections
+# (sentinel fill on pool-slot claim, plus basic single-byte routing for
+# lfo_depth/sample_start/sample_end per libanalogrytm pattern.h). Those changes
+# are being prepared as upstream pull requests; see docs/UPSTREAM.md.
+rytm-rs = { git = "https://github.com/chronick/rytm-rs.git", rev = "4afbdaff69aa8032384278773ba8a588c643a6d6" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10.9"
-
-# Temporary: use the local rytm-rs fork carrying the p-lock fixes (sentinel fill
-# on pool-slot claim + basic single-byte routing for lfo_depth/sample_start/
-# sample_end per libanalogrytm pattern.h). Remove this section and repin the
-# `rev` above once the fork is pushed.
-[patch."https://github.com/chronick/rytm-rs.git"]
-rytm-rs = { path = "/Users/chronick-mbp/git/rytm-rs/rytm" }

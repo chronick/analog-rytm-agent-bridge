@@ -42,8 +42,8 @@ import type { RytmPersistentOperation } from "../domain/types.ts";
 // apply_sound_parameter); enum values are CamelCase serde variants
 // (`SampleStart`, `Tri`, ...), not the lowercase rytm-rs strings. The
 // machine selection is emitted before its params because set_track_machine
-// resets the machine page to defaults. Ground values in the sound-design
-// corpus (`~/git/vault/corpus/sound-design/`) rather than improvising.
+// resets the machine page to defaults. Ground values in measured reference
+// material rather than improvising.
 //
 // Per-track pattern sugar (all step keys are 1-BASED strings, "1" = step 1,
 // matching the `conditions` convention; put these only on trigged steps):

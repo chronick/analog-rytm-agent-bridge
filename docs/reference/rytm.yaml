@@ -4,7 +4,6 @@
 # the shared drum-track parameter pages, the FX track pages, and the
 # track->machine legality table.
 #
-# beads task: vault-1m5s.2
 #
 # ---------------------------------------------------------------------------
 # CONVENTIONS
@@ -41,11 +40,11 @@ meta:
     from APPENDIX B (p.81-84); track->machine legality from section 8.2
     "MACHINES" (manual p.21) cross-checked against the APPENDIX D per-section
     track headers. Constraints from TWO sources: the core voice/track/budget
-    facts copied from ~/git/vault/music/rytm/rytm-build.yaml (verified device
-    spec, Elektron 2026-06-25), plus manual-sourced facts (songs, audio formats,
+    facts taken from a verified device-spec sheet compiled from Elektron's
+    published specifications (2026-06-25), plus manual-sourced facts (songs, audio formats,
     parameter-page counts, total_sequencer_tracks) tagged inline with manual
     refs. Ranges recorded only where the manual states them verbatim.
-  precedent: "~/git/octatrack-projects/docs/reference/octatrack.yaml"
+  precedent: "the same structured-reference format used for the Octatrack"
   range_conventions: |-
     In v2 every `range:` is a STRUCTURED object, not a free-form string. Shape:
       min / max        numeric bounds of the value space (ints or floats)
@@ -63,23 +62,22 @@ meta:
     ("0.03-30 ms", "0.1-2 s, A1, A2"). `min`/`max` describe the ON-SCREEN value
     except where source is a daemon/midi.guide wire range (then they are the
     API/wire bounds; see `display` for the on-screen string). The v1 note that a
-    structural normalization was "deferred to a follow-up task" is now DONE (this
-    task, vault-1m5s.10).
+    structural normalization was "deferred to a follow-up task" is now DONE.
   copyright_note: >-
     Parameter descriptions are concise paraphrases, not copies, of Elektron's
     manual prose. Manual (c) 2025 Elektron Music Machines MAV AB.
 
 # ===========================================================================
 # CONSTRAINTS — verified device spec, from TWO sources. Core voice/track/budget
-# facts copied from ~/git/vault/music/rytm/rytm-build.yaml (Elektron,
-# 2026-06-25); facts tagged "# manual:" below are sourced from the manual
+# facts taken from a verified device-spec sheet compiled from Elektron's
+# published specifications (2026-06-25); facts tagged "# manual:" below are sourced from the manual
 # itself, not the build doc (songs, audio, parameter-page counts,
 # total_sequencer_tracks). The coupled-voice / choke behavior is additionally
 # confirmed in the manual (section 8.2, manual p.21): "Track CP mutes track RS,
 # HT mutes MT, OH mutes CH and CB mutes CY."
 # ===========================================================================
   v2_generation: |-
-    v2 (schema_version 2, task vault-1m5s.10) makes the reference fully
+    v2 (schema_version 2) makes the reference fully
     machine-consumable and joins it to the BRIDGE surface. Additions over v1:
       - Structured ranges on EVERY parameter (machines + track pages + FX +
         trig/euclid/kit/perf). Machine SRC numeric ranges — which the manual does
@@ -141,7 +139,7 @@ constraints:
     converters: "24-bit, 48 kHz D/A and A/D" # manual: HARDWARE appendix — the physical converter spec
   parameter_pages_per_drum_track: 5   # SRC, SMPL, FLTR, AMP, LFO. manual: APPENDIX A (not in rytm-build.yaml)
   parameter_pages_per_fx_track: 5     # DELAY, REVERB, DISTORTION, COMPRESSOR, LFO. manual: APPENDIX B (not in rytm-build.yaml)
-  source_constraints: "~/git/vault/music/rytm/rytm-build.yaml"
+  source_constraints: "verified device-spec sheet (Elektron published specifications, 2026-06-25)"
 
 # ===========================================================================
 # MIDI — the CC / NRPN control map (APPENDIX C: MIDI, manual p.85-95) joined
@@ -4500,7 +4498,7 @@ uncertainties:
     contradiction, but easy to misread.
   resolution: "Encoded the asymmetry in legality.tracks and documented in the legality header."
 
-  # --- MIDI (APPENDIX C) join, task vault-1m5s.3 -----------------------------
+  # --- MIDI (APPENDIX C) join ------------------------------------------------
 - id: midi-appendixC-vs-appendixD-src
   where: "machines[*].parameters (pos) vs midi.machine_src_midi_order"
   issue: >-
@@ -4704,7 +4702,7 @@ uncertainties:
     verify: captured playback 2026-07-17 (commit c3a2794)
   resolution: Bridge public "fill"/"fillnot" mean the device-panel FILL/not-FILL; documented in trig_layer.fill_polarity.
 # ==========================================================================
-# BRIDGE-SURFACE SECTIONS (v2, task vault-1m5s.10). Sourced to the manual +
+# BRIDGE-SURFACE SECTIONS (v2). Sourced to the manual +
 # daemon (hardware.rs / state.rs @ bridge 65bc0d6) + rytm-rs @ f2e8143 + the
 # 2026-07-18 hardware calibration capture. These describe how the AGENT BRIDGE
 # addresses the device (by typed op + parameter NAME), joined to the MIDI/
