@@ -2,50 +2,50 @@
 
 # analog-rytm-agent-bridge
 
-**A control plane that lets a coding agent operate an Elektron Analog Rytm MKII
-as an instrument — and undo everything it did.**
+**Let your coding agent use your Analog Rytm MkII with MCP.**
 
-*Hardware is stateful, destructive, and has no ctrl-Z. So nothing here is
-fire-and-forget: every persistent change is validated against decoded device
-state, snapshotted, applied at a musical boundary, read back, and rolled back
-byte-exactly if the readback disagrees.*
+*Thirty-two semantic tools covering the whole instrument — patterns and
+p-locks, kit sounds and machines, scenes and performance macros, songs, the
+sample RAM, and audio capture. The agent reads the device's real state,
+proposes a change in musical terms, and commits it on the next beat.*
 
-[Site](https://chronick.github.io/analog-rytm-agent-bridge/) · [Quick start](#quick-start) · [Safety](#the-safety-model) · [Tools](#the-agent-surface) · [Architecture](#architecture) · [Capabilities](docs/CAPABILITIES.md)
+[Site](https://chronick.github.io/analog-rytm-agent-bridge/) · [MCP setup](docs/MCP.md) · [Quick start](#quick-start) · [Tools](#the-agent-surface) · [Safety](#the-safety-model) · [Capabilities](docs/CAPABILITIES.md)
 
 </div>
 
 ---
 
 ```bash
-npm run demo
+claude mcp add rytm -- npm run mcp
 ```
 
-That runs the whole control plane — inspect, propose, validate, queue, apply,
-snapshot, roll back — against a mock Rytm transport. No hardware, no MIDI
-cable, no risk to a device. It is the honest way to see what the bridge does
-before letting it touch an instrument.
+That attaches the full tool surface to your agent against a mock device — no
+hardware, no MIDI cable, nothing at risk. Ask it *"what's on pattern A01?"* and
+it will reach for `rytm_inspect_pattern`.
 
 ## What this is
 
 An Analog Rytm holds twelve voices, 128 patterns, kits, sounds, scenes,
 performance macros, songs, and 127 sample slots of state that a person edits by
-hand. This bridge exposes that state to a coding agent as a set of semantic
-operations: read a compact summary, propose a delta, validate it, and commit it
-on the next beat.
+hand. This bridge exposes that state to a coding agent as semantic operations,
+so you can say *"give the snare a conditional fill every 4th pass"* or *"chain
+A01 into A02 twice and mute the toms on the last one"* and have it land on the
+hardware, on the beat.
 
-The hard part is not sending MIDI. It is that an agent that guesses wrong
-overwrites a kit you spent an evening on. So the design is built around a
-single assumption — **the agent will be wrong sometimes** — and everything
-follows from that: validate before dispatch, snapshot raw SysEx before
-mutation, verify by reading the device back, and restore the exact original
-bytes when verification fails.
+The vocabulary is musical intent rather than SysEx addresses, and the agent
+works from a compact summary of what is actually on the device rather than a
+guess. Capture is part of the loop too — it can play what it wrote, record it,
+and listen back.
 
-It is also usable without an agent. The daemon and CLI are ordinary tools for
+It is also usable without an agent. The daemon and CLIs are ordinary tools for
 inspecting, validating, queueing, and applying Rytm operations.
 
 ## The safety model
 
-Read this before pointing it at hardware.
+The short version: hardware has no ctrl-Z, so every persistent change is
+validated against decoded device state, snapshotted as raw SysEx, applied at a
+musical boundary, read back, and restored byte-exactly if the readback
+disagrees. Read the rest before pointing it at hardware.
 
 **Nothing mutates without `--execute`.** Every hardware command runs in
 validate-only mode by default: it connects, decodes real device state, checks
@@ -84,8 +84,9 @@ treats them.
   guessed.
 - **Rust ≥ 1.89** (`File::try_lock`, used for the single-instance state lock).
 - **Node ≥ 22.14** (24+ recommended). The TypeScript side runs on Node's native
-  type-stripping and has **zero runtime dependencies**; `npm install` only
-  provisions the dev-time type checker.
+  type-stripping. Its only runtime dependency is the official
+  [MCP SDK](https://github.com/modelcontextprotocol/typescript-sdk), used by the
+  stdio server; the control plane, CLIs, and daemon client pull in nothing.
 - **For sample management only:** a pinned Elektroid CLI fork — see
   [docs/HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md).
 
@@ -96,7 +97,7 @@ treats them.
 ```bash
 git clone https://github.com/chronick/analog-rytm-agent-bridge
 cd analog-rytm-agent-bridge
-npm install          # dev-time typechecker only
+npm install          # MCP SDK + dev-time typechecker
 npm run demo
 ```
 
@@ -141,6 +142,24 @@ cargo run --manifest-path daemon/Cargo.toml -- serve --adapter hardware --clock-
 State lives in `~/.analog-rytm-agent-bridge/hardware-state.json` by default;
 `--state-dir` selects an isolated store. Mock and hardware modes speak the same
 request/response/event protocol — see [docs/DAEMON_RPC.md](docs/DAEMON_RPC.md).
+
+## Use it from an agent
+
+The bridge ships an MCP stdio server exposing all 32 tools to any MCP client.
+Start with the mock adapter — every tool answers, and no hardware is involved:
+
+```bash
+claude mcp add rytm -- npm run mcp
+```
+
+For the real device:
+
+```bash
+claude mcp add rytm-hw -- npm run mcp:hardware
+```
+
+Full setup for Claude Code, Claude Desktop, and other clients — plus flags and
+troubleshooting — is in [docs/MCP.md](docs/MCP.md).
 
 ## The agent surface
 
@@ -215,7 +234,7 @@ verified bounded recording per slot.
 
 ```text
 Coding agent / MCP host
-  → TypeScript semantic facade          zero runtime deps
+  → MCP stdio server / TypeScript facade
   → versioned JSON-lines RPC over stdio
   → long-running Rust daemon             revisions, queue, snapshots, rollback
   → CoreMIDI / SysEx / realtime MIDI
@@ -249,6 +268,7 @@ should remain useful alone.
 | [AUDIO_CAPTURE.md](docs/AUDIO_CAPTURE.md) | The stereo capture contract |
 | [OVERBRIDGE_AUDIO.md](docs/OVERBRIDGE_AUDIO.md) | Optional synchronized multitrack capture |
 | [SAMPLE_MANAGEMENT.md](docs/SAMPLE_MANAGEMENT.md) | Sample identity, transfer, RAM resolution, rollback boundaries |
+| [MCP.md](docs/MCP.md) | Wiring the MCP server into Claude Code, Claude Desktop, or your own client |
 | [UPSTREAM.md](docs/UPSTREAM.md) | The `rytm-rs` fork and its path back upstream |
 | [CODE_REVIEW_2026-07-17.md](docs/CODE_REVIEW_2026-07-17.md) | Second-opinion review findings and dispositions |
 

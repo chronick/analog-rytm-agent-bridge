@@ -275,6 +275,38 @@ section > p.dim, p.dim { color: var(--dim); }
 .rule p:last-child { margin-bottom: 0; }
 .rule .glyph { font-family: var(--mono); font-weight: 700; color: var(--accent); padding: 0 0.15em; }
 
+/* ------------------------------------------------------------- examples --- */
+
+.ex {
+  border-left: 2px solid var(--border);
+  padding: 0.15rem 0 0.15rem 1.1rem;
+  margin: 1.4rem 0;
+}
+.ex:hover { border-left-color: var(--accent); }
+.ex .say {
+  font-family: var(--mono);
+  font-size: 1rem;
+  line-height: 1.5;
+  color: var(--accent-ink);
+  max-width: 62ch;
+  margin: 0 0 0.5rem;
+}
+.ex .does {
+  color: var(--ink);
+  font-size: 0.96rem;
+  max-width: 74ch;
+  margin: 0 0 0.5rem;
+}
+.ex .does em { color: var(--steel); font-style: normal; font-weight: 600; }
+.ex .via { margin: 0; display: flex; flex-wrap: wrap; gap: 0.4rem; max-width: none; }
+.ex .via code {
+  font-size: 11.5px;
+  color: var(--dim);
+  background: var(--panel-2);
+  border-color: var(--border);
+  padding: 0.12em 0.45em;
+}
+
 /* ---------------------------------------------------------------- cards --- */
 
 .cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.9rem; margin-top: 0.4rem; }

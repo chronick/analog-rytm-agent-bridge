@@ -4,7 +4,12 @@
   "private": true,
   "type": "module",
   "description": "Standalone agent bridge for semantic Analog Rytm control.",
+  "bin": {
+    "rytm-mcp-server": "src/bin/mcp-server.ts"
+  },
   "scripts": {
+    "mcp": "node --experimental-transform-types src/bin/mcp-server.ts",
+    "mcp:hardware": "node --experimental-transform-types src/bin/mcp-server.ts --adapter hardware --clock-source observed",
     "test": "node --experimental-transform-types --test test/*.test.ts",
     "typecheck": "tsc",
     "rust:test": "cd daemon && cargo test",
@@ -36,5 +41,8 @@
   "devDependencies": {
     "@types/node": "^26.1.1",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0"
   }
 }
