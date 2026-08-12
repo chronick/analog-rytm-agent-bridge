@@ -6,6 +6,10 @@ these, then decide what to open and in what order.
 
 Prepared 2026-08-11 against `upstream/main` = `5638457` (2024-12-07).
 
+Branches were rebuilt after the `rytm/proj.json` purge; every one is verified to
+sit on the genuine upstream tip `5638457` (0 commits behind), not on a rewritten
+copy of upstream history.
+
 ## Context worth knowing before you submit
 
 - Upstream's last commit is **2024-12-07** — roughly twenty months of silence.
@@ -133,9 +137,8 @@ The second commit proves `Pattern::clear_all_plocks` retires both the zero-fill
 ghosts and the orphan companions.
 
 **Note:** the original commit accidentally included a **63 MB `rytm/proj.json`**
-device dump. It has been stripped from this branch. It is still present on the
-`agent-control` branch of your fork and should be purged there too — see
-"Loose ends".
+device dump. It has been purged from this branch and from the fork's
+`agent-control` history; the bridge is repinned to the purged revision.
 
 **Risk:** medium. This is protocol-level behavior; the claim rests on
 `libanalogrytm`'s header, which the PR body should cite directly.
@@ -202,23 +205,17 @@ a real upstream-facing feature (unlike the fork banner, which was stripped).
 
 ## Loose ends for you to decide
 
-1. **The 63 MB blob in your fork.** `rytm/proj.json` sits on
-   `chronick/rytm-rs@agent-control` from commit `8a8ae2c`. GitHub warns on every
-   push, and because `daemon/Cargo.toml` pins that revision, **every clean build
-   of the bridge downloads it**. Purging needs a `filter-repo` and force-push on
-   a public fork, then repinning the bridge. Say the word.
-
-2. **Author identity.** Commits carry `Co-Authored-By: Claude Opus 5`. Many
+1. **Author identity.** Commits carry `Co-Authored-By: Claude Opus 5`. Many
    maintainers are wary of machine-submitted PRs. Options: leave it as
    disclosure, rewrite the trailers, or keep them and state plainly in the PR
    body that the work was agent-assisted and hardware-verified. Your call — I
    have not changed any authorship.
 
-3. **How much to open at once.** Eight PRs landing simultaneously on a
+2. **How much to open at once.** Eight PRs landing simultaneously on a
    twenty-month-dormant repo reads as a dump. Opening 1–3 first and waiting is
    the friendlier move.
 
-4. **If upstream stays silent.** The fork is already the real dependency. The
+3. **If upstream stays silent.** The fork is already the real dependency. The
    honest alternative is to say so publicly — a note in the fork's README
    describing it as a maintained fork with changes offered upstream, so others
    hitting issues #2 and #3 can find it.

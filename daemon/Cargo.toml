@@ -19,7 +19,7 @@ midir = "0.11.0"
 # (sentinel fill on pool-slot claim, plus basic single-byte routing for
 # lfo_depth/sample_start/sample_end per libanalogrytm pattern.h). Those changes
 # are being prepared as upstream pull requests; see docs/UPSTREAM.md.
-rytm-rs = { git = "https://github.com/chronick/rytm-rs.git", rev = "4afbdaff69aa8032384278773ba8a588c643a6d6" }
+rytm-rs = { git = "https://github.com/chronick/rytm-rs.git", rev = "3e9dd91ee8976f320f7073973122613caf5f48c4" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10.9"
