@@ -3847,7 +3847,10 @@ mod tests {
         let changed = apply_persistent_operations(&mut capture, &operations).unwrap();
         assert_eq!(changed.kits, vec![2], "only stored kit 2 changed");
         assert!(!changed.kit, "the work-buffer kit must not be re-sent");
-        assert!(changed.pattern, "set_pattern_kit changes the work-buffer pattern");
+        assert!(
+            changed.pattern,
+            "set_pattern_kit changes the work-buffer pattern"
+        );
 
         // The stored kit carries the mutations.
         let kit2 = kit_summary(&capture.project.kits()[1]);
@@ -4416,7 +4419,10 @@ mod tests {
             assert_eq!(slots.len(), 1, "depth {declared}: one slot, no companion");
             let (track_nr, plock_type, data) = &slots[0];
             assert_eq!((*track_nr, *plock_type), (0, 0x28), "BASIC LFO_DEPTH slot");
-            assert_eq!(data[0], device_byte, "depth {declared} -> byte {device_byte}");
+            assert_eq!(
+                data[0], device_byte,
+                "depth {declared} -> byte {device_byte}"
+            );
             // Sentinel fill: every other trig column must be unset, not 0x00.
             assert!(
                 data[1..].iter().all(|byte| *byte == 0xFF),
@@ -4555,7 +4561,11 @@ mod tests {
             apply_parameter_lock_set(trig, "sample_start", &json!(95)).unwrap();
             apply_parameter_lock_set(trig, "sample_end", &json!(120)).unwrap();
         }
-        let bytes = project.work_buffer().pattern().as_sysex().expect("as_sysex");
+        let bytes = project
+            .work_buffer()
+            .pattern()
+            .as_sysex()
+            .expect("as_sysex");
         let mut reparsed = RytmProject::try_default().unwrap();
         reparsed.update_from_sysex_response(&bytes).expect("decode");
         let trig = &reparsed.work_buffer().pattern().tracks()[0].trigs()[0];
@@ -4565,7 +4575,9 @@ mod tests {
         // (device resolution is ~2 depth units per byte) and inside the gate.
         let depth = locks["lfo_depth"].as_f64().expect("lfo_depth present");
         assert!((depth - 50.0).abs() < 2.0, "lfo_depth read back {depth}");
-        let start = locks["sample_start"].as_f64().expect("sample_start present");
+        let start = locks["sample_start"]
+            .as_f64()
+            .expect("sample_start present");
         assert!((start - 95.0).abs() < 1.0, "sample_start read back {start}");
         let end = locks["sample_end"].as_f64().expect("sample_end present");
         assert!((end - 120.0).abs() < 1.0, "sample_end read back {end}");
@@ -4581,23 +4593,51 @@ mod tests {
         // rytm-rs encodes byte = value + 64; we assert the round-safe subset and the
         // negative extremes that the CH hard-left forensics turned on.
         let project = set_plock("amp_pan", json!(-64));
-        assert_eq!(head_trig(&project).plock_get_amplitude_pan().unwrap(), Some(-64)); // byte 0x00 (hard left)
+        assert_eq!(
+            head_trig(&project).plock_get_amplitude_pan().unwrap(),
+            Some(-64)
+        ); // byte 0x00 (hard left)
         let project = set_plock("amp_pan", json!(-20));
-        assert_eq!(head_trig(&project).plock_get_amplitude_pan().unwrap(), Some(-20)); // byte 0x2C = 44
+        assert_eq!(
+            head_trig(&project).plock_get_amplitude_pan().unwrap(),
+            Some(-20)
+        ); // byte 0x2C = 44
         let project = set_plock("amp_pan", json!(20));
-        assert_eq!(head_trig(&project).plock_get_amplitude_pan().unwrap(), Some(20)); // byte 0x54 = 84
+        assert_eq!(
+            head_trig(&project).plock_get_amplitude_pan().unwrap(),
+            Some(20)
+        ); // byte 0x54 = 84
 
         let project = set_plock("filter_envelope", json!(-64));
-        assert_eq!(head_trig(&project).plock_get_filter_envelope_amount().unwrap(), Some(-64));
+        assert_eq!(
+            head_trig(&project)
+                .plock_get_filter_envelope_amount()
+                .unwrap(),
+            Some(-64)
+        );
         let project = set_plock("filter_envelope", json!(63));
-        assert_eq!(head_trig(&project).plock_get_filter_envelope_amount().unwrap(), Some(63));
+        assert_eq!(
+            head_trig(&project)
+                .plock_get_filter_envelope_amount()
+                .unwrap(),
+            Some(63)
+        );
 
         let project = set_plock("sample_tune", json!(-24));
-        assert_eq!(head_trig(&project).plock_get_sample_tune().unwrap(), Some(-24)); // byte 0x28 = 40
+        assert_eq!(
+            head_trig(&project).plock_get_sample_tune().unwrap(),
+            Some(-24)
+        ); // byte 0x28 = 40
         let project = set_plock("sample_tune", json!(24));
-        assert_eq!(head_trig(&project).plock_get_sample_tune().unwrap(), Some(24)); // byte 0x58 = 88
+        assert_eq!(
+            head_trig(&project).plock_get_sample_tune().unwrap(),
+            Some(24)
+        ); // byte 0x58 = 88
 
         let project = set_plock("lfo_speed", json!(-63));
-        assert_eq!(head_trig(&project).plock_get_lfo_speed().unwrap(), Some(-63));
+        assert_eq!(
+            head_trig(&project).plock_get_lfo_speed().unwrap(),
+            Some(-63)
+        );
     }
 }

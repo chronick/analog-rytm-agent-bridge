@@ -1790,8 +1790,8 @@ fn apply_operations(
             }
             PersistentOperation::SetPatternKit { pattern, kit } => {
                 // `kit` is 1-based user-facing; device index = kit - 1.
-                ensure_pattern(patterns, pattern.as_deref().unwrap_or(active_pattern))
-                    .kit_number = kit - 1;
+                ensure_pattern(patterns, pattern.as_deref().unwrap_or(active_pattern)).kit_number =
+                    kit - 1;
             }
             PersistentOperation::SetTrackMachine {
                 pattern,
@@ -1799,9 +1799,14 @@ fn apply_operations(
                 machine,
                 kit,
             } => {
-                kit_container(patterns, kits, *kit, pattern.as_deref().unwrap_or(active_pattern))
-                    .machines
-                    .insert(track.clone(), machine.clone());
+                kit_container(
+                    patterns,
+                    kits,
+                    *kit,
+                    pattern.as_deref().unwrap_or(active_pattern),
+                )
+                .machines
+                .insert(track.clone(), machine.clone());
             }
             PersistentOperation::CopyPattern {
                 source_pattern,
@@ -1868,15 +1873,20 @@ fn apply_operations(
                 sample_id,
                 kit,
             } => {
-                kit_container(patterns, kits, *kit, pattern.as_deref().unwrap_or(active_pattern))
-                    .sample_slots
-                    .insert(
-                        track.clone(),
-                        SampleSlot {
-                            slot: *slot,
-                            sample_id: sample_id.clone(),
-                        },
-                    );
+                kit_container(
+                    patterns,
+                    kits,
+                    *kit,
+                    pattern.as_deref().unwrap_or(active_pattern),
+                )
+                .sample_slots
+                .insert(
+                    track.clone(),
+                    SampleSlot {
+                        slot: *slot,
+                        sample_id: sample_id.clone(),
+                    },
+                );
             }
             PersistentOperation::SetSceneLock {
                 scene,
@@ -3182,7 +3192,10 @@ mod tests {
             let bad_index = validation_result(&json!([
                 { "type": "set_kit_parameter", "parameter": "track_level", "value": 100, "kit": kit },
             ]));
-            assert_eq!(bad_index["valid"], false, "indexed kit {kit} must be rejected");
+            assert_eq!(
+                bad_index["valid"], false,
+                "indexed kit {kit} must be rejected"
+            );
         }
         let ok = validation_result(&json!([
             { "type": "set_pattern_kit", "kit": 128 },
@@ -3226,7 +3239,9 @@ mod tests {
     #[test]
     fn indexed_kit_changes_bump_revision_and_survive_rollback() {
         let mut state = MockBridgeState::default();
-        state.create_snapshot(&json!({ "snapshotId": "pre" })).unwrap();
+        state
+            .create_snapshot(&json!({ "snapshotId": "pre" }))
+            .unwrap();
         let applied = state
             .apply_now(&json!({
                 "expectedRevision": 0,
@@ -3236,7 +3251,10 @@ mod tests {
                 ],
             }))
             .unwrap();
-        assert_eq!(applied["resultingRevision"], 1, "indexed kit change bumps revision");
+        assert_eq!(
+            applied["resultingRevision"], 1,
+            "indexed kit change bumps revision"
+        );
         assert_eq!(
             state.inspect_state()["kits"]["4"]["kitParameters"]["macros.scene.2"][0]["parameter"],
             "filter_cutoff"

@@ -124,7 +124,9 @@ fn dump_capture(path: &str) {
 
     println!(
         "  pool owner_pattern_index={} is_work_buffer={} slot_count={}",
-        pool["owner_pattern_index"], pool["is_owner_pattern_work_buffer"], inner.len()
+        pool["owner_pattern_index"],
+        pool["is_owner_pattern_work_buffer"],
+        inner.len()
     );
 
     let mut used = 0usize;
