@@ -34,9 +34,11 @@ Two of them answer open upstream feature requests:
 - [alisomay/rytm-rs#3](https://github.com/alisomay/rytm-rs/issues/3) — Scene and
   Performance macro APIs.
 
-The work is being prepared as a series of independent, reviewable pull requests
+The work is prepared as a series of independent, reviewable pull requests
 rather than one large branch dump, so each can be evaluated and merged on its
-own. Nothing is submitted automatically.
+own. Nothing is submitted automatically — see
+[UPSTREAM_PR_PACKET.md](UPSTREAM_PR_PACKET.md) for the branch-by-branch review
+packet, its verification results, and the open questions.
 
 ## Staying current
 
