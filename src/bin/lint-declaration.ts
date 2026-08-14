@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { gridOperations, songOperations, soundOperations } from "./build-project.ts";
+import { gridOperations, sampleStem, songOperations, soundOperations } from "./build-project.ts";
 import type { PatternDecl, SongDecl } from "./build-project.ts";
 import { validatePersistentOperation } from "../domain/validation.ts";
 import type { RytmCapabilities, RytmPersistentOperation } from "../domain/types.ts";
@@ -37,6 +37,18 @@ const PATTERN_KEYS = new Set(["slot", "name", "clear", "kit", "tracks", "plocks"
 const TRACK_KEYS = new Set(["grid", "condition", "conditions", "length", "microtiming", "velocities", "retrigs", "plocks"]);
 const SOUND_KEYS = new Set(["machine", "machineParams", "sample", "filter", "amp", "lfo", "settings"]);
 const KIT_KEYS = new Set(["kit", "sounds", "ops", "scenes", "performances"]);
+// RAM slot range the daemon enforces (daemon/src/samples.rs `validate_ram_slot`,
+// RAM_SLOT_MIN..=RAM_SLOT_MAX) — the build-project preflight only reaches it
+// with a device attached, so the linter mirrors it offline.
+const RAM_SLOT_MIN = 1;
+const RAM_SLOT_MAX = 127;
+// Device-safe sample name: the uploaded stem becomes the device path segment
+// `/<project>/<stem>`. Mirrors daemon/src/samples.rs `validate_sample_name`
+// (1..=63 bytes, no path separators/controls, no leading dot) narrowed to the
+// safe-identifier alphabet the daemon uses elsewhere (ASCII alphanumeric plus
+// `-`, `_`, `.`, `:`), so an authored name never depends on device charset luck.
+const DEVICE_SAFE_STEM = /^[A-Za-z0-9\-_.:]+$/;
+const SAMPLE_STEM_MAX_BYTES = 63;
 // Each stored kit owns its own scene + performance lock pools; the device caps
 // each at 48 locks. Mirrors validation.ts assertKit range + the 48-lock ceiling.
 const KIT_LOCK_POOL_BUDGET = 48;
@@ -611,6 +623,90 @@ export function lintKitScenes(fragment: unknown): LintFinding[] {
   return findings;
 }
 
+// The `samples` section: upload + RAM-resolve targets. Every check here mirrors
+// a daemon rule the build-project preflight can only reach with the device
+// attached, so an authoring error stays visible offline. Returns the set of
+// well-formed declared slots for the `sample_number` cross-check below.
+export function lintSamples(samples: unknown): { findings: LintFinding[]; declaredSlots: Set<number> } {
+  const section = "samples";
+  const declaredSlots = new Set<number>();
+  if (!Array.isArray(samples)) {
+    return {
+      findings: [{ severity: "error", section, message: "samples must be an array of { file, slot, track? } entries" }],
+      declaredSlots,
+    };
+  }
+  const findings: LintFinding[] = [];
+  const slotOwner = new Map<number, string>();
+  samples.forEach((entry, index) => {
+    const label = isRecord(entry) && typeof entry.file === "string" ? `"${entry.file}"` : `samples[${index}]`;
+    const error = (message: string) => findings.push({ severity: "error", section, message: `${label}: ${message}` });
+    if (!isRecord(entry)) {
+      error("sample entry must be a JSON object");
+      return;
+    }
+    if (typeof entry.file !== "string" || entry.file.length === 0) {
+      error(`file is required and must be a non-empty string, got ${JSON.stringify(entry.file)}`);
+    } else {
+      const stem = sampleStem(entry.file);
+      const bytes = Buffer.byteLength(stem, "utf8");
+      if (stem.length === 0 || bytes > SAMPLE_STEM_MAX_BYTES) {
+        error(`device name "${stem}" is ${bytes} bytes (must be 1 to ${SAMPLE_STEM_MAX_BYTES})`);
+      } else if (stem.startsWith(".") || !DEVICE_SAFE_STEM.test(stem)) {
+        error(`device name "${stem}" is not device-safe — the upload names the device path /<project>/${stem}; use ASCII alphanumerics plus - _ . : and no leading dot`);
+      }
+    }
+    if (typeof entry.slot !== "number" || !Number.isInteger(entry.slot) || entry.slot < RAM_SLOT_MIN || entry.slot > RAM_SLOT_MAX) {
+      error(`slot must be an integer between ${RAM_SLOT_MIN} and ${RAM_SLOT_MAX}, got ${JSON.stringify(entry.slot)}`);
+    } else {
+      const owner = slotOwner.get(entry.slot);
+      if (owner !== undefined) {
+        error(`slot ${entry.slot} is already declared by ${owner} — one RAM slot holds one sample, so the other would be silently dropped`);
+      } else {
+        slotOwner.set(entry.slot, label);
+        declaredSlots.add(entry.slot);
+      }
+    }
+    if (entry.track !== undefined && !(CANONICAL_TRACKS as readonly string[]).includes(entry.track as string)) {
+      error(`track ${JSON.stringify(entry.track)} is not a canonical track (tracks are ${CANONICAL_TRACKS.join(" ")})`);
+    }
+  });
+  return { findings, declaredSlots };
+}
+
+// Every `sample_number` p-lock value in the patterns section, with the first
+// place each slot is referenced and how often. Covers both the per-track sugar
+// (tracks.<T>.plocks["<step>"].sample_number) and the raw pattern.plocks
+// passthrough ops — the two forms build-project's slot remap rewrites.
+function sampleNumberReferences(patterns: unknown): Map<number, { first: string; count: number }> {
+  const references = new Map<number, { first: string; count: number }>();
+  const note = (slot: unknown, where: string) => {
+    if (typeof slot !== "number") return;
+    const seen = references.get(slot);
+    if (seen === undefined) references.set(slot, { first: where, count: 1 });
+    else seen.count += 1;
+  };
+  if (!Array.isArray(patterns)) return references;
+  for (const pattern of patterns) {
+    if (!isRecord(pattern)) continue;
+    const slot = typeof pattern.slot === "string" ? pattern.slot : "?";
+    if (isRecord(pattern.tracks)) {
+      for (const [track, decl] of Object.entries(pattern.tracks)) {
+        if (!isRecord(decl) || !isRecord(decl.plocks)) continue;
+        for (const [step, params] of Object.entries(decl.plocks)) {
+          if (isRecord(params)) note(params.sample_number, `${slot} ${track} step ${step}`);
+        }
+      }
+    }
+    if (Array.isArray(pattern.plocks)) {
+      pattern.plocks.forEach((op, index) => {
+        if (isRecord(op) && op.parameter === "sample_number") note(op.value, `${slot} plocks[${index}]`);
+      });
+    }
+  }
+  return references;
+}
+
 export function lintDeclaration(declaration: unknown): LintFinding[] {
   if (!isRecord(declaration)) {
     return [{ severity: "error", section: "declaration", message: "declaration must be a JSON object" }];
@@ -634,6 +730,23 @@ export function lintDeclaration(declaration: unknown): LintFinding[] {
     }
   }
   findings.push(...lintPatterns(declaration.patterns));
+  let declaredSlots = new Set<number>();
+  if (declaration.samples !== undefined) {
+    const samples = lintSamples(declaration.samples);
+    findings.push(...samples.findings);
+    declaredSlots = samples.declaredSlots;
+  }
+  // An undeclared `sample_number` target is legal — external material already
+  // sitting in RAM — but it is also how a slot typo hides, so warn once per slot.
+  for (const [slot, reference] of sampleNumberReferences(declaration.patterns)) {
+    if (declaredSlots.has(slot)) continue;
+    const more = reference.count > 1 ? ` and ${reference.count - 1} more` : "";
+    findings.push({
+      severity: "warning",
+      section: "samples",
+      message: `sample_number ${slot} (${reference.first}${more}) is not declared by any samples[] entry — legal for material already in RAM, but check for a slot typo`,
+    });
+  }
   if (declaration.kits !== undefined) findings.push(...lintKits(declaration.kits));
   findings.push(...lintKitScenes({
     ...(declaration.sounds !== undefined ? { sounds: declaration.sounds } : {}),

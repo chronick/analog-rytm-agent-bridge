@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { detectShape, lintInput, lintKits, lintKitScenes, lintPatterns } from "../src/bin/lint-declaration.ts";
+import { detectShape, lintDeclaration, lintInput, lintKits, lintKitScenes, lintPatterns, lintSamples } from "../src/bin/lint-declaration.ts";
 import type { LintFinding } from "../src/bin/lint-declaration.ts";
 
 // A contract-clean pattern: all 12 canonical tracks, explicit lengths,
@@ -271,6 +271,93 @@ test("kits section: bad range, duplicate index, and unknown key are errors", () 
     /duplicate kit 2/,
   );
   assert.match(errors(lintKits([{ kit: 2, bogus: 1 }]))[0].message, /unknown kit key "bogus"/);
+});
+
+test("a clean samples section lints with no findings", () => {
+  const { findings } = lintSamples([
+    { file: "bd-kick-a.wav", track: "BD", slot: 1 },
+    { file: "rc-vox-dies.wav", slot: 127 },
+  ]);
+  assert.deepEqual(findings, []);
+});
+
+test("sample slot outside 1..127 is an error (mirrors daemon validate_ram_slot)", () => {
+  const messages = (samples: unknown[]) =>
+    errors(lintSamples(samples).findings).map((entry) => entry.message).join("\n");
+  assert.match(messages([{ file: "a.wav", slot: 0 }]), /slot must be an integer between 1 and 127, got 0/);
+  assert.match(messages([{ file: "a.wav", slot: 128 }]), /slot must be an integer between 1 and 127, got 128/);
+  assert.match(messages([{ file: "a.wav", slot: 4.5 }]), /slot must be an integer between 1 and 127/);
+  assert.match(messages([{ file: "a.wav" }]), /slot must be an integer between 1 and 127, got undefined/);
+});
+
+test("two samples declaring the same slot is an error", () => {
+  const found = errors(lintSamples([
+    { file: "a.wav", slot: 44 },
+    { file: "b.wav", slot: 44 },
+  ]).findings);
+  assert.equal(found.length, 1);
+  assert.match(found[0].message, /"b.wav": slot 44 is already declared by "a.wav"/);
+  assert.match(found[0].message, /silently dropped/);
+});
+
+test("a device-unsafe sample stem is an error; the extension is not part of it", () => {
+  const messages = (file: string) =>
+    errors(lintSamples([{ file, slot: 1 }]).findings).map((entry) => entry.message).join("\n");
+  assert.match(messages("rc vox dies.wav"), /device name "rc vox dies" is not device-safe/);
+  assert.match(messages("rc-vöx.wav"), /device name "rc-vöx" is not device-safe/);
+  assert.match(messages(".hidden.wav"), /not device-safe/);
+  assert.match(messages(`${"x".repeat(64)}.wav`), /is 64 bytes \(must be 1 to 63\)/);
+  // A safe stem under a nested source directory, with dots in the name, is fine.
+  assert.deepEqual(lintSamples([{ file: "packs/tm-909/01-bd.kick_a:1.wav", slot: 1 }]).findings, []);
+});
+
+test("a non-canonical samples[].track is an error", () => {
+  const found = errors(lintSamples([{ file: "a.wav", track: "FX", slot: 1 }]).findings);
+  assert.equal(found.length, 1);
+  assert.match(found[0].message, /track "FX" is not a canonical track/);
+});
+
+test("a sample_number p-lock on an undeclared slot is a warning, not an error", () => {
+  const pattern = cleanPattern();
+  track(pattern, "BD").plocks = { "1": { sample_number: 44 }, "5": { sample_number: 44 }, "9": { sample_number: 45 } };
+  const declaration = {
+    project: "basilica",
+    samples: [{ file: "rc-vox-dies.wav", slot: 44 }],
+    patterns: [pattern],
+  };
+  const findings = lintDeclaration(declaration);
+  assert.deepEqual(errors(findings), []);
+  const undeclared = warnings(findings).filter((entry) => entry.section === "samples");
+  assert.equal(undeclared.length, 1); // slot 44 is declared; 45 is not
+  assert.match(undeclared[0].message, /sample_number 45 \(A01 BD step 9\) is not declared by any samples\[\] entry/);
+
+  // The raw pattern.plocks passthrough is covered too, and repeats collapse.
+  const raw = cleanPattern();
+  raw.plocks = [
+    { type: "set_parameter_lock", track: "BD", step: 0, parameter: "sample_number", value: 60 },
+    { type: "set_parameter_lock", track: "BD", step: 4, parameter: "sample_number", value: 60 },
+  ];
+  const rawFindings = lintDeclaration({ project: "basilica", samples: [], patterns: [raw] });
+  const rawUndeclared = warnings(rawFindings).filter((entry) => entry.section === "samples");
+  assert.equal(rawUndeclared.length, 1);
+  assert.match(rawUndeclared[0].message, /sample_number 60 \(A01 plocks\[0\] and 1 more\)/);
+});
+
+test("a declaration whose samples cover every sample_number p-lock lints clean", () => {
+  const pattern = cleanPattern();
+  track(pattern, "BD").plocks = { "1": { sample_number: 94 } };
+  const findings = lintDeclaration({
+    project: "basilica",
+    samples: [{ file: "bd-kick-a-t.wav", track: "BD", slot: 94 }],
+    patterns: [pattern],
+  });
+  assert.deepEqual(findings, []);
+});
+
+test("samples must be an array", () => {
+  const found = errors(lintDeclaration({ project: "p", samples: {}, patterns: [] }));
+  assert.equal(found.length, 1);
+  assert.match(found[0].message, /samples must be an array of \{ file, slot, track\? \} entries/);
 });
 
 test("kits section: each kit gets its own 48+48 lock-pool budget", () => {
