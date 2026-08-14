@@ -352,14 +352,19 @@ export interface SampleSlotPlan {
   declaration: Declaration; // deep copy, remapped (identical when no conflicts)
 }
 
-// Device path build-project gives an uploaded sample: the deviceDirectory
-// (`/<project>`) joined with the source file's stem. Mirrors daemon/src/samples.rs
-// `upload` (Path::file_stem + join_device_path) — strip the directory and the
-// LAST extension only, no case folding.
-export function sampleDevicePath(project: string, file: string): string {
+// The name an uploaded sample gets on the device: the source file's stem.
+// Mirrors daemon/src/samples.rs `upload` (Path::file_stem) — strip the
+// directory and the LAST extension only, no case folding.
+export function sampleStem(file: string): string {
   const base = file.split("/").pop() ?? file;
   const dot = base.lastIndexOf(".");
-  return `/${project}/${dot > 0 ? base.slice(0, dot) : base}`;
+  return dot > 0 ? base.slice(0, dot) : base;
+}
+
+// Device path build-project gives an uploaded sample: the deviceDirectory
+// (`/<project>`) joined with the source file's stem (join_device_path).
+export function sampleDevicePath(project: string, file: string): string {
+  return `/${project}/${sampleStem(file)}`;
 }
 
 // Classify every declared sample slot against the device's RAM inventory and
