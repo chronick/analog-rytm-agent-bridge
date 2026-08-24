@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { EventJournal } from "../src/service/EventJournal.ts";
 import { MockRytmTransport } from "../src/service/MockRytmTransport.ts";
-import { RytmAgentService } from "../src/service/RytmAgentService.ts";
+import { RytmAgentService, retainedHistoryLimit } from "../src/service/RytmAgentService.ts";
 
 async function createService(directory?: string): Promise<{ service: RytmAgentService; transport: MockRytmTransport; directory: string }> {
   const sessionDirectory = directory ?? await mkdtemp(join(tmpdir(), "analog-rytm-agent-test-"));
@@ -207,4 +208,96 @@ test("event journal recovers past a torn trailing line", async () => {
   assert.deepEqual(second.service.getEvents().map((entry) => entry.cursor), [1]);
   await second.service.snapshotState({ snapshotId: "snap-2" });
   assert.deepEqual(second.service.getEvents().map((entry) => entry.cursor), [1, 2]);
+});
+
+test("event journal caps its in-memory mirror and keeps paging coherent", async () => {
+  const journal = new EventJournal<{ type: string; index: number }>({ retentionLimit: 3 });
+  for (let index = 1; index <= 5; index += 1) await journal.append({ type: "test", index });
+
+  assert.equal(journal.oldestRetainedCursor, 3);
+  assert.deepEqual(journal.tail(10).map((entry) => entry.cursor), [3, 4, 5]);
+  // A cursor older than the retained window resumes at the oldest retained
+  // entry instead of replaying evicted ones.
+  assert.deepEqual(journal.page(0).map((entry) => entry.cursor), [3, 4, 5]);
+  assert.deepEqual(journal.page(4).map((entry) => entry.cursor), [5]);
+});
+
+test("event journal caps what init loads while the file keeps every entry", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "analog-rytm-journal-cap-"));
+  const writer = new EventJournal<{ index: number }>({ directory });
+  await writer.init();
+  for (let index = 1; index <= 5; index += 1) await writer.append({ index });
+
+  const reader = new EventJournal<{ index: number }>({ directory, retentionLimit: 2 });
+  await reader.init();
+  assert.deepEqual(reader.tail(10).map((entry) => entry.cursor), [4, 5]);
+
+  const lines = (await readFile(join(directory, "journal", "events.jsonl"), "utf8")).split("\n").filter(Boolean);
+  assert.equal(lines.length, 5);
+
+  // Cursors still continue from the complete on-disk history, not the mirror.
+  assert.equal((await reader.append({ index: 6 })).cursor, 6);
+  assert.deepEqual(reader.tail(10).map((entry) => entry.cursor), [5, 6]);
+});
+
+test("snapshot mirror evicts the oldest snapshots past the retention cap", async () => {
+  const service = new RytmAgentService({ transport: new MockRytmTransport() });
+  await service.init();
+  for (let index = 0; index < retainedHistoryLimit + 2; index += 1) {
+    await service.snapshotState({ snapshotId: `snap-${index}` });
+  }
+
+  await assert.rejects(
+    () => service.rollbackSnapshot({ snapshotId: "snap-0" }),
+    /unknown snapshot: snap-0/,
+  );
+  const rolled = await service.rollbackSnapshot({ snapshotId: `snap-${retainedHistoryLimit + 1}` });
+  assert.equal(rolled.activePattern.pattern, "A01");
+});
+
+test("operation-set mirror evicts settled sets first and keeps pending ones", async () => {
+  const service = new RytmAgentService({ transport: new MockRytmTransport() });
+  await service.init();
+  await service.queueOperations({
+    operationSetId: "keeper",
+    expectedRevision: 0,
+    applyAt: { kind: "next_measure" },
+    latePolicy: "roll-forward",
+    operations: [{ type: "set_trig", track: "BD", step: 0, velocity: 100 }],
+  });
+  let revision = 0;
+  for (let index = 0; index < retainedHistoryLimit + 2; index += 1) {
+    const applied = await service.applyOperationsNow({
+      operationSetId: `filler-${index}`,
+      expectedRevision: revision,
+      operations: [{ type: "set_trig", track: "SD", step: index % 16, velocity: 100 }],
+    });
+    revision = (applied as { resultingRevision: number }).resultingRevision;
+  }
+
+  // The oldest settled set was evicted, so its id no longer collides.
+  const readded = await service.applyOperationsNow({
+    operationSetId: "filler-0",
+    expectedRevision: revision,
+    operations: [{ type: "set_trig", track: "CP", step: 3, velocity: 64 }],
+  });
+  revision = (readded as { resultingRevision: number }).resultingRevision;
+  // A recently settled set is still retained and still guards its id.
+  await assert.rejects(
+    () => service.applyOperationsNow({
+      operationSetId: `filler-${retainedHistoryLimit + 1}`,
+      expectedRevision: revision,
+      operations: [{ type: "set_trig", track: "CP", step: 5, velocity: 64 }],
+    }),
+    /already exists with a different payload/,
+  );
+
+  // The pending set survived the eviction pressure: it still reaches its
+  // boundary rather than disappearing from the queue.
+  await service.advanceMockTransport(16);
+  const rejected = service.journal.tail(500).some((entry) => {
+    const event = entry.event as { type: string; operationSetId?: string };
+    return event.type === "operation_set.rejected" && event.operationSetId === "keeper";
+  });
+  assert.equal(rejected, true);
 });
