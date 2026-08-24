@@ -46,6 +46,38 @@ test("microtiming and retrig merge into the matching trigged step's set_trig", (
   assert.equal(step3.retrig, true);
 });
 
+test("a per-step retrig entry enables retrig on its step, and coexists with the legacy retrigs list", () => {
+  // grid "X.xX": trigs at 0, 2, 3. Legacy list marks step 1; the per-step map
+  // marks step 3 (== index 2). Step 4 (index 3) is in neither.
+  const ops = gridOperations({
+    slot: "A02",
+    name: "roll",
+    tracks: {
+      LT: {
+        grid: "X.xX",
+        retrigs: [1],
+        retrig: { "3": { rate: "_1B40", length: "_32nd", velocityCurve: -24 } },
+      },
+    },
+  });
+  const trigs = setTrigs(ops) as Array<Extract<RytmPersistentOperation, { type: "set_trig" }>>;
+  assert.equal(trigs.length, 3);
+  assert.equal(trigs.find((op) => op.step === 0)!.retrig, true); // legacy list
+  assert.equal(trigs.find((op) => op.step === 2)!.retrig, true); // per-step map
+  assert.equal(trigs.find((op) => op.step === 3)!.retrig, undefined); // neither
+
+  // The roll spec stays in the DECLARATION: rate/length/velocityCurve never
+  // reach the op (the daemon's set_trig schema has no fields for them yet).
+  for (const trig of trigs) {
+    assert.deepEqual(
+      Object.keys(trig).filter((key) => ["rate", "length", "velocityCurve"].includes(key)),
+      [],
+    );
+  }
+  const result = collectOperationValidation(ops, capabilities);
+  assert.deepEqual(result.errors, []);
+});
+
 test("velocities override the grid symbol's velocity for the matching step's set_trig", () => {
   const ops = gridOperations({
     slot: "A05",
@@ -399,6 +431,37 @@ test("planSampleSlots refuses to auto-remap a declared slot the RAM inventory do
   assert.equal(plan.conflicts[0]?.reason, "unknown-slot");
   assert.equal(plan.conflicts[0]?.remapTo, undefined);
   assert.deepEqual(plan.mapping, {});
+});
+
+test("planSampleSlots round-trips per-step retrig fields through the remapped declaration copy", () => {
+  const declaration: Declaration = {
+    project: "basilica",
+    samples: [{ file: "lt-tom.wav", slot: 4 }],
+    patterns: [
+      {
+        slot: "A01",
+        name: "tom-roll",
+        tracks: {
+          LT: {
+            grid: "X...",
+            retrigs: [1],
+            retrig: { "1": { rate: "_1B40", length: "_32nd", velocityCurve: -24 } },
+            plocks: { "1": { sample_number: 4 } },
+          },
+        },
+      },
+    ],
+  };
+  // Declared slot 4 is occupied, so the copy is genuinely rewritten (not the
+  // untouched-input path) — the retrig spec must survive that pass intact.
+  const plan = planSampleSlots(declaration, ramInventory({ 4: "/techno-sessions/40-silt" }));
+  assert.deepEqual(plan.mapping, { 4: 1 });
+  const round = plan.declaration.patterns[0]!.tracks.LT!;
+  assert.deepEqual(round.retrig, { "1": { rate: "_1B40", length: "_32nd", velocityCurve: -24 } });
+  assert.deepEqual(round.retrigs, [1]);
+  assert.equal(round.plocks?.["1"]?.sample_number, 1); // the remap still applied
+  // Parse -> serialize is lossless for the new fields too.
+  assert.deepEqual(JSON.parse(JSON.stringify(plan.declaration)), plan.declaration);
 });
 
 test("planSampleSlots is a no-op for a declaration without a samples section", () => {

@@ -57,6 +57,9 @@ import type { RytmPersistentOperation } from "../domain/types.ts";
 //     "velocities": { "5": 112 },     // 1-based step -> 1..127, overrides the grid
 //                                      //   symbol's velocity for that step's set_trig
 //     "retrigs": [5, 13],              // 1-based steps -> set_trig retrig:true
+//     "retrig": {                      // per-step roll spec (see StepRetrigDecl)
+//       "13": { "rate": "_1B40", "length": "_32nd", "velocityCurve": -24 }
+//     },
 //     "plocks": { "1": { "filter_cutoff": 40 } }  // per-step -> set_parameter_lock
 //   }
 //
@@ -101,6 +104,18 @@ import type { RytmPersistentOperation } from "../domain/types.ts";
 // `mutedTracks`; `repeats` is required by the daemon (u16, 1..256) so it
 // defaults to 1; `target` is omitted (defaults to the work-buffer song).
 
+// One step's retrig roll. THE DECLARATION CARRIES THE ROLL SPEC; op-level
+// application lands with daemon support — the daemon's set_trig op schema
+// (state.rs PersistentOperation, deny_unknown_fields) carries only the boolean
+// `retrig`, so emitting rate/length/velocityCurve as op fields would fail op
+// validation. gridOperations therefore reads this map only to decide WHETHER a
+// step retrigs; the roll parameters round-trip through the declaration for the
+// authoring/lint layer until the daemon grows fields for them.
+export interface StepRetrigDecl {
+  rate?: string; // rytm-rs RetrigRate serde variant name, e.g. "_1B40" (= 1/40)
+  length?: number | string; // rytm-rs trig Length (serde variant name, e.g. "_32nd")
+  velocityCurve?: number; // rytm-rs TrackRetrigMenu velocity_curve, -128..127
+}
 export interface TrackDecl {
   grid: string;
   condition?: string;
@@ -109,6 +124,7 @@ export interface TrackDecl {
   microtiming?: Record<string, number>; // 1-based step -> -24..24
   velocities?: Record<string, number>; // 1-based trigged step -> 1..127, overrides the grid symbol's velocity
   retrigs?: number[]; // 1-based trigged steps to enable retrig on
+  retrig?: Record<string, StepRetrigDecl>; // 1-based trigged step -> roll spec (also enables retrig)
   plocks?: Record<string, Record<string, number | boolean | string>>; // 1-based step -> param map
 }
 export interface PatternDecl {
@@ -176,7 +192,7 @@ export function gridOperations(pattern: PatternDecl): RytmPersistentOperation[] 
     operations.push({ type: "set_pattern_kit", pattern: pattern.slot, kit: pattern.kit } as RytmPersistentOperation);
   }
   // Pass 1 (per track): clears (for a `clear` pattern) -> set_trigs -> length.
-  // microtiming/retrigs merge into the matching trigged step's set_trig.
+  // microtiming/retrigs/retrig merge into the matching trigged step's set_trig.
   for (const [track, decl] of Object.entries(pattern.tracks)) {
     const steps = decl.grid.replace(/\s+/g, "");
     if (pattern.clear) {
@@ -191,7 +207,10 @@ export function gridOperations(pattern: PatternDecl): RytmPersistentOperation[] 
       const key = String(index + 1); // step keys are 1-based
       const condition = decl.conditions?.[key] ?? decl.condition;
       const microTiming = decl.microtiming?.[key];
-      const retrig = decl.retrigs?.includes(index + 1);
+      // Either form enables retrig on the step: the legacy `retrigs` list or a
+      // per-step `retrig` entry. Only the boolean reaches the op (see
+      // StepRetrigDecl — the roll parameters stay in the declaration).
+      const retrig = decl.retrigs?.includes(index + 1) || decl.retrig?.[key] !== undefined;
       // A per-step `velocities` override (1..127) wins over the grid symbol's
       // default velocity for that step; the grid symbol still decides whether
       // there is a trig at all.
