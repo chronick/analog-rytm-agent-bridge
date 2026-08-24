@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createInterface, type Interface as ReadLineInterface } from "node:readline";
+import { promisify } from "node:util";
 import {
   RYTM_RPC_SCHEMA,
   type RytmDaemonApi,
@@ -52,12 +53,26 @@ import type {
   RytmValidationResult,
 } from "../domain/types.ts";
 
+/** One row of the host process table, as used by stale-daemon detection. */
+export interface ProcessListEntry {
+  pid: number;
+  ppid: number;
+  command: string;
+}
+
+export type ProcessLister = () => Promise<ProcessListEntry[]>;
+
 export interface RustDaemonClientOptions {
   command?: string;
   args?: string[];
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
+  /**
+   * Lists the host process table so `start()` can spot a daemon left behind by
+   * an earlier session. Injectable so tests never depend on real `ps` output.
+   */
+  listProcesses?: ProcessLister;
 }
 
 interface PendingRequest {
@@ -81,8 +96,9 @@ export class RytmDaemonRpcError extends Error {
 }
 
 export class RustDaemonClient implements RytmDaemonApi {
-  private readonly options: Required<Pick<RustDaemonClientOptions, "command" | "args" | "requestTimeoutMs">> &
-    Omit<RustDaemonClientOptions, "command" | "args" | "requestTimeoutMs">;
+  private readonly options:
+    & Required<Pick<RustDaemonClientOptions, "command" | "args" | "requestTimeoutMs" | "listProcesses">>
+    & Omit<RustDaemonClientOptions, "command" | "args" | "requestTimeoutMs" | "listProcesses">;
   private readonly pending = new Map<string, PendingRequest>();
   private readonly eventListeners = new Set<(event: RytmRpcEvent) => void>();
   private child?: ChildProcessWithoutNullStreams;
@@ -90,6 +106,7 @@ export class RustDaemonClient implements RytmDaemonApi {
   private stderr = "";
   private starting?: Promise<RytmDaemonHealth>;
   private intentionalClose = false;
+  private exitHook?: () => void;
 
   constructor(options: RustDaemonClientOptions = {}) {
     this.options = {
@@ -98,6 +115,7 @@ export class RustDaemonClient implements RytmDaemonApi {
       cwd: options.cwd,
       env: options.env,
       requestTimeoutMs: options.requestTimeoutMs ?? 30_000,
+      listProcesses: options.listProcesses ?? listSystemProcesses,
     };
   }
 
@@ -111,13 +129,22 @@ export class RustDaemonClient implements RytmDaemonApi {
 
     this.intentionalClose = false;
     this.stderr = "";
-    this.starting = new Promise<RytmDaemonHealth>((resolve, reject) => {
+    this.starting = this.spawnDaemon().finally(() => {
+      this.starting = undefined;
+    });
+    return this.starting;
+  }
+
+  private async spawnDaemon(): Promise<RytmDaemonHealth> {
+    await this.guardAgainstExistingDaemon();
+    return new Promise<RytmDaemonHealth>((resolve, reject) => {
       const child = spawn(this.options.command, this.options.args, {
         cwd: this.options.cwd,
         env: this.options.env ?? process.env,
         stdio: ["pipe", "pipe", "pipe"],
       });
       this.child = child;
+      this.armExitHook(child);
       this.stdout = createInterface({ input: child.stdout });
       this.stdout.on("line", (line) => this.handleLine(line));
       child.stderr.setEncoding("utf8");
@@ -140,16 +167,88 @@ export class RustDaemonClient implements RytmDaemonApi {
         this.stdout?.close();
         this.stdout = undefined;
         this.child = undefined;
+        this.disarmExitHook();
         const detail = this.stderr.trim();
         const reason = `Rust daemon disconnected (code=${String(code)}, signal=${String(signal)})${detail ? `: ${detail}` : ""}`;
         this.rejectAll(this.disconnectError(reason));
       });
 
       this.requestWithoutStart<RytmDaemonHealth>("daemon.health", {}).then(resolve, reject);
-    }).finally(() => {
-      this.starting = undefined;
     });
-    return this.starting;
+  }
+
+  /**
+   * A daemon owns exclusive hardware (MIDI ports, Overbridge audio); a second
+   * one silently fights the first, which is how a build died mid-run against a
+   * daemon left behind by an earlier manual session. Hardware starts therefore
+   * refuse outright, while mock starts only warn — the test suite legitimately
+   * runs several mock daemons in parallel.
+   */
+  private async guardAgainstExistingDaemon(): Promise<void> {
+    const existing = await this.findForeignDaemons();
+    if (existing.length === 0) return;
+    const summary = existing.map((entry) => `pid ${entry.pid} (${entry.command})`).join("; ");
+    const pids = existing.map((entry) => entry.pid);
+    if (!this.targetsHardwareAdapter()) {
+      console.warn(
+        `RustDaemonClient: ${DAEMON_BINARY} is already running — ${summary}; starting another one anyway (non-hardware adapter)`,
+      );
+      return;
+    }
+    throw new RytmDaemonRpcError({
+      code: "daemon_already_running",
+      message:
+        `refusing to spawn a second hardware ${DAEMON_BINARY}: ${existing.length} already running — ${summary}. `
+        + `Stop it first with: kill ${pids.join(" ")}`,
+      retryable: false,
+      details: { pids, processes: existing },
+    });
+  }
+
+  /**
+   * Daemons this Node process already owns are not stale — a script that
+   * deliberately runs two daemons cleans them up itself. Only foreign ones,
+   * from an earlier session, are reported.
+   */
+  private async findForeignDaemons(): Promise<ProcessListEntry[]> {
+    let entries: ProcessListEntry[];
+    try {
+      entries = await this.options.listProcesses();
+    } catch (error) {
+      // Detection is advisory; a missing or failing process listing must never
+      // be the reason a daemon cannot start.
+      console.warn(
+        `RustDaemonClient: stale-daemon detection skipped: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    }
+    const ours = descendantPids(entries, process.pid);
+    return entries.filter((entry) => !ours.has(entry.pid) && isDaemonCommand(entry.command));
+  }
+
+  private targetsHardwareAdapter(): boolean {
+    const args = this.options.args;
+    return args.some((arg, index) => arg === "--adapter=hardware" || (arg === "--adapter" && args[index + 1] === "hardware"));
+  }
+
+  /**
+   * `process.exit()` in a helper script skips the async `close()` path, which
+   * would orphan the spawned cargo/daemon child. An "exit" handler must be
+   * synchronous, so SIGKILL is the only option available here.
+   */
+  private armExitHook(child: ChildProcessWithoutNullStreams): void {
+    this.disarmExitHook();
+    const hook = (): void => {
+      if (child.exitCode === null) child.kill("SIGKILL");
+    };
+    this.exitHook = hook;
+    process.on("exit", hook);
+  }
+
+  private disarmExitHook(): void {
+    if (!this.exitHook) return;
+    process.removeListener("exit", this.exitHook);
+    this.exitHook = undefined;
   }
 
   async request<T = unknown>(
@@ -311,7 +410,18 @@ export class RustDaemonClient implements RytmDaemonApi {
   async close(): Promise<void> {
     this.intentionalClose = true;
     const child = this.child;
-    if (!child) return;
+    if (!child) {
+      this.disarmExitHook();
+      return;
+    }
+    try {
+      await this.terminate(child);
+    } finally {
+      this.disarmExitHook();
+    }
+  }
+
+  private async terminate(child: ChildProcessWithoutNullStreams): Promise<void> {
     await new Promise<void>((resolve) => {
       if (child.exitCode !== null) {
         resolve();
@@ -430,7 +540,58 @@ export class RustDaemonClient implements RytmDaemonApi {
   }
 }
 
+const DAEMON_BINARY = "analog-rytm-agent-daemon";
+const execFileAsync = promisify(execFile);
+
 function defaultDaemonPath(): string {
-  const executable = process.platform === "win32" ? "analog-rytm-agent-daemon.exe" : "analog-rytm-agent-daemon";
+  const executable = process.platform === "win32" ? `${DAEMON_BINARY}.exe` : DAEMON_BINARY;
   return fileURLToPath(new URL(`../../daemon/target/debug/${executable}`, import.meta.url));
+}
+
+/** Default process lister: the host process table via `ps`. */
+async function listSystemProcesses(): Promise<ProcessListEntry[]> {
+  if (process.platform === "win32") return [];
+  const { stdout } = await execFileAsync("ps", ["-eo", "pid=,ppid=,args="], { maxBuffer: 8 * 1024 * 1024 });
+  return parseProcessList(stdout);
+}
+
+export function parseProcessList(stdout: string): ProcessListEntry[] {
+  const entries: ProcessListEntry[] = [];
+  for (const line of stdout.split("\n")) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\S.*)$/.exec(line);
+    if (!match) continue;
+    entries.push({ pid: Number(match[1]), ppid: Number(match[2]), command: match[3]!.trim() });
+  }
+  return entries;
+}
+
+/**
+ * True only for the daemon binary itself, never for the `cargo run … daemon/Cargo.toml`
+ * wrapper that launches it — matching the wrapper would flag every build command.
+ */
+export function isDaemonCommand(command: string): boolean {
+  return command.split(/\s+/).some((token) => {
+    const name = token.split(/[\\/]/).pop() ?? "";
+    return name === DAEMON_BINARY || name === `${DAEMON_BINARY}.exe`;
+  });
+}
+
+/** Every pid descending from `root`, including `root` itself. */
+function descendantPids(entries: ProcessListEntry[], root: number): Set<number> {
+  const children = new Map<number, number[]>();
+  for (const entry of entries) {
+    const siblings = children.get(entry.ppid);
+    if (siblings) siblings.push(entry.pid);
+    else children.set(entry.ppid, [entry.pid]);
+  }
+  const seen = new Set<number>([root]);
+  const queue = [root];
+  while (queue.length > 0) {
+    for (const child of children.get(queue.pop()!) ?? []) {
+      if (seen.has(child)) continue;
+      seen.add(child);
+      queue.push(child);
+    }
+  }
+  return seen;
 }
