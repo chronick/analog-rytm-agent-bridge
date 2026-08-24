@@ -139,6 +139,81 @@ test("retrig outside the grid is an error; on an untrigged step too", () => {
   assert.match(errors(lintPatterns([untrigged]))[0].message, /retrigs: step 2 is not trigged/);
 });
 
+test("a per-step retrig roll spec on a trigged step lints clean", () => {
+  const pattern = cleanPattern();
+  track(pattern, "BD").retrig = {
+    "1": { rate: "_1B40", length: "_32nd", velocityCurve: -24 },
+    "9": { rate: "_1B16" }, // every field is optional
+    "13": {}, // bare entry: enables retrig, no roll parameters
+  };
+  assert.deepEqual(lintPatterns([pattern]), []);
+});
+
+test("retrig rate must be an exact rytm-rs RetrigRate serde variant name", () => {
+  const wrongName = cleanPattern();
+  track(wrongName, "BD").retrig = { "1": { rate: "1/40" } };
+  const found = errors(lintPatterns([wrongName]));
+  assert.equal(found.length, 1);
+  assert.match(found[0].message, /retrig\["1"\]\.rate must be one of _1B1, /);
+  assert.match(found[0].message, /got "1\/40"/);
+
+  const casing = cleanPattern();
+  track(casing, "BD").retrig = { "1": { rate: "_1b40" } };
+  assert.match(errors(lintPatterns([casing]))[0].message, /did you mean "_1B40"/);
+});
+
+test("retrig on an off-grid or untrigged step is an error", () => {
+  const outside = cleanPattern();
+  track(outside, "BD").retrig = { "17": { rate: "_1B40" } };
+  assert.match(errors(lintPatterns([outside]))[0].message, /retrig\["17"\]: step 17 is outside the 16-step grid/);
+
+  const untrigged = cleanPattern();
+  track(untrigged, "BD").retrig = { "2": { rate: "_1B40" } }; // step 2 is '.'
+  assert.match(errors(lintPatterns([untrigged]))[0].message, /retrig\["2"\]: step 2 is not trigged/);
+});
+
+test("an unknown key inside a retrig entry is an error", () => {
+  const pattern = cleanPattern();
+  track(pattern, "BD").retrig = { "1": { rate: "_1B40", curve: -24 } };
+  const found = errors(lintPatterns([pattern]));
+  assert.equal(found.length, 1);
+  assert.match(found[0].message, /retrig\["1"\]: unknown key "curve"/);
+});
+
+test("retrig velocityCurve out of the signed range, and a bad length, are errors", () => {
+  const range = cleanPattern();
+  track(range, "BD").retrig = { "1": { velocityCurve: 200 } };
+  assert.match(errors(lintPatterns([range]))[0].message, /velocityCurve must be an integer between -128 and 127/);
+
+  const fractional = cleanPattern();
+  track(fractional, "BD").retrig = { "1": { velocityCurve: -0.5 } };
+  assert.match(errors(lintPatterns([fractional]))[0].message, /between -128 and 127/);
+
+  // -128 and 127 are both in range (mirrors TrackRetrigMenu::set_velocity_curve).
+  const edges = cleanPattern();
+  track(edges, "BD").retrig = { "1": { velocityCurve: -128 }, "5": { velocityCurve: 127 } };
+  assert.deepEqual(lintPatterns([edges]), []);
+
+  // length: a positive integer or a non-empty variant name; nothing else.
+  const badLength = cleanPattern();
+  track(badLength, "BD").retrig = { "1": { length: 0 } };
+  assert.match(errors(lintPatterns([badLength]))[0].message, /length must be a positive integer or a non-empty rytm-rs Length variant name/);
+
+  const okLength = cleanPattern();
+  track(okLength, "BD").retrig = { "1": { length: 2 }, "5": { length: "_16th" } };
+  assert.deepEqual(lintPatterns([okLength]), []);
+});
+
+test("retrig must be an object of 1-based steps", () => {
+  const pattern = cleanPattern();
+  track(pattern, "BD").retrig = [1, 5];
+  assert.match(errors(lintPatterns([pattern]))[0].message, /retrig must be an object of 1-based steps/);
+
+  const entry = cleanPattern();
+  track(entry, "BD").retrig = { "1": "_1B40" };
+  assert.match(errors(lintPatterns([entry]))[0].message, /retrig\["1"\]: must be an object of \{ rate\?, length\?, velocityCurve\? \}/);
+});
+
 test("invalid grid characters and grid length are errors", () => {
   const chars = cleanPattern();
   track(chars, "BD").grid = "X..q X... X... X..!";

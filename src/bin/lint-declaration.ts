@@ -17,7 +17,7 @@ import type { RytmCapabilities, RytmPersistentOperation } from "../domain/types.
 //
 // Layer 1 (declaration/style contract) validates the authored JSON: key
 // hygiene, slot/name shapes, grid alphabet and page lengths, per-track length,
-// and that every 1-based step map (conditions/microtiming/plocks/retrigs)
+// and that every 1-based step map (conditions/microtiming/plocks/retrigs/retrig)
 // lands on a trigged step inside the grid (trigless locks are unverified on
 // this bridge). Layer 2 compiles the declaration through build-project.ts's
 // pure functions and validates every emitted op offline: the TS validation
@@ -34,7 +34,7 @@ const CANONICAL_TRACKS = ["BD", "SD", "RS", "CP", "BT", "LT", "MT", "HT", "CY", 
 const PATTERN_SLOT = /^[A-H](0[1-9]|1[0-6])$/;
 const GRID_LENGTHS = new Set([16, 32, 48, 64]);
 const PATTERN_KEYS = new Set(["slot", "name", "clear", "kit", "tracks", "plocks"]);
-const TRACK_KEYS = new Set(["grid", "condition", "conditions", "length", "microtiming", "velocities", "retrigs", "plocks"]);
+const TRACK_KEYS = new Set(["grid", "condition", "conditions", "length", "microtiming", "velocities", "retrigs", "retrig", "plocks"]);
 const SOUND_KEYS = new Set(["machine", "machineParams", "sample", "filter", "amp", "lfo", "settings"]);
 const KIT_KEYS = new Set(["kit", "sounds", "ops", "scenes", "performances"]);
 // RAM slot range the daemon enforces (daemon/src/samples.rs `validate_ram_slot`,
@@ -68,6 +68,28 @@ const CONDITIONS = new Set<string>([
 for (let base = 2; base <= 8; base += 1) {
   for (let numerator = 1; numerator <= base; numerator += 1) CONDITIONS.add(`${numerator}:${base}`);
 }
+
+// Per-step retrig roll spec (tracks.<T>.retrig["<step>"], see StepRetrigDecl in
+// build-project.ts). The declaration carries the roll; no op field exists for
+// it yet, so these checks are the ONLY validation these values get.
+//
+// `rate` mirrors the 17 unit variants of rytm-rs 3e9dd91 `RetrigRate`
+// (object/pattern/track/trig/types.rs) as the daemon deserializes them — exact
+// serde variant identifiers, `_1B40` not "1/40".
+const RETRIG_RATES = [
+  "_1B1", "_1B2", "_1B3", "_1B4", "_1B5", "_1B6", "_1B8", "_1B10", "_1B12",
+  "_1B16", "_1B20", "_1B24", "_1B32", "_1B40", "_1B48", "_1B64", "_1B80",
+] as const;
+// `length` is the rytm-rs trig `Length` enum (~128 variants covering fractional
+// note values, e.g. "_32nd", "_1D50", "Quarter"). Mirroring that table offline
+// would rot faster than it helps and nothing consumes the value yet, so the
+// check is deliberately loose: a positive integer (step count) or a non-empty
+// string (a serde variant name). Tighten it when the daemon grows a field.
+// `velocityCurve` mirrors TrackRetrigMenu::set_velocity_curve's -128..=127
+// (rytm-rs 3e9dd91 object/kit/retrig.rs).
+const RETRIG_VELOCITY_CURVE_MIN = -128;
+const RETRIG_VELOCITY_CURVE_MAX = 127;
+const RETRIG_ENTRY_KEYS = new Set(["rate", "length", "velocityCurve"]);
 
 // The 33-parameter p-lock surface. Mirror of daemon/src/state.rs
 // `parameter_lock_value_spec` (~line 2368) — that function is the source of
@@ -428,6 +450,48 @@ export function lintPattern(pattern: unknown, index: number): LintFinding[] {
         for (const step of decl.retrigs as number[]) {
           if (step < 1 || step > grid.length) error(`${track}.retrigs: step ${step} is outside the ${grid.length}-step grid`);
           else if (!trigged.has(step)) error(`${track}.retrigs: step ${step} is not trigged — retrigs must land on trigged steps`);
+        }
+      }
+    }
+    if (decl.retrig !== undefined) {
+      if (!isRecord(decl.retrig)) error(`${track}: retrig must be an object of 1-based steps -> { rate?, length?, velocityCurve? }`);
+      else {
+        findings.push(...lintStepKeys(section, track, "retrig", decl.retrig, grid.length, trigged));
+        for (const [key, entry] of Object.entries(decl.retrig)) {
+          if (!isRecord(entry)) {
+            error(`${track}.retrig["${key}"]: must be an object of { rate?, length?, velocityCurve? }`);
+            continue;
+          }
+          for (const field of Object.keys(entry)) {
+            if (!RETRIG_ENTRY_KEYS.has(field)) {
+              error(`${track}.retrig["${key}"]: unknown key "${field}" (allowed: ${[...RETRIG_ENTRY_KEYS].join(", ")})`);
+            }
+          }
+          const rate = entry.rate;
+          if (rate !== undefined && (typeof rate !== "string" || !(RETRIG_RATES as readonly string[]).includes(rate))) {
+            const casing = typeof rate === "string"
+              ? RETRIG_RATES.find((variant) => variant.toLowerCase() === rate.toLowerCase())
+              : undefined;
+            const hint = casing ? ` (did you mean "${casing}"? enum variants are exact-case serde names)` : "";
+            error(`${track}.retrig["${key}"].rate must be one of ${RETRIG_RATES.join(", ")}, got ${JSON.stringify(rate)}${hint}`);
+          }
+          if (entry.length !== undefined) {
+            const length = entry.length;
+            const validNumber = typeof length === "number" && Number.isInteger(length) && length > 0;
+            const validName = typeof length === "string" && length.length > 0;
+            if (!validNumber && !validName) {
+              error(`${track}.retrig["${key}"].length must be a positive integer or a non-empty rytm-rs Length variant name (e.g. "_32nd"), got ${JSON.stringify(length)}`);
+            }
+          }
+          if (
+            entry.velocityCurve !== undefined &&
+            (typeof entry.velocityCurve !== "number" ||
+              !Number.isInteger(entry.velocityCurve) ||
+              entry.velocityCurve < RETRIG_VELOCITY_CURVE_MIN ||
+              entry.velocityCurve > RETRIG_VELOCITY_CURVE_MAX)
+          ) {
+            error(`${track}.retrig["${key}"].velocityCurve must be an integer between ${RETRIG_VELOCITY_CURVE_MIN} and ${RETRIG_VELOCITY_CURVE_MAX}, got ${JSON.stringify(entry.velocityCurve)}`);
+          }
         }
       }
     }
