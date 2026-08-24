@@ -415,8 +415,10 @@ impl AudioService {
         let (sample_sender, sample_receiver) = mpsc::sync_channel(WRITER_QUEUE_BLOCKS);
         let writer_thread = thread::spawn(move || write_samples(writer, sample_receiver));
         let (notice_sender, notice_receiver) = mpsc::channel();
-        let target_frames = expected_duration_ms
-            .map(|milliseconds| frames_for_duration(source.sample_rate, milliseconds));
+        let target_frames = Some(frames_for_duration(
+            source.sample_rate,
+            capture_limit_milliseconds(expected_duration_ms),
+        ));
         let accepted_frames = Arc::new(AtomicU64::new(0));
         let dropped_blocks = Arc::new(AtomicU64::new(0));
 
@@ -568,7 +570,17 @@ impl AudioService {
                     if *signal == MockSignal::Disconnect {
                         failure = Some("mock audio input disconnected".to_string());
                     } else {
-                        let frames = active.target_frames.unwrap_or(DEFAULT_MOCK_FRAMES);
+                        // The mock filler follows the *bracket*, not the capture
+                        // limit: an unbracketed recording now carries the
+                        // MAX_CAPTURE_MILLISECONDS ceiling in `target_frames`,
+                        // and synthesising ten minutes of tone for a manual
+                        // start/stop would be absurd.
+                        let frames = active
+                            .expected_duration_ms
+                            .map(|milliseconds| {
+                                frames_for_duration(active.source.sample_rate, milliseconds)
+                            })
+                            .unwrap_or(DEFAULT_MOCK_FRAMES);
                         send_mock_samples(sender, *signal, active.source.sample_rate, frames)?;
                         active.accepted_frames.store(frames, Ordering::SeqCst);
                     }
@@ -1073,6 +1085,20 @@ fn frames_for_duration(sample_rate: u32, milliseconds: u64) -> u64 {
     u64::from(sample_rate) * milliseconds / 1_000
 }
 
+/// Resolves the wall-clock ceiling a capture is allowed to reach.
+///
+/// A bracketed recording stops accepting frames at its expected duration. An
+/// unbracketed one (`expectedDurationMs` absent) used to have no ceiling at
+/// all, so a conductor that crashed between `audio.start_recording` and
+/// `audio.stop_recording` left the `.wav.partial` growing until the daemon
+/// died. Absent a bracket the capture is limited to the same
+/// `MAX_CAPTURE_MILLISECONDS` that `validate_duration` enforces on bracketed
+/// captures, and it stops through exactly the same mechanism — so the file
+/// stops growing at the ceiling and finalizes cleanly on the next stop.
+fn capture_limit_milliseconds(expected_duration_ms: Option<u64>) -> u64 {
+    expected_duration_ms.unwrap_or(MAX_CAPTURE_MILLISECONDS)
+}
+
 fn validate_duration(milliseconds: u64) -> Result<(), String> {
     if !(MIN_CAPTURE_MILLISECONDS..=MAX_CAPTURE_MILLISECONDS).contains(&milliseconds) {
         return Err(format!(
@@ -1246,6 +1272,57 @@ mod tests {
         assert_eq!(stopped["audio"]["frames"], 6_000);
         assert_eq!(stopped["analysis"]["expectedDurationMs"], 125);
         assert_eq!(stopped["analysis"]["durationWithinTolerance"], true);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn unbracketed_recording_caps_capture_at_the_maximum_duration() {
+        assert_eq!(capture_limit_milliseconds(None), MAX_CAPTURE_MILLISECONDS);
+        assert_eq!(capture_limit_milliseconds(Some(250)), 250);
+
+        let directory = test_directory("unbracketed-cap");
+        let mut service = AudioService::new(
+            AudioMode::Mock,
+            directory.clone(),
+            "Analog Rytm".to_string(),
+        );
+        service
+            .start_recording(
+                StartRecordingRequest {
+                    recording_id: Some("uncapped".to_string()),
+                    device_name: None,
+                    snapshot_id: None,
+                    expected_duration_ms: None,
+                    mock_signal: MockSignal::Tone,
+                },
+                context(),
+            )
+            .unwrap();
+        let active = service.active.as_ref().unwrap();
+        // No bracket, but the capture is still bounded: the writer stops
+        // accepting frames at the ten-minute ceiling instead of growing forever.
+        assert_eq!(
+            active.target_frames,
+            Some(frames_for_duration(
+                PREFERRED_SAMPLE_RATE,
+                MAX_CAPTURE_MILLISECONDS
+            ))
+        );
+        // The ceiling is not a bracket, so it must not become a duration the
+        // stop path checks tolerance against.
+        assert_eq!(active.expected_duration_ms, None);
+
+        let stopped = service
+            .stop_recording(StopRecordingRequest {
+                recording_id: "uncapped".to_string(),
+            })
+            .unwrap();
+        assert_eq!(stopped["status"], "completed");
+        assert_eq!(stopped["audio"]["frames"], DEFAULT_MOCK_FRAMES);
+        assert_eq!(stopped["analysis"]["expectedDurationMs"], Value::Null);
+        assert_eq!(stopped["analysis"]["durationWithinTolerance"], Value::Null);
+        assert!(directory.join("uncapped.wav").is_file());
+        assert!(!directory.join("uncapped.wav.partial").exists());
         fs::remove_dir_all(directory).unwrap();
     }
 

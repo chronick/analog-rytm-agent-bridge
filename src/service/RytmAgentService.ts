@@ -81,6 +81,17 @@ export interface RytmAgentServiceOptions {
 }
 
 const exposedHistoryLimit = 512;
+/**
+ * How many operation sets / snapshots the session mirror retains.
+ *
+ * These maps used to grow for the life of the process: a long agent session
+ * kept every operation set it ever queued and every snapshot it ever took,
+ * snapshots holding a full clone of the pattern map each. The cap is well
+ * above `exposedHistoryLimit` (so the exposed window is always fully backed)
+ * and far above anything a realistic session reaches; past it the oldest
+ * entries are evicted in insertion order.
+ */
+export const retainedHistoryLimit = 2_048;
 const rytmTrackIds: RytmTrackId[] = ["BD", "SD", "RS", "CP", "BT", "LT", "MT", "HT", "CH", "OH", "CY", "CB"];
 
 export class RytmAgentService {
@@ -259,6 +270,7 @@ export class RytmAgentService {
       queuedAt: new Date().toISOString(),
     };
     this.operationSets.set(operationSet.operationSetId, operationSet);
+    evictOldest(this.operationSets, retainedHistoryLimit, isPendingOperationSet);
     await this.appendEvent({ type: "operation_set.queued", operationSetId: operationSet.operationSetId, applyAt: operationSet.applyAt, queuedAt: operationSet.queuedAt as string });
     return structuredClone(operationSet);
   }
@@ -291,6 +303,7 @@ export class RytmAgentService {
       queuedAt: new Date().toISOString(),
     };
     this.operationSets.set(operationSet.operationSetId, operationSet);
+    evictOldest(this.operationSets, retainedHistoryLimit, isPendingOperationSet);
     await this.applyOperationSet(operationSet, "immediate");
     return structuredClone(operationSet);
   }
@@ -404,6 +417,7 @@ export class RytmAgentService {
       transport: structuredClone(this.transportState),
       patterns: clonePatterns(this.patterns),
     });
+    evictOldest(this.snapshots, retainedHistoryLimit);
     await this.appendEvent({ type: "snapshot.created", snapshot: summary });
     return structuredClone(summary);
   }
@@ -766,6 +780,32 @@ function defaultCapabilities(): RytmCapabilities {
 
 function recentValues<T>(records: Map<string, T>, limit: number): T[] {
   return [...records.values()].slice(-limit);
+}
+
+/**
+ * Trims a session mirror back to `limit` entries, oldest (insertion order)
+ * first. `retain` protects entries that still have work outstanding — they are
+ * only dropped once nothing else is left to evict, because the cap is a hard
+ * ceiling rather than a suggestion. An evicted snapshot is no longer a
+ * rollback target and an evicted operation set no longer appears in state.
+ */
+function evictOldest<T>(records: Map<string, T>, limit: number, retain: (value: T) => boolean = () => false): void {
+  if (records.size <= limit) return;
+  for (const [key, value] of records) {
+    if (records.size <= limit) return;
+    if (!retain(value)) records.delete(key);
+  }
+  for (const key of records.keys()) {
+    if (records.size <= limit) return;
+    records.delete(key);
+    console.error(`RytmAgentService: evicted pending history entry ${key} at the ${limit} entry retention cap`);
+  }
+}
+
+function isPendingOperationSet(operationSet: QueuedRytmOperationSet): boolean {
+  // A queued set is still waiting for its boundary; forgetting it would
+  // silently cancel scheduled work, so it goes last.
+  return operationSet.status === "queued";
 }
 
 function trigKey(track: RytmTrackId, step: number): string {
