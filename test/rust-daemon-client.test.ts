@@ -5,7 +5,13 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { RytmMcpAdapter } from "../src/mcp/RytmMcpAdapter.ts";
-import { RytmDaemonRpcError, RustDaemonClient } from "../src/rpc/RustDaemonClient.ts";
+import {
+  isDaemonCommand,
+  parseProcessList,
+  RytmDaemonRpcError,
+  RustDaemonClient,
+  type ProcessListEntry,
+} from "../src/rpc/RustDaemonClient.ts";
 import type { RytmRpcEvent } from "../src/rpc/types.ts";
 import { RytmAgentService } from "../src/service/RytmAgentService.ts";
 
@@ -408,6 +414,145 @@ test("TypeScript client completes a real round trip through the Rust mock daemon
     await client.close();
     await rm(audioDirectory, { recursive: true, force: true });
   }
+});
+
+// A stdio daemon stand-in: answers every request with a canned health result.
+// Keeps the stale-daemon tests off cargo and off real hardware.
+const STUB_DAEMON = `
+let buffer = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  let index;
+  while ((index = buffer.indexOf("\\n")) >= 0) {
+    const line = buffer.slice(0, index);
+    buffer = buffer.slice(index + 1);
+    if (line.trim() === "") continue;
+    const request = JSON.parse(line);
+    process.stdout.write(JSON.stringify({
+      schema: request.schema,
+      id: request.id,
+      ok: true,
+      result: {
+        status: "ready",
+        connected: false,
+        adapter: "mock",
+        protocolSchema: request.schema,
+        daemonSchema: "analog-rytm-daemon.v1",
+        processId: process.pid,
+        methods: { declared: [], implemented: [] },
+      },
+    }) + "\\n");
+  }
+});
+`;
+
+function stubDaemonArgs(adapter: "mock" | "hardware"): string[] {
+  return ["-e", STUB_DAEMON, "--", "serve", "--adapter", adapter];
+}
+
+const staleDaemonProcesses: ProcessListEntry[] = [
+  { pid: 900_100, ppid: 1, command: "/bin/sh -c exec 3<>/tmp/rytm-rpc-in; daemon/target/debug/analog-rytm-agent-daemon serve --clock-source generated" },
+];
+
+test("start refuses to spawn a second hardware daemon when one is already running", async () => {
+  const client = new RustDaemonClient({
+    command: process.execPath,
+    args: stubDaemonArgs("hardware"),
+    listProcesses: async () => staleDaemonProcesses,
+  });
+
+  try {
+    await assert.rejects(
+      client.start(),
+      (error: unknown) =>
+        error instanceof RytmDaemonRpcError
+        && error.code === "daemon_already_running"
+        && !error.retryable
+        && error.message.includes("900100")
+        && error.message.includes("kill 900100"),
+    );
+    assert.equal(client.connected, false, "no daemon may be spawned after a refusal");
+  } finally {
+    await client.close();
+  }
+});
+
+test("start only warns about an existing daemon when the adapter is not hardware", async () => {
+  const warnings: string[] = [];
+  const warn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+  const client = new RustDaemonClient({
+    command: process.execPath,
+    args: stubDaemonArgs("mock"),
+    listProcesses: async () => staleDaemonProcesses,
+  });
+
+  try {
+    const health = await client.start();
+    assert.equal(health.status, "ready");
+    assert.equal(client.connected, true);
+    assert.ok(
+      warnings.some((message) => message.includes("already running") && message.includes("900100")),
+      `expected a stale-daemon warning, got ${JSON.stringify(warnings)}`,
+    );
+  } finally {
+    console.warn = warn;
+    await client.close();
+  }
+});
+
+test("start proceeds when the process listing holds no foreign daemon", async () => {
+  const listing: ProcessListEntry[] = [
+    // The cargo wrapper must not be mistaken for the daemon binary.
+    { pid: 900_200, ppid: 1, command: "cargo run --quiet --manifest-path daemon/Cargo.toml -- serve --adapter hardware" },
+    // Nor may a daemon this very process already owns (cargo child in between).
+    { pid: 900_201, ppid: process.pid, command: "cargo run --quiet --manifest-path daemon/Cargo.toml -- serve --adapter hardware" },
+    { pid: 900_202, ppid: 900_201, command: "daemon/target/debug/analog-rytm-agent-daemon serve --adapter hardware" },
+  ];
+  const client = new RustDaemonClient({
+    command: process.execPath,
+    args: stubDaemonArgs("hardware"),
+    listProcesses: async () => listing,
+  });
+
+  try {
+    const health = await client.start();
+    assert.equal(health.status, "ready");
+    assert.equal(client.connected, true);
+  } finally {
+    await client.close();
+  }
+});
+
+test("the default process listing parses ps output and identifies only the daemon binary", () => {
+  const entries = parseProcessList([
+    "  900300      1 /home/user/analog-rytm-agent-bridge/daemon/target/debug/analog-rytm-agent-daemon serve --adapter hardware",
+    "  900301 900300 cargo run --quiet --manifest-path daemon/Cargo.toml -- serve --adapter hardware",
+    "not a process line",
+    "",
+  ].join("\n"));
+
+  assert.deepEqual(entries.map((entry) => [entry.pid, entry.ppid]), [[900_300, 1], [900_301, 900_300]]);
+  assert.equal(isDaemonCommand(entries[0]!.command), true);
+  assert.equal(isDaemonCommand(entries[1]!.command), false, "the cargo wrapper is not the daemon binary");
+});
+
+test("a process exit hook guards the child while it runs and is removed by close", async () => {
+  const before = process.listenerCount("exit");
+  const client = new RustDaemonClient({
+    command: process.execPath,
+    args: stubDaemonArgs("mock"),
+    listProcesses: async () => [],
+  });
+
+  try {
+    await client.start();
+    assert.equal(process.listenerCount("exit"), before + 1, "an exit hook must guard the running child");
+  } finally {
+    await client.close();
+  }
+  assert.equal(process.listenerCount("exit"), before, "close must remove the exit hook");
 });
 
 async function writeTestWav(path: string): Promise<void> {
