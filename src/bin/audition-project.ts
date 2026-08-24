@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { RustDaemonClient } from "../rpc/RustDaemonClient.ts";
 
@@ -9,10 +9,28 @@ import { RustDaemonClient } from "../rpc/RustDaemonClient.ts";
 // carries its own base groove (FILL conditions only gate extra tears), so
 // every slot must be audible.
 //
-//   npm run audition:project                      all 36 Moonshot slots
-//   npm run audition:project -- A01 B04 C02      specific slots
+//   npm run audition:project                            all Moonshot slots
+//   npm run audition:project -- A01 B04 C02             specific slots
+//   npm run audition:project -- E01 E02 --tempo 128     one tempo for every slot
+//   npm run audition:project -- --tempos tempos.json    per-slot tempo map
+//
+// Tempo sources, in the order they are chosen (--tempo and --tempos are
+// mutually exclusive -- passing both is an error):
+//
+//   --tempos <path>  a JSON file holding either a bare slot->bpm map
+//                    ({"E01": 118, "E02": 120}) or the same map under a
+//                    "tempos" key ({"tempos": {"E01": 118}}). A requested
+//                    slot missing from the map is a hard error -- an
+//                    explicitly declared map is never silently filled in.
+//   --tempo <bpm>    one bpm applied to every requested slot.
+//   (neither)        the built-in Moonshot table below, which is now
+//                    announced on stderr rather than applied silently.
+//
+// Commanded tempos are labels only -- the device self-clocks -- so a stale
+// table does not corrupt a capture, it just mislabels it. That is exactly why
+// the built-in default warns instead of staying quiet.
 
-const TEMPO: Record<string, number> = {
+export const MOONSHOT_TEMPO: Record<string, number> = {
   // Bank A - IGNITION: driving, rising through the peak, easing into the break.
   A01: 132, A02: 132, A03: 134, A04: 134, A05: 136, A06: 136, A07: 138, A08: 138,
   A09: 132, A10: 128, A11: 132, A12: 132,
@@ -34,6 +52,115 @@ const TEMPO: Record<string, number> = {
 };
 const FILL_SLOTS = new Set<string>(); // Moonshot has no fill-only slots.
 const CAPTURE_MS = 8_000;
+const SLOT_PATTERN = /^[A-H](0[1-9]|1[0-6])$/;
+const MOONSHOT_FALLBACK_TEMPO = 130;
+
+export interface TempoPlan {
+  /** Slots to audition, in the order they were requested. */
+  slots: string[];
+  /** Resolved slot -> commanded bpm for every entry in `slots`. */
+  tempos: Record<string, number>;
+  /** Where those bpm values came from. */
+  source: "moonshot" | "uniform" | "file";
+  /** Advisory lines the caller should surface (stderr), never fatal. */
+  warnings: string[];
+}
+
+function parseTempoFile(text: string, path: string): Record<string, number> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`--tempos ${path}: not valid JSON (${(error as Error).message})`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`--tempos ${path}: expected a JSON object of slot -> bpm`);
+  }
+  const record = parsed as Record<string, unknown>;
+  const wrapped = record.tempos;
+  const map = wrapped === undefined ? record : wrapped;
+  if (map === null || typeof map !== "object" || Array.isArray(map)) {
+    throw new Error(`--tempos ${path}: "tempos" must be an object of slot -> bpm`);
+  }
+  const tempos: Record<string, number> = {};
+  for (const [slot, value] of Object.entries(map as Record<string, unknown>)) {
+    if (!SLOT_PATTERN.test(slot)) throw new Error(`--tempos ${path}: "${slot}" is not a pattern slot (A01-H16)`);
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+      throw new Error(`--tempos ${path}: ${slot} tempo must be a positive number, got ${JSON.stringify(value)}`);
+    }
+    tempos[slot] = value;
+  }
+  if (Object.keys(tempos).length === 0) throw new Error(`--tempos ${path}: declares no tempos`);
+  return tempos;
+}
+
+/**
+ * Turn CLI arguments into the tempo plan the audition loop runs against.
+ * Pure apart from the injected file reader, so the resolution rules are
+ * testable without hardware.
+ */
+export function resolveTempoPlan(
+  argv: string[],
+  readTextFile: (path: string) => string = (path) => readFileSync(path, "utf8"),
+): TempoPlan {
+  const requested = argv.filter((argument) => SLOT_PATTERN.test(argument));
+
+  const tempoIndex = argv.indexOf("--tempo");
+  const temposIndex = argv.indexOf("--tempos");
+  if (tempoIndex >= 0 && temposIndex >= 0) {
+    throw new Error("--tempo and --tempos are mutually exclusive: pass one uniform bpm or one map file");
+  }
+
+  const warnings: string[] = [];
+
+  if (temposIndex >= 0) {
+    const path = argv[temposIndex + 1];
+    if (path === undefined || path.startsWith("--")) throw new Error("--tempos requires a path to a JSON tempo map");
+    const declared = parseTempoFile(readTextFile(path), path);
+    const slots = requested.length > 0 ? requested : Object.keys(declared);
+    const missing = slots.filter((slot) => declared[slot] === undefined);
+    if (missing.length > 0) {
+      throw new Error(`--tempos ${path}: no tempo declared for ${missing.join(", ")}`);
+    }
+    const tempos: Record<string, number> = {};
+    for (const slot of slots) tempos[slot] = declared[slot];
+    return { slots, tempos, source: "file", warnings };
+  }
+
+  if (tempoIndex >= 0) {
+    const raw = argv[tempoIndex + 1];
+    const bpm = raw === undefined ? Number.NaN : Number(raw);
+    if (!Number.isFinite(bpm) || bpm <= 0) throw new Error(`--tempo requires a positive bpm, got ${raw ?? "nothing"}`);
+    let slots = requested;
+    if (slots.length === 0) {
+      slots = Object.keys(MOONSHOT_TEMPO);
+      warnings.push(
+        `no slots given: auditioning the ${slots.length} built-in Moonshot slots at ${bpm} bpm; ` +
+          "pass slots (e.g. E01 E02) to narrow the run.",
+      );
+    }
+    const tempos: Record<string, number> = {};
+    for (const slot of slots) tempos[slot] = bpm;
+    return { slots, tempos, source: "uniform", warnings };
+  }
+
+  const slots = requested.length > 0 ? requested : Object.keys(MOONSHOT_TEMPO);
+  const tempos: Record<string, number> = {};
+  const fallbacks: string[] = [];
+  for (const slot of slots) {
+    const declared = MOONSHOT_TEMPO[slot];
+    if (declared === undefined) fallbacks.push(slot);
+    tempos[slot] = declared ?? MOONSHOT_FALLBACK_TEMPO;
+  }
+  warnings.push(
+    "using the built-in Moonshot tempo table; these bpm values are labels only (the device self-clocks) " +
+      "and may be stale for a non-Moonshot project. Override with --tempo <bpm> or --tempos <map.json>.",
+  );
+  if (fallbacks.length > 0) {
+    warnings.push(`no Moonshot tempo for ${fallbacks.join(", ")}: falling back to ${MOONSHOT_FALLBACK_TEMPO} bpm.`);
+  }
+  return { slots, tempos, source: "moonshot", warnings };
+}
 
 interface CaptureResult {
   status: string;
@@ -45,8 +172,10 @@ interface CaptureResult {
 }
 
 export async function runProjectAudition(): Promise<void> {
-  const requested = process.argv.slice(2).filter((argument) => /^[A-H](0[1-9]|1[0-6])$/.test(argument));
-  const slots = requested.length > 0 ? requested : Object.keys(TEMPO);
+  const plan = resolveTempoPlan(process.argv.slice(2));
+  const { slots, tempos } = plan;
+  for (const warning of plan.warnings) process.stderr.write(`warning: ${warning}\n`);
+  process.stderr.write(`tempo source: ${plan.source}\n`);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const repository = fileURLToPath(new URL("../..", import.meta.url));
   const auditionDirectory = `${repository}hardware/runs/audition-${stamp}`;
@@ -74,7 +203,7 @@ export async function runProjectAudition(): Promise<void> {
         if (active === slot) break;
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
-      await client.setTransport({ command: "start", tempo: TEMPO[slot] ?? 130 });
+      await client.setTransport({ command: "start", tempo: tempos[slot] });
       const capture = (await client.capturePatternAudio({
         recordingId: `audition-${stamp}-${slot}`,
         durationMs: CAPTURE_MS,
@@ -95,8 +224,8 @@ export async function runProjectAudition(): Promise<void> {
         if (!(expectSilent && /silen/i.test(warning))) problems.push(warning);
       }
       const verdict = problems.length === 0 ? "ok" : "check";
-      results.push({ slot, tempo: TEMPO[slot], expectSilent, silence, verdict, problems });
-      process.stderr.write(`${slot} @${TEMPO[slot]} ${verdict}${problems.length ? ` (${problems.join("; ")})` : ""}\n`);
+      results.push({ slot, tempo: tempos[slot], tempoSource: plan.source, expectSilent, silence, verdict, problems });
+      process.stderr.write(`${slot} @${tempos[slot]} ${verdict}${problems.length ? ` (${problems.join("; ")})` : ""}\n`);
     }
   } finally {
     try {
