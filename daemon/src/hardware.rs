@@ -1,3 +1,4 @@
+use crate::plocks::PatternPlocks;
 use crate::state::{
     operation_song_target, parse_song_inspect_request, PersistentOperation, SongPatternInput,
     SongRowInput, SongTarget,
@@ -3072,143 +3073,11 @@ fn serialize_value(value: &impl Serialize) -> Value {
         .unwrap_or_else(|error| json!({ "serializationError": error.to_string() }))
 }
 
-/// Collects the parameter locks set on a trig into a flat `name -> value` map,
-/// using the same flat names the write path (`apply_parameter_lock_set`) accepts,
-/// so the whole sound-page surface is verifiable via `inspectPattern`.
-///
-/// IMPORTANT: rytm-rs's `plock_get_*` does NOT return `None` for a step that is
-/// unlocked inside an otherwise-used slot — `get_basic_plock` returns the raw
-/// `data[step]` byte, which is the unset sentinel `0xFF` (decoding to `255`, or
-/// out-of-range values for signed/float types). So every numeric read is
-/// range-gated here: an out-of-range value means "unset" and is dropped. This
-/// removes the spurious `amp_volume: 255`-style reports.
-///
-/// Known limitation: a device-*saved* pattern can fill unlocked steps with `0x00`
-/// instead of `0xFF` (observed in a captured device pool). An in-range `0` from
-/// such a slot is indistinguishable from a real `0` lock through rytm-rs's public
-/// API, so it may still surface; the daemon's own work-buffer writes use `0xFF`
-/// fill and read back clean.
-fn collect_trig_plocks(trig: &rytm_rs::object::pattern::Trig) -> serde_json::Map<String, Value> {
-    let mut locks = serde_json::Map::new();
-    // isize-valued locks, gated to each parameter's signed range.
-    let mut sig = |name: &str, value: Result<Option<isize>, _>, lo: isize, hi: isize| {
-        if let Ok(Some(value)) = value {
-            if (lo..=hi).contains(&value) {
-                locks.insert(name.to_string(), json!(value));
-            }
-        }
-    };
-    sig(
-        "filter_envelope",
-        trig.plock_get_filter_envelope_amount(),
-        -64,
-        63,
-    );
-    sig("amp_pan", trig.plock_get_amplitude_pan(), -64, 63);
-    sig("lfo_speed", trig.plock_get_lfo_speed(), -64, 63);
-    sig("lfo_fade", trig.plock_get_lfo_fade(), -64, 63);
-    sig("sample_tune", trig.plock_get_sample_tune(), -24, 24);
-    sig(
-        "sample_fine_tune",
-        trig.plock_get_sample_fine_tune(),
-        -64,
-        63,
-    );
-
-    // usize-valued locks (all 0..=127); 255 (0xFF sentinel) is out of range.
-    let mut uns = |name: &str, value: Result<Option<usize>, _>| {
-        if let Ok(Some(value)) = value {
-            if value <= 127 {
-                locks.insert(name.to_string(), json!(value));
-            }
-        }
-    };
-    uns("filter_attack", trig.plock_get_filter_attack());
-    uns("filter_sustain", trig.plock_get_filter_sustain());
-    uns("filter_decay", trig.plock_get_filter_decay());
-    uns("filter_release", trig.plock_get_filter_release());
-    uns("filter_cutoff", trig.plock_get_filter_cutoff());
-    uns("filter_resonance", trig.plock_get_filter_resonance());
-    uns("amp_attack", trig.plock_get_amplitude_attack());
-    uns("amp_hold", trig.plock_get_amplitude_hold());
-    uns("amp_decay", trig.plock_get_amplitude_decay());
-    uns("amp_overdrive", trig.plock_get_amplitude_overdrive());
-    uns("amp_delay_send", trig.plock_get_amplitude_delay_send());
-    uns("amp_reverb_send", trig.plock_get_amplitude_reverb_send());
-    uns("amp_volume", trig.plock_get_amplitude_volume());
-    uns("lfo_phase", trig.plock_get_lfo_start_phase());
-    uns("sample_number", trig.plock_get_sample_number());
-    uns(
-        "sample_bit_reduction",
-        trig.plock_get_sample_bit_reduction(),
-    );
-    uns("sample_level", trig.plock_get_sample_volume());
-
-    // f32-valued locks, gated to each parameter's float range.
-    let mut flt = |name: &str, value: Result<Option<f32>, _>, lo: f32, hi: f32| {
-        if let Ok(Some(value)) = value {
-            if value >= lo && value <= hi {
-                locks.insert(name.to_string(), json!(value));
-            }
-        }
-    };
-    flt("lfo_depth", trig.plock_get_lfo_depth(), -128.0, 127.99);
-    flt("sample_start", trig.plock_get_sample_start(), 0.0, 120.0);
-    flt("sample_end", trig.plock_get_sample_end(), 0.0, 120.0);
-
-    // bool-valued lock. Caveat: rytm-rs decodes the 0xFF unset sentinel to `true`,
-    // so an unset step inside a used loop-flag slot reads as a spurious `true`; a
-    // `false` read is always real. Reported as-is (loop plocks are rare).
-    if let Ok(Some(value)) = trig.plock_get_sample_loop_flag() {
-        locks.insert("sample_loop".to_string(), json!(value));
-    }
-
-    // enum-valued locks (serde variant string, matching the write path)
-    let mut enm = |name: &str, value: Option<Value>| {
-        if let Some(value) = value {
-            locks.insert(name.to_string(), value);
-        }
-    };
-    enm(
-        "filter_type",
-        trig.plock_get_filter_type()
-            .ok()
-            .flatten()
-            .and_then(|value| serde_json::to_value(value).ok()),
-    );
-    enm(
-        "lfo_multiplier",
-        trig.plock_get_lfo_multiplier()
-            .ok()
-            .flatten()
-            .and_then(|value| serde_json::to_value(value).ok()),
-    );
-    enm(
-        "lfo_waveform",
-        trig.plock_get_lfo_waveform()
-            .ok()
-            .flatten()
-            .and_then(|value| serde_json::to_value(value).ok()),
-    );
-    enm(
-        "lfo_mode",
-        trig.plock_get_lfo_mode()
-            .ok()
-            .flatten()
-            .and_then(|value| serde_json::to_value(value).ok()),
-    );
-    enm(
-        "lfo_destination",
-        trig.plock_get_lfo_destination()
-            .ok()
-            .flatten()
-            .and_then(|value| serde_json::to_value(value).ok()),
-    );
-
-    locks
-}
-
 fn pattern_summary(pattern: &Pattern) -> Value {
+    // Locks are read from the pattern's parameter-lock pool rather than through
+    // the per-trig accessors, which need the trig's link to that pool and report
+    // nothing at all once it is lost. See `crate::plocks`.
+    let plocks = PatternPlocks::decode(pattern);
     let tracks = pattern
         .tracks()
         .iter()
@@ -3220,7 +3089,7 @@ fn pattern_summary(pattern: &Pattern) -> Value {
                 .filter(|trig| trig.enabled_trig())
                 .map(|trig| {
                     let condition: &str = swap_fill_condition(trig.trig_condition().into());
-                    let locks = collect_trig_plocks(trig);
+                    let locks = plocks.locks_for(track_index, trig.index());
                     // Retained for backward compatibility with existing readers;
                     // the full per-trig lock set now lives in `locks`.
                     let filter_cutoff_lock = locks.get("filter_cutoff").cloned();
@@ -4354,6 +4223,35 @@ mod tests {
     }
 
     #[test]
+    fn parameter_lock_read_path_survives_trigs_losing_their_pool_link() {
+        // Regression: reading locks through `Trig::plock_get_*` needs the trig's
+        // link back to the pattern's lock pool. A `Pattern` revived through serde
+        // deserializes its trigs before the pool field exists, so every accessor
+        // answers `Err(OrphanTrig)` and the summary used to report `locks: {}`
+        // for every trig while the pool still held the locks. The pool decode is
+        // independent of that wiring.
+        let mut project = RytmProject::try_default().unwrap();
+        {
+            let trig = &mut project.work_buffer_mut().pattern_mut().tracks_mut()[5].trigs_mut()[1];
+            trig.set_trig_enable(true);
+            apply_parameter_lock_set(trig, "sample_tune", &json!(12)).unwrap();
+            apply_parameter_lock_set(trig, "sample_number", &json!(7)).unwrap();
+        }
+        let encoded = serde_json::to_string(project.work_buffer().pattern()).unwrap();
+        let revived: Pattern = serde_json::from_str(&encoded).unwrap();
+        assert!(
+            revived.tracks()[5].trigs()[1]
+                .plock_get_sample_tune()
+                .is_err(),
+            "the revived trig is expected to be unlinked from its pool"
+        );
+
+        let locks = &pattern_summary(&revived)["tracks"][5]["trigs"][0]["locks"];
+        assert_eq!(locks["sample_tune"], json!(12));
+        assert_eq!(locks["sample_number"], json!(7));
+    }
+
+    #[test]
     fn parameter_lock_rejects_unknown_and_synth_page_parameters() {
         let mut project = RytmProject::try_default().unwrap();
         let trig = &mut project.patterns_mut()[0].tracks_mut()[0].trigs_mut()[0];
@@ -4552,7 +4450,7 @@ mod tests {
     fn basic_routed_locks_round_trip_symmetrically_through_the_read_path() {
         // Write lfo_depth / sample_start / sample_end through the daemon apply path,
         // encode via the exact sysex path the daemon sends, re-decode, and read back
-        // through `collect_trig_plocks` (now the basic single-byte getter).
+        // through the pool decode that feeds the pattern summary.
         let mut project = RytmProject::try_default().unwrap();
         {
             let trig = &mut project.work_buffer_mut().pattern_mut().tracks_mut()[0].trigs_mut()[0];
@@ -4568,8 +4466,7 @@ mod tests {
             .expect("as_sysex");
         let mut reparsed = RytmProject::try_default().unwrap();
         reparsed.update_from_sysex_response(&bytes).expect("decode");
-        let trig = &reparsed.work_buffer().pattern().tracks()[0].trigs()[0];
-        let locks = collect_trig_plocks(trig);
+        let locks = PatternPlocks::decode(reparsed.work_buffer().pattern()).locks_for(0, 0);
 
         // lfo_depth reads back within one device-byte quantum of the declared value
         // (device resolution is ~2 depth units per byte) and inside the gate.
