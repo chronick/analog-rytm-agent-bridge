@@ -646,7 +646,7 @@ impl SampleService {
         command.args(args);
         let output = run_with_timeout(&mut command, CLI_TIMEOUT).map_err(|error| {
             format!(
-                "could not execute elektroid-cli at {:?}: {error}; build chronick/elektroid commit 681fa8c or set ANALOG_RYTM_ELEKTROID_CLI",
+                "could not execute elektroid-cli at {:?}: {error}; build algonormative/elektroid commit 681fa8c or set ANALOG_RYTM_ELEKTROID_CLI",
                 self.cli_path
             )
         })?;

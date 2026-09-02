@@ -1,6 +1,6 @@
 # Sample Management
 
-The bridge manages Analog Rytm samples through a separate Elektroid CLI process. It does not import Elektroid code into the Rust daemon. The required adapter is the `chronick/elektroid` fork at commit `681fa8c`, which enables Rytm RAM and track filesystems, adds +Drive-to-RAM copy, and provides `-k` so each short-lived connection leaves transport running.
+The bridge manages Analog Rytm samples through a separate Elektroid CLI process. It does not import Elektroid code into the Rust daemon. The required adapter is the `algonormative/elektroid` fork at commit `681fa8c`, which enables Rytm RAM and track filesystems, adds +Drive-to-RAM copy, and provides `-k` so each short-lived connection leaves transport running.
 
 ## Agent Workflow
 

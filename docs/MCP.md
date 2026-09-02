@@ -16,7 +16,7 @@ watch how an agent uses it before a real device is involved.
 ## Install
 
 ```bash
-git clone https://github.com/chronick/analog-rytm-agent-bridge
+git clone https://github.com/algonormative/analog-rytm-agent-bridge
 cd analog-rytm-agent-bridge
 npm install
 ```

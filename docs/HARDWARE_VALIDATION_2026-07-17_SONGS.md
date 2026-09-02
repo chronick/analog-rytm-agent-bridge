@@ -6,7 +6,7 @@
 - Device OS: 1.72, confirmed from the device UI
 - USB mode: AUDIO/MIDI
 - Adapter: Rust hardware daemon over CoreMIDI and SysEx
-- Codec: maintained `chronick/rytm-rs` fork pinned at `f2e8143f4f92f3ba2241dd65753d50f63a906aeb`
+- Codec: maintained `algonormative/rytm-rs` fork pinned at `f2e8143f4f92f3ba2241dd65753d50f63a906aeb`
 - Test target: stored Song 16 in a disposable project
 
 ## Result

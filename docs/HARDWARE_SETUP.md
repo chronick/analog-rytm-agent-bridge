@@ -12,7 +12,7 @@ The Rust harness uses the Analog Rytm CoreMIDI port directly for realtime MIDI a
 
 ## Build And Discover
 
-The daemon pins the maintained `chronick/rytm-rs` fork by immutable Git revision. A sibling fork
+The daemon pins the maintained `algonormative/rytm-rs` fork by immutable Git revision. A sibling fork
 checkout is optional and is used only while developing codec changes. Update the `rev` in
 `daemon/Cargo.toml` only after the fork commit has passed its deterministic and connected-device
 fixture tests and has been pushed to `origin`.
@@ -21,7 +21,7 @@ Sample operations also require the maintained Elektroid fork at commit `681fa8c`
 
 ```bash
 brew install automake libtool pkg-config libzip libsamplerate rtmidi rubberband libsndfile
-git clone https://github.com/chronick/elektroid.git ~/git/elektroid
+git clone https://github.com/algonormative/elektroid.git ~/git/elektroid
 cd ~/git/elektroid
 git checkout 681fa8c
 autoreconf -fi

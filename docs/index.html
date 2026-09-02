@@ -20,7 +20,7 @@
       <a href="#listen">listen</a>
       <a href="#scope">scope</a>
       <a href="#start">start</a>
-      <a href="https://github.com/chronick/analog-rytm-agent-bridge">GitHub</a>
+      <a href="https://github.com/algonormative/analog-rytm-agent-bridge">GitHub</a>
     </nav>
   </header>
 
@@ -41,15 +41,15 @@
 
     <div class="cta">
       <a class="btn" href="#ask">See what you can ask for</a>
-      <a class="btn ghost" href="https://github.com/chronick/analog-rytm-agent-bridge">GitHub</a>
+      <a class="btn ghost" href="https://github.com/algonormative/analog-rytm-agent-bridge">GitHub</a>
       <a class="btn ghost" href="#mcp">Wire it up</a>
     </div>
 
     <p class="house">Part of the LEMON house ·
       <a href="https://lemon-agent.dev">lemon-agent.dev</a> teaches the agent method ·
       <a href="https://lemon.audio">lemon.audio</a> is the music side of the house ·
-      sibling tools: <a href="https://chronick.github.io/smpl/">smpl</a> ·
-      <a href="https://chronick.github.io/vox/">vox</a></p>
+      sibling tools: <a href="https://algonormative.github.io/smpl/">smpl</a> ·
+      <a href="https://algonormative.github.io/vox/">vox</a></p>
 
     <figure class="rig">
       <svg viewBox="0 0 900 132" role="img" aria-label="Diagram: a sixteen-step sequencer row with four steps lit, and directly beneath it the same row read back from the device, matching step for step.">
@@ -246,9 +246,9 @@
     <div class="start-step">
       <p class="start-label"><span>1</span> Clone and install</p>
       <div class="copy-wrap">
-<pre><span class="c">$</span> git clone https://github.com/chronick/analog-rytm-agent-bridge
+<pre><span class="c">$</span> git clone https://github.com/algonormative/analog-rytm-agent-bridge
 <span class="c">$</span> cd analog-rytm-agent-bridge <span class="p">&amp;&amp;</span> npm install</pre>
-        <button class="copy-btn" data-copy="git clone https://github.com/chronick/analog-rytm-agent-bridge &amp;&amp; cd analog-rytm-agent-bridge &amp;&amp; npm install">copy</button>
+        <button class="copy-btn" data-copy="git clone https://github.com/algonormative/analog-rytm-agent-bridge &amp;&amp; cd analog-rytm-agent-bridge &amp;&amp; npm install">copy</button>
       </div>
     </div>
 
@@ -288,7 +288,7 @@
       <p>“what's on pattern A01?” should make the agent reach for
         <code>rytm_inspect_pattern</code>. Full setup, every flag, and
         troubleshooting live in
-        <a href="https://github.com/chronick/analog-rytm-agent-bridge/blob/main/docs/MCP.md">docs/MCP.md</a>.</p>
+        <a href="https://github.com/algonormative/analog-rytm-agent-bridge/blob/main/docs/MCP.md">docs/MCP.md</a>.</p>
     </div>
 
     <p class="dim" style="margin-top:1.4rem">A refused or failed Rytm operation
@@ -386,9 +386,9 @@
       not just unit tested. It does not, however, back up your entire device:
       save to +Drive and take an external backup before first use. Full detail
       in the
-      <a href="https://github.com/chronick/analog-rytm-agent-bridge#the-safety-model">README</a>
+      <a href="https://github.com/algonormative/analog-rytm-agent-bridge#the-safety-model">README</a>
       and
-      <a href="https://github.com/chronick/analog-rytm-agent-bridge/blob/main/docs/HARDWARE_SETUP.md">HARDWARE_SETUP.md</a>.</p>
+      <a href="https://github.com/algonormative/analog-rytm-agent-bridge/blob/main/docs/HARDWARE_SETUP.md">HARDWARE_SETUP.md</a>.</p>
   </section>
 
   <section id="scope">
@@ -432,9 +432,9 @@
         <code>npm install</code> provisions only the dev-time type checker.
         Needs macOS, Rust ≥ 1.89, and Node ≥ 22.14.</p>
       <div class="copy-wrap">
-<pre><span class="c">$</span> git clone https://github.com/chronick/analog-rytm-agent-bridge
+<pre><span class="c">$</span> git clone https://github.com/algonormative/analog-rytm-agent-bridge
 <span class="c">$</span> cd analog-rytm-agent-bridge <span class="p">&amp;&amp;</span> npm install</pre>
-        <button class="copy-btn" data-copy="git clone https://github.com/chronick/analog-rytm-agent-bridge &amp;&amp; cd analog-rytm-agent-bridge &amp;&amp; npm install">copy</button>
+        <button class="copy-btn" data-copy="git clone https://github.com/algonormative/analog-rytm-agent-bridge &amp;&amp; cd analog-rytm-agent-bridge &amp;&amp; npm install">copy</button>
       </div>
     </div>
 
@@ -451,7 +451,7 @@
     <div class="start-step">
       <p class="start-label"><span>3</span> Point it at the real thing</p>
       <p>Work through
-        <a href="https://github.com/chronick/analog-rytm-agent-bridge/blob/main/docs/HARDWARE_SETUP.md">HARDWARE_SETUP.md</a>
+        <a href="https://github.com/algonormative/analog-rytm-agent-bridge/blob/main/docs/HARDWARE_SETUP.md">HARDWARE_SETUP.md</a>
         first, then confirm the device answers before any write.</p>
       <div class="copy-wrap">
 <pre><span class="c">$</span> <span class="bs">cd</span> daemon <span class="p">&amp;&amp;</span> cargo run <span class="p">--</span> identity
@@ -462,14 +462,14 @@
   </section>
 
   <footer>
-    <p><a href="https://github.com/chronick/analog-rytm-agent-bridge">github.com/chronick/analog-rytm-agent-bridge</a> · MIT</p>
+    <p><a href="https://github.com/algonormative/analog-rytm-agent-bridge">github.com/algonormative/analog-rytm-agent-bridge</a> · MIT</p>
     <p>SysEx codecs from <a href="https://github.com/alisomay/rytm-rs">rytm-rs</a>
       by alisomay (MIT), pinned to a maintained fork whose changes are being
       prepared for upstream · sample transfer via a pinned fork of
       <a href="https://github.com/dagargo/elektroid">Elektroid</a> by dagargo</p>
     <p>Part of the LEMON house ·
-      <a href="https://chronick.github.io/smpl/">smpl</a> ·
-      <a href="https://chronick.github.io/vox/">vox</a></p>
+      <a href="https://algonormative.github.io/smpl/">smpl</a> ·
+      <a href="https://algonormative.github.io/vox/">vox</a></p>
     <p class="disclaim">Not affiliated with, endorsed by, or supported by
       Elektron. "Analog Rytm" and "Overbridge" are Elektron's trademarks, used
       here only to describe what this software interoperates with. No Elektron

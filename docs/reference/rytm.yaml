@@ -4907,7 +4907,7 @@ bridge_interface:
     bridge (by name, via typed ops) as opposed to the raw MIDI map above.
   verified_on: 2026-07-18 hardware (vault/seeds/sound-design/captures/2026-07-18-anchors-calibration.md)
   daemon_ref: daemon/src/hardware.rs, daemon/src/state.rs
-  rytm_rs_rev: git f2e8143 (pinned; https://github.com/chronick/rytm-rs.git)
+  rytm_rs_rev: git f2e8143 (pinned; https://github.com/algonormative/rytm-rs.git)
   set_sound_parameter:
     op: set_sound_parameter
     desc: 'params: track, page, parameter, value. Pages + accepted parameter names below.'

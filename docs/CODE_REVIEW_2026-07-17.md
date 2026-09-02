@@ -265,8 +265,8 @@ lines are skipped with a warning.
   workflow on a macOS runner: TS tests, typecheck, cargo test).
 - **L4 — No MSRV declaration.** **fixed** (`rust-version` in Cargo.toml;
   `File::try_lock` requires ≥1.89).
-- **L5 — Personal-fork supply chain**: `chronick/rytm-rs` (git-pinned by full
-  revision — good) and `chronick/elektroid` (pinned only by a commit hash in
+- **L5 — Personal-fork supply chain**: `algonormative/rytm-rs` (git-pinned by full
+  revision — good) and `algonormative/elektroid` (pinned only by a commit hash in
   docs/error text) are single points of failure. Mirror or vendor; enforce
   the elektroid version at runtime if feasible. **owner**
 - **L6 — No `v0.1.0` tag anchoring the certification milestone.** **owner**

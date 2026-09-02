@@ -7,7 +7,7 @@
 - Host: macOS/CoreAudio
 - Input: `coreaudio:AppleUSBAudioEngine:Elektron Music Machines:Elektron Analog Rytm MKII:000000000001:1,2`
 - Format: stereo f32, 48 kHz
-- State adapter: maintained `chronick/rytm-rs` fork commit `63c14d513e7e319a94cff515267387d9a180e4d1`
+- State adapter: maintained `algonormative/rytm-rs` fork commit `63c14d513e7e319a94cff515267387d9a180e4d1`
 
 ## Certification
 

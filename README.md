@@ -9,7 +9,7 @@ p-locks, kit sounds and machines, scenes and performance macros, songs, the
 sample RAM, and audio capture. The agent reads the device's real state,
 proposes a change in musical terms, and commits it on the next beat.*
 
-[Site](https://chronick.github.io/analog-rytm-agent-bridge/) · [MCP setup](docs/MCP.md) · [Quick start](#quick-start) · [Tools](#the-agent-surface) · [Safety](#the-safety-model) · [Capabilities](docs/CAPABILITIES.md)
+[Site](https://algonormative.github.io/analog-rytm-agent-bridge/) · [MCP setup](docs/MCP.md) · [Quick start](#quick-start) · [Tools](#the-agent-surface) · [Safety](#the-safety-model) · [Capabilities](docs/CAPABILITIES.md)
 
 </div>
 
@@ -95,7 +95,7 @@ treats them.
 ### 1. Without hardware
 
 ```bash
-git clone https://github.com/chronick/analog-rytm-agent-bridge
+git clone https://github.com/algonormative/analog-rytm-agent-bridge
 cd analog-rytm-agent-bridge
 npm install          # MCP SDK + dev-time typechecker
 npm run demo

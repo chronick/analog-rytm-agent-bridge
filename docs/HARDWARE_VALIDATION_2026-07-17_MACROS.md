@@ -6,7 +6,7 @@
 - Device OS: 1.72
 - USB mode: AUDIO/MIDI
 - Project: disposable new project
-- Rytm codec: `chronick/rytm-rs` commit `4d4f497`
+- Rytm codec: `algonormative/rytm-rs` commit `4d4f497`
 - Certification command: `npm run hardware:macros -- --execute`
 
 ## Evidence

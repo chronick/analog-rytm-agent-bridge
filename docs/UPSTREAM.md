@@ -6,7 +6,7 @@ does not vendor or re-implement those codecs; it depends on them.
 
 ## Why the dependency is a fork
 
-`daemon/Cargo.toml` pins `chronick/rytm-rs` at an immutable revision rather than
+`daemon/Cargo.toml` pins `algonormative/rytm-rs` at an immutable revision rather than
 the crates.io release. Building the bridge required object families and fixes
 that upstream did not have:
 

@@ -6,8 +6,8 @@
 - Device OS: 1.72
 - USB mode: AUDIO/MIDI
 - Project: disposable new project
-- Rytm codec: `chronick/rytm-rs` commit `63c14d5`
-- Sample adapter: `chronick/elektroid` commit `681fa8c`
+- Rytm codec: `algonormative/rytm-rs` commit `63c14d5`
+- Sample adapter: `algonormative/elektroid` commit `681fa8c`
 - Certification command: `npm run hardware:samples -- --execute`
 
 ## Evidence
