@@ -24,7 +24,7 @@ that upstream did not have:
 The pin is a revision, never a branch, so the codecs a build resolves are
 exactly the ones that were certified against hardware.
 
-## Contribution intent
+## Contribution status
 
 These changes are meant to go upstream, not to live in a fork indefinitely.
 Two of them answer open upstream feature requests:
@@ -34,11 +34,22 @@ Two of them answer open upstream feature requests:
 - [alisomay/rytm-rs#3](https://github.com/alisomay/rytm-rs/issues/3) — Scene and
   Performance macro APIs.
 
-The work is prepared as a series of independent, reviewable pull requests
-rather than one large branch dump, so each can be evaluated and merged on its
-own. Nothing is submitted automatically — see
-[UPSTREAM_PR_PACKET.md](UPSTREAM_PR_PACKET.md) for the branch-by-branch review
-packet, its verification results, and the open questions.
+The work was submitted as one pull request with one logical change per commit:
+[alisomay/rytm-rs#4](https://github.com/alisomay/rytm-rs/pull/4) (opened 2026-09-04, from the fork branch `upstream-codecs`). Upstream's
+last commit is from December 2024, so a response may take a while; the fork
+carries the same commits on `agent-control` in the meantime, and the bridge pins
+that branch by revision.
+
+The fork's branch layout is documented in its `docs/MAINTAINED_FORK.md`:
+`upstream-codecs` is exactly what was offered upstream, and `agent-control` is
+`upstream-codecs` plus that document. Everything that is agent workflow rather
+than codec — the certification examples and receipts — lives in this repository
+(see below), not in the fork.
+
+## Certification tooling
+
+The hardware certification examples and their receipts live in this repo, not in
+the fork — see [CODEC_CERTIFICATION.md](CODEC_CERTIFICATION.md).
 
 ## Staying current
 
@@ -46,10 +57,11 @@ Upstream's last release was December 2024. The fork tracks it as follows:
 
 ```bash
 git -C rytm-rs fetch upstream
-git -C rytm-rs log --oneline agent-control..upstream/main   # anything to pick up?
+git -C rytm-rs log --oneline upstream-codecs..upstream/main   # anything to pick up?
 ```
 
-If upstream moves, rebase `agent-control` onto it, re-run the fork's test
-suite, and repin `daemon/Cargo.toml` to the new revision. The pin is the
+If upstream moves, rebase `upstream-codecs` onto it, then `agent-control` onto
+that, re-run the fork's test suite, and repin `daemon/Cargo.toml` to the new
+revision. The pin is the
 contract: the bridge is never silently upgraded underneath its hardware
 certificates.

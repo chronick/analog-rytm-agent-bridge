@@ -2139,7 +2139,9 @@ fn mock_mute_mask(tracks: &[String]) -> u16 {
     })
 }
 
-fn song_capabilities() -> Value {
+/// Song fields the bridge certifies against hardware (see docs/CODEC_CERTIFICATION.md).
+/// The OS 1.72 Song UI exposes none of the `false` fields, so the codec does not model them.
+pub(crate) fn song_capabilities() -> Value {
     json!({
         "name": true,
         "rows": true,

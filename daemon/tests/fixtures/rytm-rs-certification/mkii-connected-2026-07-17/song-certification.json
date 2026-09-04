@@ -1,0 +1,51 @@
+{
+  "baselineFingerprint": "fnv1a64:680db4445d9bd9c5",
+  "capabilities": {
+    "jumps": false,
+    "loops": false,
+    "name": true,
+    "pattern_chains": true,
+    "pattern_length_overrides": false,
+    "repeats": true,
+    "row_labels": false,
+    "rows": true,
+    "tempo_overrides": false,
+    "track_mutes": true
+  },
+  "codecTargetFirmware": "1.70",
+  "definedFingerprint": "fnv1a64:3e7a7ec52995cae8",
+  "device": "Analog Rytm MKII",
+  "midiInput": "Elektron Analog Rytm MKII",
+  "midiOutput": "Elektron Analog Rytm MKII",
+  "name": "AGENT SONG",
+  "observedFirmware": "1.72",
+  "restoredFingerprint": "fnv1a64:680db4445d9bd9c5",
+  "rows": [
+    {
+      "patterns": [
+        {
+          "index": 0,
+          "mutedTracksMask": 0
+        },
+        {
+          "index": 1,
+          "mutedTracksMask": 1
+        }
+      ],
+      "repeats": 2,
+      "row": 0
+    },
+    {
+      "patterns": [
+        {
+          "index": 16,
+          "mutedTracksMask": 2
+        }
+      ],
+      "repeats": 1,
+      "row": 1
+    }
+  ],
+  "schema": "rytm-rs-song-certification.v1",
+  "status": "write-readback-rollback-verified"
+}
