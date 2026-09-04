@@ -1,0 +1,79 @@
+{
+  "activeSceneDefinitionWriteInvariant": 255,
+  "baselineFingerprint": "fnv1a64:ffb0d53e006e7260",
+  "codecTargetFirmware": "1.70",
+  "definedFingerprint": "fnv1a64:37c182299c09ad98",
+  "device": "Analog Rytm MKII",
+  "midiInput": "Elektron Analog Rytm MKII",
+  "midiOutput": "Elektron Analog Rytm MKII",
+  "observedFirmware": "1.72",
+  "performances": [
+    {
+      "id": 0,
+      "locks": [
+        {
+          "depth": 12,
+          "page": "sample",
+          "parameter": "sample_tune",
+          "rawParameterId": 8,
+          "track": 0
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "locks": [
+        {
+          "depth": -32,
+          "page": "amp",
+          "parameter": "amp_pan",
+          "rawParameterId": 30,
+          "track": 1
+        },
+        {
+          "depth": 24,
+          "page": "reverb",
+          "parameter": "reverb_decay",
+          "rawParameterId": 11,
+          "track": 12
+        }
+      ]
+    }
+  ],
+  "restoredFingerprint": "fnv1a64:ffb0d53e006e7260",
+  "scenes": [
+    {
+      "id": 0,
+      "locks": [
+        {
+          "page": "sample",
+          "parameter": "sample_tune",
+          "rawParameterId": 8,
+          "track": 0,
+          "value": 65
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "locks": [
+        {
+          "page": "filter",
+          "parameter": "filter_frequency",
+          "rawParameterId": 20,
+          "track": 1,
+          "value": 96
+        },
+        {
+          "page": "delay",
+          "parameter": "delay_feedback",
+          "rawParameterId": 3,
+          "track": 12,
+          "value": 80
+        }
+      ]
+    }
+  ],
+  "schema": "rytm-rs-macro-certification.v1",
+  "status": "write-readback-rollback-verified"
+}

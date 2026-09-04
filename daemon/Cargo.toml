@@ -17,9 +17,13 @@ midir = "0.11.0"
 # against hardware. The fork carries typed Song/Scene/Performance codecs, the
 # round-trip and active-low routing fixes, and the p-lock pool corrections
 # (sentinel fill on pool-slot claim, plus basic single-byte routing for
-# lfo_depth/sample_start/sample_end per libanalogrytm pattern.h). Those changes
-# are being prepared as upstream pull requests; see docs/UPSTREAM.md.
-rytm-rs = { git = "https://github.com/algonormative/rytm-rs.git", rev = "3e9dd91ee8976f320f7073973122613caf5f48c4" }
+# lfo_depth/sample_start/sample_end per libanalogrytm pattern.h). Offered
+# upstream as a pull request; see docs/UPSTREAM.md.
+rytm-rs = { git = "https://github.com/algonormative/rytm-rs.git", rev = "5e9c0f120c3a0fa739ffe9a9962996a7738276b0" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10.9"
+
+[dev-dependencies]
+# Used by the hardware certification examples in examples/.
+anyhow = "1.0"

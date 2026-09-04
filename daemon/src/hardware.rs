@@ -2804,26 +2804,13 @@ fn song_summary(song: &Song, target: &SongTarget) -> HardwareResult<Value> {
             })
         })
         .collect::<Vec<_>>();
-    let capabilities = song.capabilities();
     Ok(json!({
         "target": target,
         "name": song.name(),
         "rowCount": rows.len(),
         "patternPositionCount": rows.iter().map(|row| row["patterns"].as_array().map_or(0, Vec::len)).sum::<usize>(),
         "rows": rows,
-        "capabilities": {
-            "name": capabilities.name,
-            "rows": capabilities.rows,
-            "patternChains": capabilities.pattern_chains,
-            "repeats": capabilities.repeats,
-            "trackMutes": capabilities.track_mutes,
-            "tempoOverrides": capabilities.tempo_overrides,
-            "patternLengthOverrides": capabilities.pattern_length_overrides,
-            "jumps": capabilities.jumps,
-            "loops": capabilities.loops,
-            "rowLabels": capabilities.row_labels,
-            "explicitEnd": capabilities.explicit_end,
-        },
+        "capabilities": crate::state::song_capabilities(),
     }))
 }
 
